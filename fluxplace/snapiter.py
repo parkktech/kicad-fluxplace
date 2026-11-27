@@ -350,6 +350,54 @@ def _via_to_end(src, dst, skip, only=None, locked_ok=False, protect=()):
     return [moved, skipped, touched]
 
 
+def _ends_to_centre(src, dst, skip, only=None, locked_ok=False, protect=()):
+    """W38 last fallback: every same-net track end inside a via's copper (any number of different end points, locked or not when `locked_ok`)
+    moves to the exact via centre, together with the track ends sharing its old point (joints).  Each move is < the via radius (end point
+    only: the other end, width and layer stay), a track left with both ends on the centre is removed.  The via, its pad and every other
+    track are untouched, so only the end's own round cap changes inside via copper; the caller's DRC guard judges clearance, opens and
+    lengths.  `protect` nets are left alone.  -> [tracks moved, skipped [[net, x, y, why]], touched {item uuid: via uuid},
+    moves [[net, layer, locked, from_x, from_y, to_x, to_y, d_mm]]]."""
+    import pcbnew
+    mm = pcbnew.ToMM
+    b = pcbnew.LoadBoard(src)
+    tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+    vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    protect = set(protect or ())
+    done, skipped, touched, moves, gone = 0, [], {}, [], []
+    for v in vias:
+        vid = v.m_Uuid.AsString()
+        if vid in skip or v.GetNetname() in protect or not _only_hit(only, v, mm):
+            continue
+        c = v.GetPosition()
+        r = mm(v.GetWidth(pcbnew.F_Cu)) / 2
+        row = [v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3)]
+        todo = []
+        for t in tracks:
+            if t.GetNetCode() != v.GetNetCode() or not v.IsOnLayer(t.GetLayer()) or t.m_Uuid.AsString() in skip:
+                continue
+            for w in (0, 1):
+                e = t.GetStart() if w == 0 else t.GetEnd()
+                d = math.hypot(mm(e.x - c.x), mm(e.y - c.y))
+                if 0.005 < d <= r:
+                    todo.append((t, w, e, d))
+        if not todo:
+            continue
+        if not locked_ok and (v.IsLocked() or any(t.IsLocked() for t, *_ in todo)):
+            skipped.append(row + ["locked"])
+            continue
+        for t, w, e, d in todo:
+            (t.SetStart if w == 0 else t.SetEnd)(c)
+            moves.append([v.GetNetname(), t.GetLayerName(), bool(t.IsLocked()), round(mm(e.x), 3), round(mm(e.y), 3), round(mm(c.x), 3), round(mm(c.y), 3), round(d, 3)])
+            touched[t.m_Uuid.AsString()] = vid
+            if t.GetStart() == t.GetEnd() and t not in gone:
+                gone.append(t)
+        done += 1
+    for t in gone:
+        b.Remove(t)
+    pcbnew.SaveBoard(dst, b)
+    return [done, skipped, touched, moves]
+
+
 def _via_names(d0):
     """[[net, x, y]] of the vias a DRC report names in its off-centre violations (a description without a [net] is skipped)."""
     out = []
@@ -361,6 +409,11 @@ def _via_names(d0):
             if m and it["description"].startswith("Via") and "pos" in it:
                 out.append([m.group(1), it["pos"]["x"], it["pos"]["y"]])
     return out
+
+
+def centred_count(board, cli="kicad-cli"):
+    """KiCad's own count of `track_not_centered_on_via` errors on `board`."""
+    return sum(v["type"] == CENTRED for v in _report(board, cli)["violations"])
 
 
 def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, protect=()):
@@ -378,7 +431,9 @@ def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, p
     for i in range(iters):
         tmp = dst + f".v{i}.kicad_pcb"
         tmps.append(tmp)
-        moved, skipped, touched = in_fresh_process("fluxplace.snapiter", func, src, tmp, sorted(skip), only, locked_ok, sorted(protect or ()))
+        res = in_fresh_process("fluxplace.snapiter", func, src, tmp, sorted(skip), only, locked_ok, sorted(protect or ()))
+        moved, skipped, touched = res[:3]
+        moves = res[3] if len(res) > 3 else []
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))
@@ -388,7 +443,7 @@ def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, p
         ids |= {touched[u] for u in ids if u in touched}        # the via behind a moved end or a joiner
         log(f"via iter {i}: moved {moved}, new keys {sum(new.values())}")
         if not new:
-            last = (tmp, moved, sum(v["type"] == CENTRED for v in d["violations"]))
+            last = (tmp, moved, sum(v["type"] == CENTRED for v in d["violations"]), moves)
             break
         if not ids - skip:
             break
@@ -399,7 +454,10 @@ def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, p
         if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
             shutil.copy(src_pro, dst_pro)
     _drop_trials(tmps)
-    return {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
+    out = {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
+    if last and last[3]:
+        out["moves"] = last[3]                                  # W38: every end move, one row each (net, layer, locked, from, to, mm)
+    return out
 
 
 def _joiners(src, dst, skip, only=None, locked_ok=False, protect=()):
@@ -460,6 +518,12 @@ def _joiners(src, dst, skip, only=None, locked_ok=False, protect=()):
                 added += 1
     pcbnew.SaveBoard(dst, b)
     return [added, skipped, touched]
+
+
+def centre_run(src, dst, iters=3, log=print, protect=()):
+    """W38 final fallback of the route stage: ends inside via copper (locked fluxplace copper of the earlier stages included) move onto the
+    via centre, DRC-guarded like `run`; see _ends_to_centre.  -> via_run's dict plus "moves"."""
+    return via_run(src, dst, iters, log, func="_ends_to_centre", locked_ok=True, protect=protect)
 
 
 def joiner_run(src, dst, iters=3, log=print, locked_ok=False, protect=()):

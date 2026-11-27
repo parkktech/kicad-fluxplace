@@ -103,13 +103,15 @@ def _unc_nets(path, conn=None):
         return conn(path) if conn else {}
 
 
-def _open_count(board, B):
+def _open_count(board, B, exact=None):
     """The open-connection count of a scorecard: kicad-cli after refill; when kicad-cli has no report (a board it cannot read,
     e.g. a synthetic test fixture) the in-process count, labelled approximate by the caller's `open_approx`."""
     from . import opengate as OG
     try:
         return OG.unconnected(board)
     except (RuntimeError, OSError, ValueError):
+        if exact is not None:                   # B3a: the caller's flag; an approx count cannot pass a gated stage
+            exact.append(False)
         return sum(RC.text_open(B).values())
 
 
@@ -117,6 +119,7 @@ def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR, opengate as OG
     B = RD.load(board)
     f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board), board_path=board)
+    approx = []
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
@@ -125,7 +128,9 @@ def _scorecard(board, cons, spec, waivers=()):
           "ratsnest_mm": card.get("weighted_ratsnest_mm"),
           "overflow": (card.get("congestion") or {}).get("overflow"),
           "fail": card.get("fail"),
-          "open": _open_count(board, B)}
+          "open": _open_count(board, B, approx)}
+    if approx:
+        sc["open_approx"] = True
     sc = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in sc.items() if v is not None}
     return sc, f, codes
 
@@ -167,11 +172,13 @@ def _copy(src, dst):
 
 
 def _sidecar(src, dst):
+    from . import routerules as _RR_
     if os.path.exists(dst) and os.path.exists(src) and os.path.samefile(src, dst):
         return
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
+        _RR_.enforce_project(os.path.splitext(dst)[0] + ".kicad_pro")      # D71dz: hole_to_hole is an error on every stage board
     pn = os.path.splitext(src)[0] + ".pins.json"           # pin-conflict decisions (pins.py) travel with the board: review reports them
     if os.path.exists(pn):
         shutil.copy(pn, os.path.splitext(dst)[0] + ".pins.json")
@@ -358,7 +365,19 @@ def _engine_floorplan(c, d, board, out):
     return {"verdict": "pass", "line": line, "board": out, "engine": _engine_record(out)}
 
 
+def _unmask(c, n, board):
+    """the first copper stage of a run (fanout runs its own copy of this in fanout.run): the mask openings a [thermal.*] block re-cuts after
+    routing leave the working board (thermal.strip_covered), so no router lays copper round a window that is made later; stages after the
+    first find nothing to strip. -> the board to use."""
+    from . import fanout as FO
+    if c is None or not (c.cons or {}).get("thermal"):
+        return board
+    out = FO.strip_thermal_openings(board, c.cons, lambda m: print("pipeline: " + m.replace("fanout: ", "", 1), flush=True), wd=lambda: c.dir(n, "unmask"))
+    return out
+
+
 def st_route_ready(c, n, board):
+    board = _unmask(c, n, board)
     d = c.dir(n, "route-ready")
     waive = []
     for w in c.a.waive or []:
@@ -368,6 +387,10 @@ def st_route_ready(c, n, board):
                         os.path.join(d, "stage.log"))
     sc, f, codes = _scorecard(board, c.cons, c.spec, c.a.waive or [])
     _collision_report(c, d, board)
+    if rc == 0 and sc.get("open_approx"):                  # B3a: an approx measure cannot pass a gated stage
+        return {"verdict": "pass" if c.a.force else "blocked", "board": board, "scorecard": sc,
+                "line": "open count approximate (kicad-cli gave no report): gate cannot pass",
+                "next": ["install/repair kicad-cli, or --force to pass on the in-process count"]}
     if rc == 0:
         return {"verdict": "pass", "line": f"gate passed, {sc.get('fail', 0)} FAIL", "board": board,
                 "scorecard": sc}
@@ -473,7 +496,8 @@ def mask_warning(n_masks):
 
 def st_route(c, n, board):
     """Routing stage (see _st_route): a board-level mask opening present before routing adds a WARN line; never blocks."""
-    warn = mask_warning(mask_openings(board))            # read before any routing
+    board = _unmask(c, n, board)
+    warn = mask_warning(mask_openings(board))            # read before any routing (an opening a [thermal.*] block re-cuts is already off the board)
     res = _st_route(c, n, board)
     if warn and isinstance(res, dict):
         res["next"] = list(res.get("next") or []) + warn
@@ -591,8 +615,9 @@ def _st_route(c, n, board):
     from . import gaps as GP
     try:                                                 # D71cj: rail widths; a net with a zone on the board is not a rail
         PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=GP._zone_nets(board))
-    except Exception:                                    # noqa: BLE001 - no widths is a worse route, not a failed stage
-        PW = {}
+    except Exception as e:                               # noqa: BLE001 - A6: no widths would route rails at the default width: the stage fails
+        return {"verdict": "fail", "board": board, "line": f"route: rail width table failed ({type(e).__name__}: {str(e)[:80]}); "
+                "not routing rails at the default width", "next": []}
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
@@ -995,8 +1020,25 @@ def st_close(c, n, board):
                  else f"; post-route refused ({post['refused'][:60]})")
     if res.get("protection_broken_by"):
         line += f"; protection broken by {res['protection_broken_by']}: fell back to the last verified state"
-    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
-            "released": sorted(res.get("released") or {})}
+    out = {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
+           "released": sorted(res.get("released") or {})}
+    if res["stop"] == "packets":
+        from . import gaps as GP
+        pk = [p.get("packet") for p in res.get("packets") or [] if p.get("packet")]
+        if GP.ai_answer_required(c.cons):
+            out.update(verdict="packets", next=[f"close: answer the AI packets ({len(pk)}) in {os.path.join(c.dir(n, 'close'), 'ai')} and re-run from close"])
+        else:
+            out["ai_unanswered"] = _packet_ua(c, pk, [p.get("gap_id") or os.path.basename(p["packet"]) for p in res["packets"] if p.get("packet")],
+                                              os.path.join(c.dir(n, "close"), "ai"), "the close ai rung")
+            out["line"] += "; " + out["ai_unanswered"]["line"]
+    return out
+
+
+def _packet_ua(c, paths, keys, ai_dir, carried):
+    """B12: classify packets the stage's defaults left unanswered (packets.py): -> the `ai_unanswered` record with classes."""
+    from . import packets as PK, questions as QS
+    ans = {**{str(k): str(v) for k, v in ((c.cons or {}).get("answers") or {}).items()}, **QS.parse_answers(getattr(getattr(c, "a", None), "answer", None))}
+    return PK.resolve(list(zip(paths, keys)), set(keys), ans, carried=carried, ai_dir=ai_dir)
 
 
 def st_tune(c, n, board):
@@ -1049,8 +1091,19 @@ def st_silk(c, n, board):
     summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
     # Silk never copper-touches the board and review runs check_silk itself: what --fix could not fix stays a review finding at its own
     # severity, so a silk FAIL is a WARN here and the flow reaches review (one flow: silk fixes, review judges).
-    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out,
-            "next": [] if rc == 0 else ["silk findings left (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+    left = {}
+    if rc != 0:                                                # B8: what the fit could not fix, by gap kind (gapmap), for the ledger and the review
+        try:
+            from . import gapmap as GM, silk as SK
+            _sc, _cfg, fnd = SK.run_check(out, c.cons, spec=json.load(open(c.spec_path)) if c.spec_path else None)
+            for f in fnd:
+                if f["level"] == "FAIL":
+                    left.setdefault(GM.kind(f["code"]) or "other", {}).setdefault(f["code"], 0)
+                    left[GM.kind(f["code"]) or "other"][f["code"]] += 1
+        except Exception as e:                                 # noqa: BLE001 - the verdict does not depend on this listing
+            left = {"unlisted": {type(e).__name__: 1}}
+    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out, "silk_left": left,
+            "next": [] if rc == 0 else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
 
 
 def st_review(c, n, board):
@@ -1124,6 +1177,14 @@ def st_floorplan(c, n, board):
     bad = rc != 0 or not os.path.exists(out) or line.startswith("floorplan: FAIL") or any(
         l.startswith("INTENT: FAIL") for l in text.splitlines())
     res = dict({"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}, **_wl_record(out))
+    ill = next((l for l in text.splitlines() if l.startswith("floorplan: ILLEGAL")), None)
+    if ill and os.path.exists(out):             # an illegal placement is not a stage board: kept beside, never handed on or resumed from
+        bad_out = out[:-len(".kicad_pcb")] + ".illegal.kicad_pcb"
+        os.replace(out, bad_out)
+        pro = out[:-len(".kicad_pcb")] + ".kicad_pro"
+        if os.path.exists(pro):
+            os.replace(pro, bad_out[:-len(".kicad_pcb")] + ".kicad_pro")
+        return {"verdict": "fail", "line": ill, "board": board, "illegal_board": bad_out, "next": [bad_out]}
     return _residual_fail(res, c, d)
 
 
@@ -1226,7 +1287,7 @@ def st_relieve(c, n, board):
 def st_critroute(c, n, board):
     """AI pre-route of critical nets (critroute.py): verdict "packets" stops the pipeline with exit 5 until actions exist."""
     from . import critroute as CR
-    return CR.stage(c, n, board)
+    return CR.stage(c, n, _unmask(c, n, board))
 
 
 def _file_sha1(path):
@@ -1272,7 +1333,36 @@ def _gate_stop(gate_dir):
         return None
 
 
-def _gate_check(c, n, name, board, kinds, src=None):
+def _defer_gate(res, d, later):
+    """A gate that ends with only findings a later stage owns (gaps.GATE_DEFER) does not stop the flow: verdict warn, stop
+    "deferred", the rows kept in state and in stop.json. `res`: gate record with res["left"] rows. -> deferred rows or None."""
+    from . import gaps as GP
+    if res.get("review_failed") or res.get("stop") == "clean":
+        return None
+    rows = GP.deferred_left(res.get("left"), later)
+    if rows:
+        _stamp_stop(d, {"deferred": rows})
+    return rows
+
+
+def _stamp_stop(d, extra):
+    p = os.path.join(d, "stop.json")
+    try:
+        with open(p) as fh:
+            s = json.load(fh)
+        s.update(extra)
+        with open(p, "w") as fh:
+            json.dump(s, fh, indent=1)
+    except (OSError, ValueError):
+        pass
+
+
+def _deferred_line(rows):
+    from collections import Counter
+    return ", ".join(f"{k} {v}" for k, v in sorted(Counter(g["kind"] for g in rows).items()))
+
+
+def _gate_check(c, n, name, board, kinds, src=None, later=()):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
     from . import gaps as GP, calllog as CL
@@ -1285,17 +1375,31 @@ def _gate_check(c, n, name, board, kinds, src=None):
         return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
                 "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
     stop = r["stop"]
+    if stop == "manifest_stale":                            # B1: refused input; the incumbent board stays
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: {r['reason']}"[:200], "next": r.get("diff", [])[:10],
+                "gate": {"kinds": kinds, "stop": stop, "dir": d}}
     if src:
         _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
+    pk = [p.get("packet") for p in r.get("packets") or [] if p.get("packet")]
+    unans = verdict == "packets" and not GP.ai_answer_required(c.cons)          # [ai] answer = optional: defaults used, the flow goes on
+    ua = {"ai_unanswered": _packet_ua(c, pk, [p.get("gap_id") or os.path.basename(p["packet"]) for p in r.get("packets") or [] if p.get("packet")],
+                                      os.path.join(d, "ai"), "the next stage's gap loop")} if unans else {}
+    rows = _defer_gate(r, d, later)
+    if rows:                                                # only findings a later stage owns: the flow goes on
+        return {"verdict": "warn", "board": r["best"], "line": line.replace(f": {stop},", ": deferred,", 1) + f"; carried to {', '.join(sorted({o for g in rows for o in GP.GATE_DEFER[g['kind']] if o in later}))}: {_deferred_line(rows)}",
+                "next": [], "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "deferred": rows}, **ua}
+    if unans:
+        return {"verdict": "warn", "board": r["best"], "line": line + "; " + ua["ai_unanswered"]["line"], "next": [],
+                "gate": {"kinds": kinds, "stop": stop, "dir": d}, **ua}
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
             "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
             + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
                for p in r.get("packets") or [] if p.get("kind") == "session"]}
 
 
-def _gate_measure(c, n, name, board, kinds, src=None):
+def _gate_measure(c, n, name, board, kinds, src=None, later=()):
     """A5: the gate verdict of `board` for `kinds` by measurement only (gaps.gate_measure). Same record shape as _gate_check."""
     from . import gaps as GP
     d = c.dir(n, "gate")
@@ -1307,6 +1411,10 @@ def _gate_measure(c, n, name, board, kinds, src=None):
     if src:
         _stamp_gate(d, src)
     ok = r["stop"] == "clean"
+    rows = _defer_gate(r, d, later)
+    if rows:
+        return {"verdict": "warn", "board": board, "line": f"gate {name} ({', '.join(kinds)}): deferred, {_deferred_line(rows)}", "next": [],
+                "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "left": [], "deferred": rows}}
     return {"verdict": "pass" if ok else "fail", "board": board,
             "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope"
                     + (f", review source(s) failed: {', '.join(r['review_failed'])}" if r.get("review_failed") else "") + f", opens {r['start']['opens']}",
@@ -1321,7 +1429,34 @@ SEED_STAGES = ("pairs", "tune")
 RELEASING_STAGES = ("tune",)
 
 
-def _commit_point(name, prev, res):
+def _pcbnew_state_guard(name, res):
+    """After a stage that returned a board: one LoadBoard must still give a BOARD.  A board.Remove() of a discarded item leaves every later
+    LoadBoard in the process a raw SwigPyObject (use Delete, or run the code in freshproc); without pcbnew nothing is checked."""
+    p = res.get("board")
+    if not p or not os.path.isfile(p) or res.get("verdict") not in ("pass", "warn"):
+        return res
+    try:
+        import pcbnew
+    except ImportError:
+        return res
+    try:
+        lb = pcbnew.LoadBoard(p)
+    except Exception:
+        return res                                         # an unreadable board is the stage gates' business, not this check's
+    kind = type(lb).__name__
+    if lb is None or kind == "BOARD":                      # None: a stub / unparsable file (tests)
+        return res
+    return dict(res, verdict="fail", line=f"pcbnew in-process state broken after {name}: LoadBoard gave {kind}, not BOARD "
+                f"(a Remove() of a discarded item? use Delete or fresh process); stage line was: {res.get('line', '')}")
+
+
+def _call_stage(name, c, n, board):
+    """B4: run one stage in a fresh interpreter (freshproc.run_stage); the pipeline process never touches pcbnew state a stage dirtied."""
+    from . import freshproc
+    return freshproc.run_stage(name, c, n, board, FUNCS)
+
+
+def _commit_point(name, prev, res, cons=None):
     """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
     colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
     the input path (a stage that edited its board in place): the sealed manifest is the baseline then."""
@@ -1329,6 +1464,14 @@ def _commit_point(name, prev, res):
     new = res.get("board")
     if not new or not os.path.isfile(new) or not os.path.isfile(prev):
         return res
+    if cons is not None and os.path.abspath(new) != os.path.abspath(prev):          # B1: new copper off its net contract (RF, rails, pairs)
+        try:
+            ct = BW.contract_check(prev, new, cons)
+        except Exception as e:                                          # noqa: BLE001 - an unchecked commit must not pass
+            ct = {"ok": False, "why": f"contract check crashed: {type(e).__name__}: {str(e)[:100]}"}
+        if not ct["ok"]:
+            return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {ct['why']}"[:200],
+                        next=[f"{name}: output not adopted ({ct['why'][:150]}); the net stays open with its gap, never off its contract"])
     man = BW.load_manifest(prev)
     if not man["nets"] and name not in SEED_STAGES:
         return res                                                      # nothing protected yet
@@ -1345,7 +1488,8 @@ def _commit_point(name, prev, res):
         if man["nets"][x].get("why") != "locked":
             complete.setdefault(x, man["nets"][x].get("why", "kept"))
     try:
-        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
+        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man,
+                      allow=res.get("authorized") if name == "trace-finish" else None)      # B8: trace-finish writes only the items it names      # the stage ran: items decide, not the sha
     except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
         return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
                     next=[f"{name}: output not adopted"])
@@ -1353,6 +1497,17 @@ def _commit_point(name, prev, res):
         return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {v['why']}"[:200],
                     next=[f"{name}: output not adopted ({v['why'][:150]}); release the pair explicitly (boardwrite.release) to re-lay it"])
     return res
+
+
+def _set_aside_evidence(c, stages, i0, board):
+    """B1: an allowed manifest re-seed changed the input: the gate directories of every stage from `i0` on are set aside (`.stale-<sha>`),
+    never reused as evidence for the new input."""
+    sha = _file_sha1(board)[:10]
+    for k in range(i0, len(stages)):
+        gd = os.path.join(c.work, f"{k + 1}-gate")
+        if os.path.isdir(gd):
+            os.rename(gd, gd + ".stale-" + sha)
+            print(f"pipeline: gate evidence of {stages[k]} set aside ({os.path.basename(gd)}.stale-{sha})", flush=True)
 
 
 def st_pairs(c, n, board):
@@ -1585,8 +1740,9 @@ def _ev_stage(kind, i, name, **kw):
     from . import events as EV
     EV.emit(kind, stage=name, n=i, name=name, **kw)
     if kind == "stage_start":
-        from . import eta as ETA
+        from . import eta as ETA, liveview as LV
         ETA.stage_start(name)
+        LV.narrate(name, LV.START_TEXT.get(name) or f"Running the {name} stage. Done when it reports pass or fail.", "start")
 
 
 def _ev_stage_end(i, name, res, board, secs):
@@ -1596,14 +1752,82 @@ def _ev_stage_end(i, name, res, board, secs):
         metrics = SN.active_metrics()       # the forced stage-end snapshot's board metrics
     EV.emit("stage_end", stage=name, n=i, name=name, verdict=res.get("verdict"),
             line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board, metrics=metrics)
-    from . import eta as ETA
+    from . import eta as ETA, liveview as LV
     ETA.stage_end(name, secs, res.get("verdict"))
+    line_part = f" {str(res.get('line', ''))[:200]}." if res.get("line") else ""
+    LV.narrate(name, f"{name} finished: {res.get('verdict')}.{line_part} Took {secs:.1f} s.", "end")
+
+
+def _link_lib(workdir, board):
+    """Symlink workdir/lib to the project lib (nearest ancestor of board holding lib/3dmodels).
+
+    Stage boards sit at <workdir>/<stage>/board.kicad_pcb, so ${KIPRJMOD}/../lib resolves to <workdir>/lib.
+    -> link path, or None when no project lib is found or the link cannot be made.
+    """
+    d = os.path.dirname(os.path.abspath(board))
+    found = None
+    for _ in range(8):
+        if os.path.isdir(os.path.join(d, "lib", "3dmodels")):
+            found = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    if found is None:
+        return None
+    target = os.path.realpath(os.path.join(found, "lib"))
+    link = os.path.join(workdir, "lib")
+    if os.path.lexists(link):
+        return link
+    try:
+        os.symlink(target, link)
+    except OSError as e:
+        print(f"pipeline: lib link not made ({e})", flush=True)
+        return None
+    return link
+
+
+def _exec_stage(c, n, name, board, later=()):
+    """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
+    commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
+    from . import gaps as GP
+    gd = c.dir(n, "gate")
+    gk = GP.gate_kinds(c.cons, name)
+    best_g = os.path.join(gd, "best.kicad_pcb")
+    if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
+        rp = os.path.join(gd, "resume.kicad_pcb")
+        for ext in ("", ".kicad_pro", ".kicad_dru"):
+            if os.path.exists(best_g + ext):
+                shutil.copy2(best_g + ext, rp + ext)
+        res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
+    else:
+        if gk and os.path.isdir(gd) and os.listdir(gd):
+            # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
+            os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
+            gd = c.dir(n, "gate")
+        from . import liveview as LV
+        with LV.watching(name):                            # N12: a heartbeat line every few seconds while the stage works
+            res = _call_stage(name, c, n, board)   # B4: the one stage call site (fresh interpreter, [flow] timeout)
+        res.setdefault("verdict", "pass")
+        if res["verdict"] in ("pass", "warn"):
+            res = _commit_point(name, board, res, c.cons)   # A3 (+B1 contract check): only a stage that ran (a reused gate board was verified by close)
+    res.setdefault("verdict", "pass")
+    res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
+    if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
+        g = _gate_check(c, n, name, res.get("board") or board, gk, src=board, later=later)
+        res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
+        if g["verdict"] == "packets":
+            res["gate_packets"] = True
+    return res
 
 
 def run(a):
     """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked). Emits the event stream."""
     work = os.path.abspath(a.workdir)
     os.makedirs(work, exist_ok=True)
+    if getattr(a, "board", None):
+        _link_lib(work, a.board)
     saved = {k: os.environ.get(k) for k in _EV_ENV}
     t0 = time.time()
     _ev_call(_ev_begin, a, work)
@@ -1687,6 +1911,10 @@ def _run(a):
             board = os.path.abspath(a.board)
         for k in STAGES_[i0:]:
             st["stages"].pop(k, None)
+    if os.path.isfile(board) and not os.path.isfile(os.path.splitext(board)[0] + ".kicad_pro"):
+        # ledger 2026-11-25: without its .kicad_pro KiCad runs default rules (+1100 false errors, FANOUT_FAIL 138/142)
+        raise SystemExit(f"pipeline: REFUSED: {board} has no sibling {os.path.splitext(os.path.basename(board))[0]}.kicad_pro "
+                         "(the project rules would silently default); copy the board with its .kicad_pro")
     if STAGES_[i0] in ("ready", "modules", "floorplan") and a.constraints:
         board = _apply_lock_at(a, work, board)         # [lock.at] is authoritative before any placement stage
         st["board"] = board
@@ -1706,7 +1934,12 @@ def _run(a):
                 _man = TF_._beating("manifest seed", lambda: BW_.seed_from_board(board, c.cons, log=print), stage="pipeline")
                 print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
             elif BW_.is_stale(board, _man):
-                BW_.fresh_manifest(board, log=print)
+                _man = BW_.fresh_manifest(board, log=print)       # B1: refused (ManifestStale) unless `versions accept` recorded this file
+                if _man.get("reseeded") is not None:
+                    _set_aside_evidence(c, STAGES_, i0, board)
+        except BW_.ManifestStale as e:
+            print(f"pipeline: {e} (exit 5, no stage started)", flush=True)
+            return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
     led = _Ledger(work, STAGES_, i0)
@@ -1715,20 +1948,26 @@ def _run(a):
     for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
         gk_prev = GP_.gate_kinds(c.cons, k)
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
-        if gk_prev and gst.get("stop") != "clean" and a.board:
+        if gk_prev and gst.get("stop") not in ("clean", "deferred") and a.board:
             # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
-            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds
-            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
+            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds.
+            # Ledger 2026-11-25: a finding owned by a stage before --from was handled by that stage's run, which this run
+            # skips, so it is deferred (warn, recorded), not an exit 5. Owners after --from are deferred as before.
+            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board, later=STAGES_)
             gst = {"stop": g["gate"]["stop"]}
+            if g["gate"].get("deferred"):
+                gst["deferred"] = g["gate"]["deferred"]
             st["stages"].setdefault(k, {})["gate"] = dict(gst)
-            if g["verdict"] == "pass":
+            if g["verdict"] in ("pass", "warn"):
+                if g["verdict"] == "warn":
+                    print(f"pipeline: {g['line']}", flush=True)
                 continue
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({g['gate']['stop']}): {g['line']}; fix it in that stage: {sp} (exit 5, no stage started)")
             for r in g["gate"].get("left", [])[:10]:
                 print(f"  gap {r['id']} {r['kind']} {r.get('nets')} at {r.get('at')}")
             return 5
-        if gk_prev and gst.get("stop") != "clean":
+        if gk_prev and gst.get("stop") not in ("clean", "deferred"):
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
             return 5
@@ -1739,30 +1978,7 @@ def _run(a):
         _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
         led.before(prev)
-        gd = c.dir(i + 1, "gate")
-        gk = GP_.gate_kinds(c.cons, name)
-        best_g = os.path.join(gd, "best.kicad_pcb")
-        if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
-            rp = os.path.join(gd, "resume.kicad_pcb")
-            for ext in ("", ".kicad_pro", ".kicad_dru"):
-                if os.path.exists(best_g + ext):
-                    shutil.copy2(best_g + ext, rp + ext)
-            res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
-        else:
-            if gk and os.path.isdir(gd) and os.listdir(gd):
-                # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
-                os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
-                gd = c.dir(i + 1, "gate")
-            res = FUNCS[name](c, i + 1, board)
-            res.setdefault("verdict", "pass")
-            if res["verdict"] in ("pass", "warn"):
-                res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
-        res.setdefault("verdict", "pass")
-        if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
-            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
-            res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
-            if g["verdict"] == "packets":
-                res["gate_packets"] = True
+        res = _exec_stage(c, i + 1, name, board, STAGES_[i + 1:])
         led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
@@ -1770,6 +1986,19 @@ def _run(a):
             from . import questions as QS
             QS.inherit(prev, res["board"])
         board = res.get("board", board)
+        if res.get("ai_unanswered"):
+            ua = res["ai_unanswered"]
+            res["line"] = res.get("line", "")
+            note = ua.get("line") or f"{ua['n']} packets, defaults used"
+            if ua["line"] not in res["line"]:
+                res["line"] += "; " + note
+            st.setdefault("ai_unanswered", {})[name] = {"n": ua["n"], "packets": ua["packets"], "classes": ua.get("classes"), "note": note}
+            with open(led.path, "a") as fh:
+                fh.write(f"{name}: {note}: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
+            print(f"pipeline: {name}: {note} (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+            if ua.get("questions") and res["verdict"] != "questions":       # B12: an owner decision suspends the flow (exit 3), resumable
+                res["verdict"] = "questions"
+                res["next"] = [f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]]
         if res.get("undocumented"):
             st["undocumented"] = _clip(res["undocumented"], 200)
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
@@ -1777,6 +2006,8 @@ def _run(a):
                               "dir": f"{i + 1}-{name}", "board": board}
         if res.get("gate"):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
+            if res["gate"].get("deferred"):
+                st["stages"][name]["gate"]["deferred"] = res["gate"]["deferred"]      # review reads these: findings a later stage owns
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         if name == "route":
@@ -1812,7 +2043,7 @@ def _run(a):
             if res.get("gate_packets"):
                 print(f"pipeline: gate {name} is open; the flow stops here (exit 5), later stages not started")
             else:
-                print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
+                print(f"pipeline: {name} wrote AI packets ([ai] answer = required); answer them and re-run from {name} (exit 5)")
             break
         if res["verdict"] == "questions":
             rc = 3

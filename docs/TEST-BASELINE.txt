@@ -1,3 +1,1 @@
-# Known failures of mainline w16merge 11ccb77 (2026-11-25, /usr/bin/python3, 2999 passed). Fix them; never add to this list.
-tests/test_routepar.py::test_pipeline_from_stage_creates_the_state
-tests/test_thermal.py::test_post_adds_a_mask_opening_on_the_side
+# Known failures of mainline: none (w47-gatehealth, 2026-11-26: the 2 former entries fixed, see commits). Never add to this list.

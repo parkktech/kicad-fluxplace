@@ -148,18 +148,26 @@ def test_a_complete_pair_is_protected_whole(tmp_path):
     assert BW.verify(base, grown)["changed"] == ["D_P"]                                       # an added item changes a pair: it was complete
 
 
-def test_a_stale_manifest_is_refused_and_reseeded_loudly(tmp_path):
+def test_a_stale_manifest_is_refused_with_the_diff_and_reseeded_only_when_the_registry_recorded_it(tmp_path, monkeypatch):
     base = board(tmp_path, "base.kicad_pcb", BASE())
-    BW.seed(base)
+    old = BW.seed(base)
     assert not BW.is_stale(base)
-    with open(base, "a") as fh:
-        fh.write("\n")                                                                          # edited outside the flow
+    txt = open(base).read().replace("(end 30 20)", "(end 30 22)", 1)                            # edited outside the flow
+    open(base, "w").write(txt)
     assert BW.is_stale(base)
     r = BW.verify(base, base)
     assert not r["ok"] and "MANIFEST_STALE" in r["why"]
     msgs = []
-    man = BW.fresh_manifest(base, msgs.append)
-    assert msgs and "stale" in msgs[0] and not BW.is_stale(base) and set(man["nets"]) == {"D_P", "D_N"}
+    reg = tmp_path / "boards.json"
+    monkeypatch.setenv("FLUXPLACE_VERSIONS", str(reg))
+    reg.write_text(json.dumps({"versions": {"W1": {"history": [{"board": "x.kicad_pcb"}]}}}))      # an entry with no sha explains nothing
+    with pytest.raises(BW.ManifestStale) as ei:
+        BW.fresh_manifest(base, msgs.append)
+    assert any(ln.startswith("D_P: -1 +1 items") for ln in ei.value.diff) and any("D_P: -1 +1" in m for m in msgs)
+    assert BW.is_stale(base) and BW.load_manifest(base)["nets"] == old["nets"]                      # the old manifest is kept
+    reg.write_text(json.dumps({"versions": {"W1": {"history": [{"board": "x.kicad_pcb", "sha": BW.file_sha(base)}]}}}))
+    man = BW.fresh_manifest(base, msgs.append)                                                        # `versions accept` recorded this file
+    assert not BW.is_stale(base) and set(man["nets"]) == {"D_P", "D_N"} and man["reseeded"]
 
 
 def test_a_stage_that_edits_its_input_in_place_is_checked(tmp_path):
@@ -179,3 +187,27 @@ def test_via_identity_includes_the_layer_pair(tmp_path):
     f1.write_text(head + via("B.Cu") + ")\n")
     f2.write_text(head + via("In1.Cu") + ")\n")
     assert BW.net_items(str(f1)) != BW.net_items(str(f2))
+
+
+# ---- B8: trace-finish writes only the items it names (no stage-wide release) --------------------------------------------------
+
+def test_trace_finish_may_drop_a_named_duplicate_on_a_protected_net_but_not_any_other_segment(tmp_path):
+    from fluxplace import tracefinish as TF
+    base = board(tmp_path, "base.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (20, 20), (30, 20), True)
+                 + seg("D_P", (30, 20), (40, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    BW.seed(base)
+    nodup = board(tmp_path, "nodup.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (30, 20), (40, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    h = BW.net_rows(base)["D_P"][0][0]
+    # the clean pass names the exact duplicate it removed: authorized, committed
+    ok = TF.authorize(base, nodup, [["D_P", h, "duplicate"]])
+    assert BW.verify(base, nodup, allow=ok)["ok"]
+    assert not BW.verify(base, nodup)["ok"]                                  # without the write set the same change is PROTECTED_CHANGED
+    # a different, non-duplicate segment deleted on the protected net: nothing authorizes it
+    gone = board(tmp_path, "gone.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (20, 20), (30, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    bad = TF.authorize(base, gone, [["D_P", h, "duplicate"]])               # the named hash is a different item than the one deleted
+    r = BW.verify(base, gone, allow=bad)
+    assert not r["ok"] and "PROTECTED_CHANGED D_P" in r["why"]
+    # and a stage-level check: the commit point refuses it as well
+    from fluxplace import pipeline as PL
+    res = PL._commit_point("trace-finish", base, {"verdict": "pass", "board": gone, "authorized": bad})
+    assert res["verdict"] == "fail" and "PROTECTED_CHANGED" in res["line"]

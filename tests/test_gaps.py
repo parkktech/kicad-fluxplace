@@ -3,6 +3,8 @@ from fluxplace import procs as _procs_mod
 import hashlib, json, os, shutil, sys
 from collections import Counter
 import pytest
+from fluxplace import refusal as refusal_mod
+from fluxplace import closeexec as CX
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import types
 from fluxplace import gaps as GP
@@ -179,6 +181,8 @@ def _rung(mode):
         shutil.copy(base, out)
         if mode == "fix":
             open(out, "w").write("fixed")
+        if mode == "other":
+            open(out, "w").write("changed")
         return {"mode": mode}
     return fn
 
@@ -527,7 +531,7 @@ def test_call_rung_exit_and_timeout(monkeypatch, tmp_path):
         GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
 
     def slow(*a, **k):
-        assert k["timeout"] == 60 + 120
+        assert k["timeout"] == 60 + CX.KILL_SLACK_S          # B6a: bounded slack, no more +120 s
         raise subprocess.TimeoutExpired(cmd="x", timeout=k["timeout"])
     monkeypatch.setattr(_procs_mod, "run", slow)
     with pytest.raises(RuntimeError, match="rung timeout"):
@@ -723,7 +727,7 @@ def test_classify_mask_opening_bridge():
 
 
 # ---- PHASE3A (D71cj a): review findings as gap kinds, score terms, protect only audit-complete pairs ----
-from fluxplace import power as _PW, boardfile as _BF, preroute as _PR, routediag as _RD
+from fluxplace import power as _PW, boardfile as _BF, preroute as _PR, routediag as _RD, qualaudit as _QA
 
 
 def test_score_counts_new_kinds():
@@ -775,10 +779,12 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
     ]
     monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, rows))
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
-    monkeypatch.setattr(_PW, "check", lambda facts, cons, dc=None: [
+    monkeypatch.setattr(_PW, "check", lambda facts, cons, dc=None, **k: [
         {"code": "POWER_WIDTH", "refs": ["VBAT"], "msg": "VBAT narrow"},
         {"code": "POWER_CURRENT_UNKNOWN", "refs": ["X"], "msg": "warn"}])
     monkeypatch.setattr(_RD, "load", lambda board: None)
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: ([], set(), None))
+    monkeypatch.setattr(_QA, "rf_rows", lambda *a, **k: [])
     monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U3"], "msg": "U3 blocked"}])
     cons = {"not_pairs": ["SENSE_ADC_P", "SENSE_ADC_N"]}
     rows_out, failed = GP.review_gaps("b.kicad_pcb", cons)
@@ -789,11 +795,35 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
         "pair:USB_D_P/USB_D_N", "pair:Y_P/Y_N", "pair:Z_P/Z_N"}
 
 
+def test_rf_net_at_signal_width_on_inner_layer_is_an_rf_impedance_gap_and_the_gate_is_not_clean(monkeypatch):
+    from test_review import STACK6
+    monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
+    monkeypatch.setattr(_PW, "check", lambda *a, **k: [])
+    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, []))
+    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [])
+    monkeypatch.setattr(_RD, "load", lambda board: {"pads": [{"net": "RF_X"}], "zones": []})
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: (STACK6, {"In1.Cu", "In4.Cu"}, None))
+    monkeypatch.setattr(_QA, "tracks_of", lambda B, net: {"length": 30.0, "vias": 0, "layers": {"In2.Cu": 30.0},
+                                                          "segments": [("In2.Cu", 0.15, 30.0)]})
+    rows_out, failed = GP.review_gaps("b.kicad_pcb", {"rf": {"nets": ["RF_X"]}})
+    assert failed == [] and [(g["kind"], g["class"], g["nets"]) for g in rows_out] == [("rf-impedance", "rf", ["RF_X"])]
+    assert "rf-impedance" in GP.gate_kinds({}, "route") and "net-contract" in GP.gate_kinds({}, "route")
+    assert GP.in_scope(rows_out[0], GP.gate_kinds({}, "route")) and GP.DISPATCH["rf-impedance"] == ["rfroute"]
+    assert GP.deferred_left(rows_out, ("tune", "route", "close")) is None      # no later stage owns it: the gate stays closed
+
+
+def test_impedance_off_nets_is_unknown_not_empty_on_exception(monkeypatch):
+    monkeypatch.setattr(_BF, "facts_from_file", lambda board: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert GP.impedance_off_nets("b.kicad_pcb", {}) is None
+
+
 def test_review_gaps_isolates_failing_source(monkeypatch):
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
     monkeypatch.setattr(_PW, "check", lambda facts, cons: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, []))
     monkeypatch.setattr(_RD, "load", lambda board: None)
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: ([], set(), None))
+    monkeypatch.setattr(_QA, "rf_rows", lambda *a, **k: [])
     monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U9"], "msg": "m"}])
     rows_out, failed = GP.review_gaps("b.kicad_pcb", {})
     assert [g["kind"] for g in rows_out] == ["pin-escape"] and failed == ["power"]
@@ -1270,3 +1300,120 @@ def test_packets_are_written_after_every_kind_had_its_own_rungs(monkeypatch, tmp
     ai = [i for i, (_k, m) in enumerate(seq) if m == "ai"]
     assert [seq[i][0] for i in ai] == ["open-pour", "open-free"] and ai[0] > max(i for i, (_k, m) in enumerate(seq) if m != "ai")
     assert res["stop"] == "packets"
+
+
+# ---- B6 step 0: refusal record ----
+
+def test_accept_trace_lists_every_rule_same_verdict(guard):
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    cand = _mm(opens=3, err_keys=[("clearance", ("x",))], gaps=[_g("a"), _g("b")])
+    plain = _accept(guard, base, cand)
+    trace = []
+    got = GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], trace=trace)
+    assert got == plain and plain[1] == "R2 new DRC key clearance"
+    st = {t["rule"]: t["status"] for t in trace}
+    assert st["R2"] == st["R4"] == st["target"] == "fail" and st["R0"] == st["R1"] == st["R6:rf"] == "pass"
+    assert {"review", "R6:hs_pair", "R6:power", "R6:power_mag", "R3"} <= set(st)
+
+
+def test_crashed_check_is_unknown_and_refuses(monkeypatch, guard):
+    def boom(*a, **k):
+        raise RuntimeError("snapshot died")
+    monkeypatch.setattr(GP.audit, "connectivity_diff", boom)
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    cand = _mm(opens=2, gaps=[_g("b")])                       # would be accepted if R0 simply passed
+    trace = []
+    ok, why = GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], trace=trace)
+    r0 = next(t for t in trace if t["rule"] == "R0")
+    assert not ok and r0["status"] == "UNKNOWN" and why.startswith("UNKNOWN R0")
+    assert all(t["status"] == "pass" for t in trace if t["rule"] != "R0")     # UNKNOWN is not an ordinary violation
+    rec = refusal_mod.record(ctx={"rung": "x"}, rules=trace, base_m=base, cand_m=cand, cand_gaps=cand["gaps"], target_ids=["a"])
+    assert rec["failing"] == ["R0"]
+    with pytest.raises(RuntimeError):                         # the untraced path is unchanged: the crash propagates
+        GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"])
+
+
+def test_close_writes_refusal_records_and_histogram(monkeypatch, loop):
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("other"))
+    for r in GP.DISPATCH["open-free"]:
+        if r != "patch":
+            monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
+    out = []
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=out.append)
+    recs = refusal_mod.load(refusal_mod.path(loop["work"]))
+    cand = [r for r in recs if r["rung"] == "patch"][0]
+    for f in ("run", "attempt", "kind", "rung", "why", "targets", "rules", "blockers", "score_delta", "target", "drc",
+              "changed", "failing", "refused"):
+        assert f in cand
+    assert {"R4", "target"} <= set(cand["failing"]) and cand["score_delta"]["opens"]["delta"] == 0
+    assert cand["target"]["closed_all"] is False and cand["drc"] == {"added": [], "removed": []}
+    assert cand["changed"]["status"] == "UNKNOWN"             # a text stub is not a board: UNKNOWN, no crash
+    assert any(r["failing"] == ["no_change"] for r in recs)   # candidate-less refusals are recorded too
+    assert any(l.startswith("close refusals ") and "score-equal-no-other-failure=" in l for l in out)
+    h = refusal_mod.histogram(recs)
+    assert h["n"] == len(recs) and h["first"]["R4"] >= 1
+
+
+def test_histogram_buckets():
+    r = lambda failing, d: {"failing": failing, "score_delta": {"opens": {"delta": d}}}      # noqa: E731
+    h = refusal_mod.histogram([r(["R4"], 0), r(["R4", "target"], 0), r(["R2", "R4"], 1), r(["R0"], 0)])
+    assert h["first"] == {"R4": 2, "R2": 1, "R0": 1} and h["any"]["R4"] == 3 and h["score_equal_only"] == 1
+
+# ---- W39: krt_locked (locked FREE copper of plain blockers is unlaid in a session, target + displaced nets re-routed) ----
+
+def _lock_fakes(monkeypatch, tmp_path, blockers, commit=True):
+    from fluxplace import handroute as HR, lockpolicy as LP
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("x")
+    shoved, routed = [], []
+    js_nets = blockers
+
+    def run(cmd, **k):
+        js = cmd[cmd.index("--json-out") + 1]
+        json.dump({"blockers": [{"net": "HPL_OUT", "blocked_by": [{"net": n} for n in js_nets]}]}, open(js, "w"))
+        return _cp(0)
+    monkeypatch.setattr(HR, "session_begin", lambda b, w, **k: open(w, "w").write("s"))
+    monkeypatch.setattr(HR, "open_nets", lambda p, constraints=None, **k: {"connections": [{"net": "HPL_OUT", "a": {"x": 0, "y": 0}, "b": {"x": 10, "y": 5}}]})
+    monkeypatch.setattr(HR, "shove", lambda w, net, **k: shoved.append((net, k.get("window_box"), k.get("allow_locked"))))
+    monkeypatch.setattr(HR, "session_commit", lambda w, out, **k: (open(out, "w").write("done"), {"accepted": commit, "reasons": ["R1 worse"]})[1])
+    monkeypatch.setattr(GP, "_route_net", lambda w, net, layers, ctx: routed.append(net))
+    monkeypatch.setattr(GP, "_krt_cmd", lambda board, out, nets, ctx, layers=None: ["krt", "--nets", *nets])
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: {"HPL_OUT"})
+    monkeypatch.setattr(GP, "_protect_levels", lambda b, c: {"HPL_OUT": LP.FREE, "I2C_SDA": LP.FREE, "RX_SEC_N": LP.SOFT, "AVDD": LP.FREE, "VMODEM": LP.FREE})
+    monkeypatch.setattr(GP, "_rail_widths", lambda *a, **k: {"VMODEM": 0.4})
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(LP, "level", lambda n, cons, names=None: {"RX_SEC_N": LP.SOFT}.get(n, LP.FREE))
+    monkeypatch.setattr(_procs_mod, "run", run)
+    ctx = {"cons": {}, "cons_path": None, "work": str(tmp_path), "budget_s": 60, "protect": {"RX_SEC_N"}}
+    return base, ctx, shoved, routed
+
+
+def test_krt_locked_rips_only_free_plain_blockers_then_reroutes_target_first(monkeypatch, tmp_path):
+    base, ctx, shoved, routed = _lock_fakes(monkeypatch, tmp_path, ["RX_SEC_N", "I2C_SDA", "VMODEM", "GND", "AVDD"])
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_locked(str(base), str(out), [dict(_g("a"), nets=["HPL_OUT"])], ctx)
+    assert res["status"] == "ran" and res["commit"] and res["ripped"]["HPL_OUT"] == ["HPL_OUT", "I2C_SDA", "AVDD"]
+    assert [s[0] for s in shoved] == ["HPL_OUT", "I2C_SDA", "AVDD"]       # soft pair leg, rail and zone net are never ripped
+    assert shoved[0][1] == (-2.0, -2.0, 14.0, 9.0) and not any(s[2] for s in shoved)    # a box around the connection; no allow_locked opt-in
+    assert routed == ["HPL_OUT", "I2C_SDA", "AVDD"]                        # target first, then the displaced nets
+    assert open(out).read() == "done"
+    assert not [p for p in os.listdir(tmp_path) if "session" in p]
+
+
+def test_krt_locked_refused_commit_writes_nothing(monkeypatch, tmp_path):
+    base, ctx, shoved, routed = _lock_fakes(monkeypatch, tmp_path, ["I2C_SDA"], commit=False)
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_locked(str(base), str(out), [dict(_g("a"), nets=["HPL_OUT"])], ctx)
+    assert res["status"].startswith("refused: R1 worse") and not os.path.exists(out)
+
+
+def test_krt_locked_is_a_free_open_rung_after_krt_region():
+    d = GP.DISPATCH["open-free"]
+    assert d.index("krt_locked") == d.index("krt_region") + 1 and GP.LEVEL["krt_locked"] == "L1" and "krt_locked" in GP.RUNGS
+
+
+def test_krt_blockers_reads_the_summary(tmp_path):
+    js = tmp_path / "s.json"
+    json.dump({"blockers": [{"net": "A", "blocked_by": [{"net": "B"}, {"net": "C"}, {"net": "B"}]}, {"net": "D", "blocked_by": [{"net": "E"}]}]}, open(js, "w"))
+    assert GP.krt_blockers(str(js), "A") == ["B", "C"] and GP.krt_blockers(str(js), "Z") == [] and GP.krt_blockers(str(tmp_path / "no"), "A") == []

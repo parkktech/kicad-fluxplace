@@ -174,7 +174,7 @@ class Solver:
         for i in range(max(1, int(L / 0.1)) + 1):
             s = i / max(1, int(L / 0.1))
             x, y = a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s
-            z = self.ob.keepout_hit(x, y, frozenset({layer}))
+            z = self.ob.keepout_hit(x, y, frozenset({layer}), net=net, r=hw)
             if z:
                 out.append((-hw, f"keep-out {z}"))
                 break
@@ -207,7 +207,7 @@ class Solver:
             hx, hy, hr = self.hl[key]
             g = math.hypot(hx - p[0], hy - p[1])
             out.append((min(g - hr - r - pr["hclr"], g - hr - pr["drill"] / 2 - pr["h2h"]), f"hole of {key[0]}"))
-        if not self.isolated and self.ob.keepout_hit(p[0], p[1], self.all_layers, vias=True):
+        if not self.isolated and self.ob.keepout_hit(p[0], p[1], self.all_layers, vias=True, net=net, r=r):
             out.append((-r, "keep-out"))
         if not self.isolated and not GM.in_outline(self.B, (p[0] - r, p[1] - r, p[0] + r, p[1] + r), pr["edge"]):
             out.append((-r, "board edge"))
@@ -537,12 +537,50 @@ def _sides_of(q):
     return {"F" if l == "F.Cu" else "B" for l in q["layers"] if l in ("F.Cu", "B.Cu")} or {"F", "B"}
 
 
-def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
+NUDGE_REACH, NUDGE_STEP, NUDGE_TRY = 1.0, 0.25, 16
+
+
+def _nudge_dense(B, cons, spec, pr, res, fixed, L, known, moved):
+    """the dense part of a pin whose escape is blocked by another net's via or lane (no part to evict) steps aside, with the support parts
+    that serve it, by the smallest shift (<= NUDGE_REACH) that lowers the failed-pin count and adds no issue the input lacked.
+    -> (res, progressed)."""
+    from . import clusters as CL, legalgate as LG
+    refs = sorted({f["ref"] for f in res["failed"] if str(f["blocker"]).startswith(("via", "lane"))})
+    refs = [r for r in refs if r in B["parts"] and r not in fixed]
+    if not refs:
+        return res, False
+    cl = CL.build(B, cons, spec)[0]
+    n0 = len(res["failed"])
+    R = int(NUDGE_REACH / NUDGE_STEP)
+    cands = sorted((round(math.hypot(i, j) * NUDGE_STEP, 4), i, j) for i in range(-R, R + 1) for j in range(-R, R + 1)
+                   if 0 < math.hypot(i, j) * NUDGE_STEP <= NUDGE_REACH)
+    for ref in refs:
+        group = [ref] + sorted({q["ref"] for c in cl if c["ic"] == ref for q in c["supports"] if q["sure"] and q["dist"] <= q["limit"] and q["ref"] in B["parts"]
+                                and q["ref"] not in fixed and q["ref"] != ref})
+        home = {r: (B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]) for r in group}
+        for _d, i, j, grp in [(d, i, j, g) for d, i, j in cands[:NUDGE_TRY] for g in (group, group[:1])]:
+            for r in grp:
+                GM.place(B["parts"][r], home[r][0] + i * NUDGE_STEP, home[r][1] + j * NUDGE_STEP, home[r][2])
+                L.refresh(r)
+            ok = not any(LG.part_new(L, r, known) for r in grp)
+            r2 = solve(B, cons, spec, pr=pr) if ok else None
+            if ok and len(r2["failed"]) < n0:
+                for r in grp:
+                    moved[r] = (home[r][0] + i * NUDGE_STEP, home[r][1] + j * NUDGE_STEP, home[r][2])
+                return r2, True
+            for r in group:
+                GM.place(B["parts"][r], *home[r])
+                L.refresh(r)
+    return res, False
+
+
+def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print, baseline=None):
     """Evict what walls a dense part in: every movable, non-dense part whose pad blocks a pin's template (the gate's blocker) is moved
     to the nearest legal pose (same angle first, then turned) whose pads stay out of every dense part's breakout region, then the
-    whole board is solved again; up to `rounds`.  Parts the placement holds (fixed, locked, pinned) never move.  Writes `path` in place.
+    whole board is solved again; up to `rounds`.  A pose that adds a legality issue the INPUT board (`baseline`, an issues() dict; default the board
+    as it stands) did not have is never taken: the next candidate is tried, else the part stays.  Parts the placement holds (fixed, locked, pinned) never move.  Writes `path` in place.
     -> {"moved": {ref: (x, y, angle, mm)}, "before": failed pins, "after": failed pins}."""
-    from . import boardwrite as BW, legality as LGL, modules as MD, routediag as RD
+    from . import boardwrite as BW, legality as LGL, legalgate as LG, modules as MD, routediag as RD
     pr0 = None
     B = RD.load(path)
     if not conf(cons)["enabled"]:
@@ -550,6 +588,7 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
     pr0 = params(cons, B)
     fixed = MD.fixed_set(B, cons) | {r for r, p in B["parts"].items() if p.get("locked")}
     L = LGL.Legal(B, cons, fixed)
+    known = LG.known(baseline if baseline is not None else L.issues())
     origin = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in B["parts"].items()}
     res = solve(B, cons, spec, pr=pr0)
     n0 = len(res["failed"])
@@ -560,15 +599,14 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
         dense = set(res["dense"])
         blockers = sorted({f["blocker"].split(".")[0] for f in res["failed"] if "." in f["blocker"] and not f["blocker"].startswith(("via", "lane", "keep", "board", "hole"))})
         blockers = [r for r in blockers if r in B["parts"] and r not in fixed and r not in dense]
-        if not blockers:
-            break
-        iso = solve(B, cons, spec, pr=pr0, others=False)
-        regs = [(r, s) for ref in sorted(iso["templates"]) for r, s in rects(B, ref, iso, pr0)]
         progressed = False
+        regs = []
+        if blockers:
+            iso = solve(B, cons, spec, pr=pr0, others=False)
+            regs = [(r, s) for ref in sorted(iso["templates"]) for r, s in rects(B, ref, iso, pr0)]
         for ref in blockers:
             part = B["parts"][ref]
             x0, y0, a0 = part["pos"][0], part["pos"][1], part["angle"]
-            base = set(LGL.Legal.part_issues(L, ref))
             cands = []
             R = int(reach / step)
             for i in range(-R, R + 1):
@@ -585,7 +623,7 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
                 m = pr0["clr"] + 0.05
                 if any(GM.overlap(_pad_rect(q, m), rc, 0.0) and (_sides_of(q) & sd) for q in pads if not q.get("np") for rc, sd in regs):
                     continue
-                if set(L.part_issues(ref, court=court, pads=pads)) - base:
+                if LG.part_new(L, ref, known, court=court, pads=pads):
                     continue
                 hit = (x, y, a)
                 break
@@ -594,6 +632,8 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
                 L.refresh(ref)
                 moved[ref] = hit
                 progressed = True
+        if not progressed:                           # a `via of` / `lane of` blocker is no part to evict: the failing dense part itself steps aside
+            res, progressed = _nudge_dense(B, cons, spec, pr0, res, fixed, L, known, moved)
         if not progressed:
             break
         res = solve(B, cons, spec, pr=pr0)

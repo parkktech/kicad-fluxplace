@@ -132,7 +132,7 @@ def _drop_illegal_claims(board, job, claimed, wd, log):
     """reserved escapes whose via or stub lies in a keep-out / rule area (board or footprint) or inside the board-edge clearance
     are dropped (those pins escape through the normal, fully checked fan-out); the reason is logged."""
     jp = os.path.join(wd, "claims.json")
-    json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed}, open(jp, "w"))
+    json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed, "forbid": job.get("forbid") or []}, open(jp, "w"))
     r = _procs.run(["/usr/bin/python3", HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
     if not line:
@@ -184,9 +184,31 @@ def lay_breakout(board, cons, spec, wd, log=print):
     return dst, res
 
 
+def strip_thermal_openings(board, cons, log=print, wd=None):
+    """-> the board to work on: `board` itself, or a copy without the mask openings the [thermal.*] mask_open blocks re-make after routing
+    (thermal.strip_covered; the first copper stage of every flow calls this: fanout, route-ready, critroute, route)."""
+    from . import thermal as TH
+    if not any(sp["mask"] for sp in TH.blocks(cons, pre=False)):
+        return board
+    wd = wd() if callable(wd) else wd or tempfile.mkdtemp(prefix="unmask-")
+    dst = os.path.join(wd, "unmasked.kicad_pcb")
+    r = TH.strip_covered(board, cons, dst)
+    for line in r["log"]:
+        log("fanout: " + line)
+    if not r["stripped"]:
+        return board
+    for ext in (".kicad_pro", ".kicad_dru", ".fluxmap.json", ".pins.json"):
+        side = os.path.splitext(board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(dst)[0] + ext)
+    return dst
+
+
 def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _depth=0):
     from . import routediag as RD
     bo_res = None
+    if not a.check_only and not refs and not _depth:         # first copper stage: a mask opening a [thermal.*] block re-cuts after routing is not on the board yet
+        board = strip_thermal_openings(board, cons, log)
     if not a.check_only and not refs and not _depth and not getattr(a, "no_breakout", False):
         wd0 = tempfile.mkdtemp(prefix="breakout-")
         board, bo_res = lay_breakout(board, cons, spec, wd0, log)
@@ -195,6 +217,8 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
     from . import routerules as RR
     job = {"params": params(a, pol["pr"], board, cons), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
+    from . import forbid as FB
+    job["forbid"] = FB.windows(cons)                          # B7: mask windows stripped above stay via/track-forbidden for foreign nets
     job["params"]["share_reach"] = float(((cons or {}).get("escape") or {}).get("share_reach_mm", 1.5))
     job["params"]["surface_exit"] = float(((cons or {}).get("escape") or {}).get("surface_exit_mm", 1.0))
     job["params"]["same_net_via"] = getattr(a, "same_net_via_spacing", None) or RR.same_net_via_spacing(cons)

@@ -362,11 +362,12 @@ def _ghost_out(outdir, text):
         fh.write(text[-20000:] + "\n")
 
 
-def _ghost_stats(copy, out, outdir, secs):
+def _ghost_stats(copy, out, outdir, secs, fragile=(), first_pick=None):
     """nets routed, opens before/after (text count), seconds -> ghost.stats.json (the efficiency log reads it)."""
     from . import routediag as RD, routeconn as RC
     before = RD.load(copy)
-    st = {"secs": secs, "opens_before": len(RC.text_open(before)), "nets_routed": 0, "opens_after": None}
+    st = {"secs": secs, "opens_before": len(RC.text_open(before)), "nets_routed": 0, "opens_after": None,
+          "fragile": sorted(fragile), "first_pick": first_pick}
     if out and os.path.exists(out):
         after = RD.load(out)
         had = {s["net"] for s in before["segs"]}
@@ -384,7 +385,7 @@ def _signal_nets(copy):
     return sig, {n for n, _l in planes}
 
 
-def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
+def _run_capped(cmd, cwd, outdir, tag, out, cap_s, env=None):
     """One router process under the wall cap (routestatus.run_logged); -> (completed, secs). TimeoutExpired -> None."""
     import subprocess
     from fluxplace import procs as _procs
@@ -392,7 +393,7 @@ def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
     t = time.time()
     status, log = os.path.join(outdir, f"{tag}.status.json"), os.path.join(outdir, f"{tag}.log")
     try:
-        r = RS.run_logged(cmd, cwd=cwd, timeout=cap_s, out=out, log_path=log, status_path=status)
+        r = RS.run_logged(cmd, cwd=cwd, timeout=cap_s, out=out, log_path=log, status_path=status, env=env)
         _ghost_out(outdir, f"[{tag}] rc {r.returncode}\n" + (r.stdout or "")[-4000:])
         return True, round(time.time() - t, 1)
     except subprocess.TimeoutExpired:
@@ -400,37 +401,198 @@ def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
         return False, round(time.time() - t, 1)
 
 
-def lean_krt(a, board, outdir, budget_min, extra=()):
-    """KRT lean ghost: ONE route.py call over every non-plane net with >= 2 pads on the signal layers; no planes, rails,
-    pairgroups or diff steps. At the cap, the checkpoint the status json names (if it exists), else None."""
+def critical_first(copy, cons, spec, nets):
+    """The nets of `nets` that must be routed before the rest, class-ranked: hs-pair legs, then rf, then power ([power] rails).
+    -> ordered list (placegaps' net classes, one rule). Never raises: unclassable -> [] (one pass, as before)."""
+    try:
+        from . import placegaps as PG
+        of = PG._net_class(PG.Ctx(stage="judge", board=copy, cons=cons or {}, spec=spec))
+        rank = {"hs-pair": 0, "rf": 1, "power": 2}
+        got = sorted(((rank[c], n) for n in nets for c in [of(n)[0]] if c in rank))
+        return [n for _r, n in got]
+    except Exception as e:                                  # noqa: BLE001
+        print(f"lean_krt: critical nets not classed ({type(e).__name__}: {e}); one pass")
+        return []
+
+
+def _depth_delta(line):
+    """Paren depth change of one line, ignoring parens inside double-quoted strings."""
+    d, q, esc = 0, False, False
+    for ch in line:
+        if esc:
+            esc = False
+        elif ch == "\\":
+            esc = q
+        elif ch == '"':
+            q = not q
+        elif not q:
+            d += (ch == "(") - (ch == ")")
+    return d
+
+
+def _ref_key(block):
+    """Natural sort key of a footprint block's Reference: (letters, integer); ("", 0) when none is found."""
+    import re
+    m = re.search(r'\(property "Reference" "([^"]*)"', block) or re.search(r'\(fp_text reference "([^"]*)"', block)
+    r = re.match(r"([^0-9]*)([0-9]*)", m.group(1)) if m else None
+    return (r.group(1), int(r.group(2) or 0)) if r else ("", 0)
+
+
+def _canonical_copy(src, dst, reverse=False):
+    """Copy of the board with its top-level footprint blocks sorted by Reference (natural order; `reverse`: the opposite), placed
+    where the first block was; every other line stays byte-identical. The KRT result depends on the footprint order, so the
+    judge routes two fixed orders. The sidecar .kicad_pro follows dst."""
+    from . import pipeline as PL
+    with open(src, errors="surrogateescape", newline="") as fh:
+        lines = fh.read().splitlines(keepends=True)
+    out, blocks, i, at = [], [], 0, None
+    while i < len(lines):
+        if lines[i].startswith("\t(footprint "):
+            j, d = i, 0
+            while True:
+                d += _depth_delta(lines[j])
+                j += 1
+                if d <= 0 or j >= len(lines):
+                    break
+            blocks.append("".join(lines[i:j]))
+            if at is None:
+                at = len(out)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    if at is not None:
+        out[at:at] = sorted(blocks, key=_ref_key, reverse=reverse)      # stable; reverse keeps equal keys in file order
+    with open(dst, "w", errors="surrogateescape", newline="") as fh:
+        fh.write("".join(out))
+    PL._sidecar(src, dst)
+    return dst
+
+
+def _pick_first(results):
+    """{"fwd": set of open critical nets | None, "rev": ...} -> (pick, fragile): the variant with fewer critical opens (tie: fwd),
+    fragile = nets open in exactly one variant (sorted; [] when only one variant finished). (None, []) when neither did."""
+    f, r = results.get("fwd"), results.get("rev")
+    if f is None and r is None:
+        return None, []
+    if f is None or r is None:
+        return ("rev" if f is None else "fwd"), []
+    return ("rev" if len(r) < len(f) else "fwd"), sorted(f ^ r)
+
+
+def contract_widths(copy, cons, spec, nets, sig=()):
+    """B10: {net: mm} the ghost judge lays `nets` at: rails and RF at the width the real route will use, so a net that only routes thin
+    is an open here too. Reads the B1 net contract (netclass.contract: RF `width` per layer, rail `width_min`) when it exists; until B1
+    merges it falls back to what the route steps read today (rfroute.widths for RF, power.route_widths for rails). Never raises: a
+    net with no known width keeps the default width (logged by the caller as absent)."""
+    from . import netclass as NC, routediag as RD
+    nets = set(nets)
+    out = {}
+    try:
+        B = RD.load(copy)
+        if hasattr(NC, "contract"):                                   # B1 (w49-netcontract)
+            con = NC.contract(B, cons, spec, board=copy, lock=False)
+            for n in nets:
+                e = con.get(n) or {}
+                ws = [float(w) for w in (e.get("width") or {}).values() if w]
+                if ws:
+                    out[n] = round(sum(ws) / len(ws), 3)
+                elif e.get("width_min"):
+                    out[n] = float(e["width_min"])
+            return out
+        # TODO(B1 / w49-netcontract): delete this fallback once netclass.contract is merged (the branch above then always runs).
+        from . import power as PWR, gaps as GP, rfroute as RFR, placegaps as PG
+        rails = PWR.route_widths(cons or {}, layers=len(sig) or None, exclude=GP._zone_nets(copy))
+        out.update({n: float(w) for n, w in rails.items() if n in nets and w})
+        of = PG._net_class(PG.Ctx(stage="judge", board=copy, cons=cons or {}, spec=spec))
+        rf = sorted(n for n in nets if n not in out and of(n)[0] == "rf")
+        if rf:
+            outer = RFR.outer_layers(list(sig)) or list(sig)
+            out.update({n: v["w"] for n, v in RFR.widths(copy, cons, rf, outer).items() if v.get("w")})
+    except Exception as e:                                           # noqa: BLE001 - no width contract: the default width, as before
+        print(f"lean_krt: contract widths not read ({type(e).__name__}: {str(e)[:100]}); default width")
+    return out
+
+
+def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
+    """KRT lean ghost over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets); no planes, rails,
+    pairgroups or diff steps. Two passes (PLAN-PLACE-GAPS phase 2): the critical nets first (hs-pair legs, rf, power; class-ranked),
+    then every other net on top of that copper (--keep-input-copper), so a plain net can never take the room of a critical one.
+    `only` (a diagnosis run) is one pass. At the cap, the checkpoint the status json names (if it exists), else None.
+    `info` (a dict) receives {"complete": bool (no pass hit its cap), "secs", "passes", "first": [nets routed first]}."""
     import json as _json
     from types import SimpleNamespace
-    from . import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routestatus as RS
+    from . import constraints as C, krtchain as KC, routeconn as RC, routediag as RD, routerules as RR, routestatus as RS
     copy = _ghost_copy(board, outdir)
     sig, plane_nets = _signal_nets(copy)
     cons = C.load(a.constraints) if getattr(a, "constraints", None) else {}
+    spec = None
+    try:
+        spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
+    except (OSError, ValueError):
+        spec = None
     R = RR.rules_for(cons, copy, SimpleNamespace(track=getattr(a, "track", None), clearance=getattr(a, "clearance", None)))
     base = KC.base_flags(R, outdir)
     cnt = {}
     for p in RD.load(copy)["pads"]:
         if p["net"]:
             cnt[p["net"]] = cnt.get(p["net"], 0) + 1
-    nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets)
+    nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets and (only is None or n in only))   # only: route just these nets
+    first = [] if only is not None else critical_first(copy, cons, spec, nets)
+    cw = contract_widths(copy, cons, spec, set(first) | (set(nets) if only is not None else set()), sig)   # rails + RF at contract width
     out = os.path.join(outdir, "krt-lean.kicad_pcb")
     # --quick 2: route to judge (main pass only; no rescue, escalation, plane finalize, cleanup, late sweeps) - about half
     # the time of level 1, and it writes its output. The wall cap is only a safety (SIGINT does not stop it softly).
-    cmd = KC.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, {}, nets=nets) + ["--quick", "2"] + list(extra)
-    ok, secs = _run_capped(cmd, a.router_dir, outdir, "krt", out, budget_min * 60 + 300)
+    cap = budget_min * 60 + 300
+    t0, complete, src, left = time.time(), True, copy, nets
+    passes = []
+    fragile, pick, nf = [], None, {}
+    if first:
+        from concurrent.futures import ThreadPoolExecutor
+        mid = os.path.join(outdir, "krt-first.kicad_pcb")
+
+        def _variant(k):
+            tag, o = f"krt-first-{k}", os.path.join(outdir, f"krt-first-{k}.kicad_pcb")
+            inp = _canonical_copy(copy, os.path.join(outdir, f"in-{k}.kicad_pcb"), reverse=(k == "rev"))
+            cmd = KC.cmd_route(a.router_py, a.router_dir, inp, o, sig, base, {n: cw[n] for n in first if n in cw}, nets=first) + ["--quick", "2"] + list(extra)
+            ok, _s = _run_capped(cmd, a.router_dir, outdir, tag, o, cap)
+            return k, (ok and os.path.exists(o)), o
+
+        with ThreadPoolExecutor(2) as ex:
+            runs = list(ex.map(_variant, ("fwd", "rev")))
+        res_open = {}
+        for k, ok, o in runs:
+            res_open[k] = (set(RC.text_open(RD.load(o))) & set(first)) if ok else None
+        pick, fragile = _pick_first(res_open)
+        if pick:
+            shutil.copy(os.path.join(outdir, f"krt-first-{pick}.kicad_pcb"), mid)
+            src, left = mid, [n for n in nets if n not in set(first)]
+            passes.append("first")
+            nf = {k: len(v) for k, v in res_open.items() if v is not None}
+            _ghost_out(outdir, f"[krt-first] pick {pick}, critical open fwd {nf.get('fwd', 'n/a')} / rev {nf.get('rev', 'n/a')}, "
+                               f"fragile: {','.join(fragile)}")
+        else:
+            complete = False
+            first = []                                          # the critical pass failed: the one-pass judge below, as before
+    cmd = KC.cmd_route(a.router_py, a.router_dir, src, out, sig, base, {n: cw[n] for n in (left or nets) if n in cw}, nets=left or nets) + ["--quick", "2"] + list(extra)
+    # pass 2 must not rip pass 1: KRT registers unlocked pre-existing nets (<= 30 segments, <= 6 vias) as rip candidates and
+    # --keep-input-copper only guards the cleanup; KICAD_RIP_PREEXISTING=0 is the engine's kill switch
+    ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt", out, max(60.0, cap - (time.time() - t0)) if first else cap,
+                         env=KC.no_rip_env() if first else None)
+    secs = round(time.time() - t0, 1)
     res = None
     if ok and os.path.exists(out):
         res = out
     else:
+        complete = False
         try:
             ckpt = (_json.load(open(os.path.join(outdir, "krt.status.json"))) or {}).get("checkpoint")
         except (OSError, ValueError):
             ckpt = None
         res = ckpt if ckpt and os.path.exists(ckpt) else None
-    _ghost_stats(copy, res, outdir, secs)
+    if info is not None:
+        info.update(complete=complete and res is not None, secs=secs, passes=len(passes) + 1, first=list(first), fragile=fragile, first_pick=pick)
+    _ghost_stats(copy, res, outdir, secs, fragile, pick)
     return res
 
 

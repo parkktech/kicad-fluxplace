@@ -343,6 +343,45 @@ def _infer_net(PN, b, poly, layer, step=0.5):
     return max(count, key=count.get) if count else None
 
 
+def _covered(PN, d, sp):
+    """Does the board-level mask polygon `d` belong to block `sp` (its side's mask layer, bounding box overlapping the block's)?
+    The one rule of recut (which replaces such polygons) and strip_covered (which removes them before routing)."""
+    if d.GetLayer() != (PN.B_Mask if sp["side"] == "B" else PN.F_Mask):
+        return False
+    xs, ys = [p[0] for p in sp["pts"]], [p[1] for p in sp["pts"]]
+    bb = d.GetBoundingBox()
+    return not (PN.ToMM(bb.GetRight()) < min(xs) or PN.ToMM(bb.GetLeft()) > max(xs) or
+                PN.ToMM(bb.GetBottom()) < min(ys) or PN.ToMM(bb.GetTop()) > max(ys))
+
+
+def strip_covered(board, cons, out):
+    """The settled order (thermal mask after routing, D71cd): the board-level mask openings a `[thermal.NAME] mask_open` block will re-make
+    in `recut` are taken off the working board before the first copper stage, so routers and fan-out may put any net's copper under the
+    window (recut carves it round every non-owner via afterwards).  An opening no block covers stays on the board and is honoured as
+    forbidden for non-owner copper (routediag.mask_openings).  -> {"stripped": n, "log": [line]}; writes `out` only when n > 0."""
+    import pcbnew as PN
+    res = {"stripped": 0, "log": []}
+    specs = [sp for sp in blocks(cons, pre=False) if sp["mask"]]
+    if not specs:
+        return res
+    b = PN.LoadBoard(board)
+    for d in [d for d in b.GetDrawings() if d.GetClass() == "PCB_SHAPE" and d.GetLayer() in (PN.F_Mask, PN.B_Mask)
+              and d.GetShape() == PN.SHAPE_T_POLY]:
+        sp = next((s for s in specs if _covered(PN, d, s)), None)
+        if sp:
+            bb = d.GetBoundingBox()
+            res["log"].append(f"thermal {sp['name']}: mask opening at ({PN.ToMM(bb.GetLeft()):.1f}, {PN.ToMM(bb.GetTop()):.1f}) taken off "
+                              f"the working board before routing; recut re-makes it after the copper")
+            b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
+            res["stripped"] += 1
+    if res["stripped"]:
+        PN.SaveBoard(out, b)
+        src_pro = os.path.splitext(board)[0] + ".kicad_pro"
+        if os.path.exists(src_pro):
+            shutil.copy(src_pro, os.path.splitext(out)[0] + ".kicad_pro")
+    return res
+
+
 def recut(board, cons, out):
     """PHASE3F A7: re-cut the mask openings after routing (copper is not touched).
     1. every [thermal.NAME] block with mask_open: the board-level filled polygons of its side whose bounding box overlaps
@@ -361,17 +400,10 @@ def recut(board, cons, out):
     polys = [d for d in b.GetDrawings() if d.GetClass() == "PCB_SHAPE" and d.GetLayer() in layers
              and d.GetShape() == PN.SHAPE_T_POLY and d.IsPolyShapeValid()]
     for sp in specs:                          # 1. block path
-        mask = PN.B_Mask if sp["side"] == "B" else PN.F_Mask
-        xs = [p[0] for p in sp["pts"]]
-        ys = [p[1] for p in sp["pts"]]
         for d in list(polys):
-            if d.GetLayer() != mask:
+            if not _covered(PN, d, sp):
                 continue
-            bb = d.GetBoundingBox()
-            if PN.ToMM(bb.GetRight()) < min(xs) or PN.ToMM(bb.GetLeft()) > max(xs) or \
-                    PN.ToMM(bb.GetBottom()) < min(ys) or PN.ToMM(bb.GetTop()) > max(ys):
-                continue
-            b.Remove(d)
+            b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
             polys.remove(d)
         _post(PN, b, sp, res["log"], keep)
         res["blocks"] += 1
@@ -388,8 +420,9 @@ def recut(board, cons, out):
                PN.ToMM(bb.GetBottom()) + 0.5)
         area = PN.SHAPE_POLY_SET(poly)
         n = _carve(PN, b, area, layer, net, box, GROW_MM)
-        b.Remove(d)
-        _mask_shape(PN, b, area, d.GetLayer(), SLIVER_MM, keep)
+        dlayer = d.GetLayer()                     # read before Delete: the item is gone after
+        b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
+        _mask_shape(PN, b, area, dlayer, SLIVER_MM, keep)
         res["inferred"] += 1
         res["log"].append(f"polygon at {at} on {'B' if layer == PN.B_Cu else 'F'}: net {net}; carved around "
                           f"{n['via']} via(s), {n['pad']} pad(s), {n['track']} track(s), {n['zone']} zone fill(s)")

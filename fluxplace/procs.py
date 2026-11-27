@@ -220,3 +220,25 @@ def install():
                        (signal.SIGINT, signal.default_int_handler)):
         if signal.getsignal(s) is default:
             signal.signal(s, _on_signal)
+
+
+def atomic_copy(src, dst):
+    """Copy `src` to `dst` so a reader of `dst` sees the old file or the complete new one, never a part: the bytes go to a unique
+    temp beside `dst` (mkstemp: two writers never share a slot), are flushed to disk, then os.replace publishes them."""
+    import shutil
+    import tempfile
+    d = os.path.dirname(os.path.abspath(dst))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=os.path.basename(dst) + ".", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as fo, open(src, "rb") as fi:
+            shutil.copyfileobj(fi, fo, 1 << 20)
+            fo.flush()
+            os.fsync(fo.fileno())
+        shutil.copymode(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

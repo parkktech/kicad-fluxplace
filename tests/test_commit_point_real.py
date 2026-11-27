@@ -168,3 +168,45 @@ def test_a_pair_rung_in_close_releases_only_its_targets_on_the_carried_manifest(
     c2 = carried("b")
     v = BW.commit(c2, both(tmp_path / "b"), c2, release={"D_P"}, manifest=BW.load_manifest(c2), reason="pair-skew pairgroup")
     assert not v["written"] and "PROTECTED_CHANGED D_N" in v["why"]
+
+
+def test_close_on_a_stale_manifest_returns_a_stop_dict_and_leaves_the_incumbent(tmp_path, monkeypatch):
+    from fluxplace import gaps as GP
+    monkeypatch.setenv("FLUXPLACE_VERSIONS", str(tmp_path / "none.json"))
+    base = _open_board(tmp_path)
+    BW.seed(base)
+    txt = open(base).read().replace("(end 50 35)", "(end 50 36)", 1)                                # edited outside the flow
+    open(base, "w").write(txt)
+    before = open(base).read()
+    msgs = []
+    res = GP.close(base, str(tmp_path / "work"), cons={}, attempts=str(tmp_path / "a.jsonl"), runs=str(tmp_path / "r.jsonl"), log=msgs.append, inproc=True)
+    assert res["stop"] == "manifest_stale" and res["verdict"] == "fail" and any(x.startswith("L:") for x in res["diff"])
+    assert any(x.startswith("  L:") for x in msgs) and open(base).read() == before and BW.is_stale(base)
+    assert not os.path.exists(tmp_path / "work" / "best.kicad_pcb") and os.path.exists(tmp_path / "work" / "stop.json")
+
+def test_route_post_centre_fallback_never_moves_protected_copper(tmp_path, monkeypatch):
+    """W46: the route stage's post ran centre_run with protect=[] and moved locked copper of the manifest nets (25 nets: PROTECTED_CHANGED at the commit)."""
+    from fluxplace import krtchain as K, snapiter as SI, planetie as PT, opengate as OG
+    prev = board(tmp_path, "prev.kicad_pcb", BASE())
+    BW.seed(prev)
+    best = str(tmp_path / "best.kicad_pcb")
+    open(best, "w").write(open(prev).read())
+    open(str(tmp_path / "best.kicad_pro"), "w").write("{}")
+    seen = {}
+
+    def centre(src, dst, iters=3, log=print, protect=()):
+        seen["protect"] = set(protect)
+        if "D_P" not in protect:                                       # the real move: a locked D_P end moves onto the via centre
+            open(dst, "w").write(open(src).read().replace("(end 30 20)", "(end 30 20.05)", 1))
+        return {"centred_left": 0}
+    monkeypatch.setattr(SI, "run", lambda *a, **k: {"centred_left": 3, "moved": 0})
+    monkeypatch.setattr(SI, "via_run", lambda *a, **k: {"centred_left": 3})
+    monkeypatch.setattr(SI, "joiner_run", lambda *a, **k: {"centred_left": 3})
+    monkeypatch.setattr(SI, "centre_run", centre)
+    monkeypatch.setattr(PT, "run_guarded", lambda *a, **k: {"placed": 0})
+    monkeypatch.setattr(OG, "refill", lambda *a, **k: None)
+    R = {"track": 0.15, "clearance": 0.127, "via": 0.45, "drill": 0.2, "clearance_class": 0.0, "min_clearance": 0.127}
+    K._post(best, str(tmp_path), [], R, protect=sorted(BW.load_manifest(prev)["nets"]))
+    assert {"D_P", "D_N"} <= seen["protect"]
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": best})
+    assert r["verdict"] == "pass"

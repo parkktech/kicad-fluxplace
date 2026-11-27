@@ -848,3 +848,27 @@ def test_live_snapshots_per_ghost_landing_and_candidate_result(monkeypatch, tmp_
     LA.stage(c, 7, "in.kicad_pcb")
     assert "ghost krt-whole" in reasons and "ghost freerouting" in reasons
     assert "cand r1-0 locked" in reasons
+
+
+def test_canonical_copy_sorts_footprints(tmp_path):
+    def fp(r):
+        return f'\t(footprint "X:{r}"\n\t\t(property "Reference" "{r}"\n\t\t\t(at 0 0)\n\t\t)\n\t)\n'
+    head, mid, tail = '(kicad_pcb\n\t(version 1)\n', '\t(gr_line (start 0 0))\n', '\t(segment (start 0 0))\n)\n'
+    src = tmp_path / "a.kicad_pcb"
+    src.write_text(head + fp("R10") + fp("C2") + mid + fp("R2") + fp("C10") + tail)
+    for rev, want in ((False, ["C2", "C10", "R2", "R10"]), (True, ["R10", "R2", "C10", "C2"])):
+        dst = tmp_path / f"b{rev}.kicad_pcb"
+        LA._canonical_copy(str(src), str(dst), reverse=rev)
+        t = dst.read_text()
+        assert [l.split('"')[3] for l in t.splitlines() if "Reference" in l] == want
+        assert t.count("\t(footprint ") == 4
+        assert t.startswith(head + "".join(fp(r) for r in want)) and t.endswith(mid + tail)
+
+
+def test_pick_first():
+    assert LA._pick_first({"fwd": {"a"}, "rev": {"a", "b"}}) == ("fwd", ["b"])
+    assert LA._pick_first({"fwd": {"a", "b"}, "rev": {"a"}}) == ("rev", ["b"])
+    assert LA._pick_first({"fwd": {"a"}, "rev": {"b"}}) == ("fwd", ["a", "b"])
+    assert LA._pick_first({"fwd": None, "rev": {"a"}}) == ("rev", [])
+    assert LA._pick_first({"fwd": {"a"}, "rev": None}) == ("fwd", [])
+    assert LA._pick_first({"fwd": None, "rev": None}) == (None, [])

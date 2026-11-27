@@ -130,7 +130,7 @@ def test_allow_undocumented_is_loud_recorded_and_stamps(tmp_path):
     b = _board(tmp_path)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(_spec()))
-    cons = _cons(tmp_path)
+    cons = _cons(tmp_path, '[placement]\nsides = "front"\n')
     a = _pipe_args(tmp_path, b, sp, cons, allow_undocumented=True)
     assert PL.run(a) == 0
     st = PL.load_state(a.workdir)
@@ -335,3 +335,47 @@ def test_ready_passes_the_supply_check_when_the_rail_fits(tmp_path, capsys):
     except SystemExit:
         pass
     assert "SUPPLY_RANGE" not in capsys.readouterr().out
+
+
+# ---- 3D model gate: no model / unresolved / outside the project library (never bypassed), holes exempt, stage copies resolve
+def _mf(tmp, models, mech=False, board=None):
+    return {"board_path": str(board or tmp / "b.kicad_pcb"), "parts": {"J1": {"footprint": "X", "models": models, "mech": mech}}}
+
+
+def test_model_state_no_model_fails_hole_exempt(tmp_path):
+    ok, why = PG.model_state("J1", _mf(tmp_path, []))
+    assert not ok and "no 3D model" in why
+    ok, why = PG.model_state("J1", _mf(tmp_path, [], mech=True))
+    assert ok and "mechanical" in why
+
+
+def test_model_state_stock_library_path_not_installed_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("KICAD10_3DMODEL_DIR", str(tmp_path / "no-such-stock-lib"))
+    ok, why = PG.model_state("J1", _mf(tmp_path, ["${KICAD10_3DMODEL_DIR}/Connector_Molex.3dshapes/J.step"]))
+    assert not ok and "does not resolve" in why
+
+
+def test_model_state_stage_copy_resolves_by_ancestor_search(tmp_path):
+    (tmp_path / "lib" / "3dmodels").mkdir(parents=True)
+    (tmp_path / "lib" / "3dmodels" / "x.step").write_text("x")
+    run = tmp_path / "W16" / "stageA" / "route-4" / "run"
+    run.mkdir(parents=True)
+    ok, why = PG.model_state("J1", _mf(tmp_path, ["${KIPRJMOD}/../lib/3dmodels/x.step"], board=run / "b.kicad_pcb"))
+    assert ok and why == "x.step"
+
+
+def test_model_state_outside_project_library_fails(tmp_path):
+    (tmp_path / "lib" / "3dmodels").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "y.step").write_text("x")
+    (tmp_path / "W1").mkdir()
+    ok, why = PG.model_state("J1", _mf(tmp_path, [str(tmp_path / "elsewhere" / "y.step")], board=tmp_path / "W1" / "b.kicad_pcb"))
+    assert not ok and "outside the project model library" in why
+
+
+def test_gate_model_failure_listed_for_ready_to_refuse_bypass(tmp_path):
+    spec, f = _spec(), _facts(models=False)
+    g = PG.gate(spec, {}, f, _res(tmp_path, spec, f), qty=100)
+    assert set(g["models"]) == {"R1", "R2", "U1"}
+    f2 = _model(tmp_path)
+    assert PG.gate(spec, {}, f2, _res(tmp_path, spec, f2), qty=100)["models"] == []

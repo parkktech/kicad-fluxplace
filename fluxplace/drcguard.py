@@ -18,6 +18,7 @@ flickering with zone fill. Nothing else is filtered; whole types are never ignor
 Measured 2026-11-14: 5/5 identical key multisets on v15 and v16 copies, with and without a
 pcbnew round trip (no flicker reproduced here, so the exclusion is inherited).
 """
+import hashlib
 import json
 import os
 import re
@@ -122,6 +123,8 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
                 rs[k] = "ignore"
             for k in only_rules:
                 rs[k] = "error"
+        if pd and only_rules is None:                   # D71dz: drills breaking into each other are an error in every judged DRC
+            pd.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})["hole_to_hole"] = "error"
         if pro_edit:
             pro_edit(pd)
         if pd:
@@ -174,7 +177,9 @@ def measure_from_report(d, severity="error"):
     else:
         keys = Counter(key_of(v) for v in err)
     chosen = [v for v in vs if severity == "all" or v.get("severity") == "error"]
-    return {"opens": len(unc), "opens_by_net": Counter(drcfull.net_of(u) for u in unc),
+    # B3a: zone-item violations measured, not enforced (`keys`/`errors` keep the zone exemption until B3b)
+    zk = Counter(key_of(v) for v in chosen)
+    return {"keys_zone": zk, "errors_zone": len(chosen),"opens": len(unc), "opens_by_net": Counter(drcfull.net_of(u) for u in unc),
             "shorts": sum(1 for v in vs if v.get("type") == "shorting_items"),
             "errors": sum(1 for v in chosen if not _zone_item(v)), "keys": keys, "err_keys": keys}
 
@@ -182,17 +187,74 @@ def measure_from_report(d, severity="error"):
 _CACHE = {}
 
 
+def content_sha(path):
+    """sha1 of a file's bytes ("" when absent): the one cache identity (a path, mtime and size repeat across different content)."""
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def rules_sha(board):
+    """sha1 over the board's rule sources: sibling .kicad_pro and .kicad_dru content (an absent file hashes as empty)."""
+    stem = os.path.splitext(os.path.abspath(board))[0]
+    h = hashlib.sha1()
+    for ext in (".kicad_pro", ".kicad_dru"):
+        h.update(ext.encode() + b"\0" + content_sha(stem + ext).encode() + b"\0")
+    return h.hexdigest()
+
+
 def measure(board, kicad_cli="kicad-cli"):
-    """One DRC per board (cached on abspath, mtime, size; last 4 kept). `errors` excludes unconnected items."""
+    """One DRC per board (cached on board sha + rules sha + kicad-cli; last 4 kept). `errors` excludes unconnected items.
+    The record carries board_sha, rules_sha and status "exact" (a DRC that did not run raises; see measure_record)."""
     p = os.path.abspath(board)
-    st = os.stat(p)
-    key = (p, st.st_mtime_ns, st.st_size)
+    bsha, rsha = content_sha(p), rules_sha(p)
+    key = (bsha, rsha, kicad_cli)
     if key not in _CACHE:
         d = drc_json(p, kicad_cli)
-        _CACHE[key] = dict(measure_from_report(d), drc=d)
+        _CACHE[key] = dict(measure_from_report(d), drc=d, board_sha=bsha, rules_sha=rsha, status="exact")
         while len(_CACHE) > 4:
             _CACHE.pop(next(iter(_CACHE)))
     return _CACHE[key]
+
+
+def measure_record(board, kicad_cli="kicad-cli"):
+    """measure() that never raises: a DRC that cannot run (kicad-cli absent, no report, timeout) -> status "failed" with the
+    error and the shas, no counts. Gated stages read `exact(m)`."""
+    try:
+        return measure(board, kicad_cli)
+    except (RuntimeError, OSError, ValueError) as e:
+        p = os.path.abspath(board)
+        return {"status": "failed", "error": str(e)[:200], "board_sha": content_sha(p), "rules_sha": rules_sha(p)}
+
+
+def repeatability(board, runs=5, kicad_cli="kicad-cli", timeout=600):
+    """B3a: DRC `runs` times, each on a fresh copy of the board with its .kicad_pro/.kicad_dru (drc_json copies again and refills
+    zones). -> {"identical": zone-inclusive key multisets all equal, "runs", "errors_zone": [...], "errors": [...], "keys_zone": [Counter]}.
+    The evidence B3b needs before zone errors are enforced."""
+    import tempfile
+    stem = os.path.splitext(os.path.abspath(board))[0]
+    recs = []
+    for _ in range(runs):
+        with tempfile.TemporaryDirectory(prefix="fxrep-") as td:
+            b = os.path.join(td, "r.kicad_pcb")
+            shutil.copy(stem + ".kicad_pcb", b)
+            for ext in (".kicad_pro", ".kicad_dru"):
+                if os.path.isfile(stem + ext):
+                    shutil.copy(stem + ext, os.path.join(td, "r" + ext))
+            recs.append(measure_from_report(drc_json(b, kicad_cli, timeout)))
+    kz = [r["keys_zone"] for r in recs]
+    return {"identical": all(k == kz[0] for k in kz), "runs": runs, "errors_zone": [r["errors_zone"] for r in recs],
+            "errors": [r["errors"] for r in recs], "keys_zone": kz}
+
+
+def exact(m):
+    """True only for a measure that ran kicad-cli on the whole board (an approx or failed measure may not give a pass)."""
+    return (m or {}).get("status") == "exact"
 
 
 _ZONE_DESC = re.compile(r"^Zone \[([^\]]*)\] on ([^,\s]+)")
@@ -228,22 +290,9 @@ def new_keys(base_keys, keys):
 
 
 def protected_nets(cons, names):
-    """Nets no trade may open (R5) and whose copper stays locked: the [rf] nets, nets named as RF (review.is_rf),
-    every pair leg from the constraints (krtchain.pair_nets) and every leg found by naming (graph.diff_pairs)."""
-    from . import krtchain, graph, review, constraints as C
-    names = sorted(names)
-    nopair = C.not_pairs(cons)
-    rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
-    try:
-        pairs = set(krtchain.pair_nets(cons, names, None))
-    except Exception:
-        pairs = set()
-    try:
-        dp = graph.diff_pairs(names, exclude=nopair)
-        pairs |= set(dp) | set(dp.values())
-    except Exception:
-        pass
-    return rf | (pairs - nopair)
+    """Nets no trade may open (R5) and whose copper stays locked (the net contract's protected set, netclass.protected_set)."""
+    from . import netclass as NC
+    return NC.protected_set(cons, names)
 
 
 def snap_nets(snap):
@@ -255,45 +304,82 @@ def snap_nets(snap):
 MODES = ("repair", "build", "edit")
 
 
+def run_rules(rules, trace=None):
+    """Run [(name, fn)] in order; fn() -> "" (pass) or a reason. trace None: return the first reason (stop there), "" if all
+    pass. trace a list: run EVERY rule and append {"rule", "status", "detail"} per rule, status pass / fail / UNKNOWN (the
+    rule raised, so it could not be judged); returns the first non-pass reason, "UNKNOWN <rule>: ..." for an UNKNOWN."""
+    first = ""
+    for name, fn in rules:
+        if trace is None:
+            why = fn()
+            if why:
+                return why
+            continue
+        try:
+            why = fn()
+            row = {"rule": name, "status": "fail" if why else "pass", "detail": why}
+        except Exception as e:
+            why = f"UNKNOWN {name}: {type(e).__name__}: {e}"[:120]
+            row = {"rule": name, "status": "UNKNOWN", "detail": why}
+        trace.append(row)
+        first = first or why
+    return first
+
+
 def accept(base, cand, mode="repair", target=(), kind=None, base_board=None, cand_board=None, score=None,
-           locked_ok=None, snap=None, protect=()):
+           locked_ok=None, snap=None, protect=(), trace=None):
     """Guard a candidate measure against its base; first failing rule gives `why`. Rules and modes:
     docs/recipes/PHASE2-guard.md. mode: repair (R0-R5, score, target), build (R0, R1, R3, R5, opens), edit (R0, R1,
     R3, R5). R5: no protected net gains opens. Other trades are allowed: no rule compares opens per plain net.
-    Unknown mode raises ValueError. -> (ok, why)."""
+    Unknown mode raises ValueError. -> (ok, why). `trace` (a list) evaluates every rule instead of stopping at the first
+    failure and records one row per rule (run_rules); the verdict is the same: any fail or UNKNOWN refuses."""
     from . import audit
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}")
-    if base_board and cand_board:
-        snap = snap or (lambda p: audit.snapshot(p, checks=False))
-        diff = audit.connectivity_diff(snap(base_board), snap(cand_board))
+
+    def r0():
+        if not (base_board and cand_board):
+            return ""
+        sn = snap or (lambda p: audit.snapshot(p, checks=False))
+        diff = audit.connectivity_diff(sn(base_board), sn(cand_board))
         if not diff["ok"]:
-            return False, ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
-    if cand["shorts"] > base["shorts"]:
-        return False, "R1 shorts up"
-    if protect:
+            return ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
+        return ""
+
+    def r1():
+        return "R1 shorts up" if cand["shorts"] > base["shorts"] else ""
+
+    def r5():
         bo, co = base.get("opens_by_net") or {}, cand.get("opens_by_net") or {}
-        for n in sorted(protect):
+        for n in sorted(protect or ()):
             if co.get(n, 0) > bo.get(n, 0):
-                return False, f"R5 protected net opened {n} {bo.get(n, 0)}->{co.get(n, 0)}"[:120]
-    if mode == "repair":
+                return f"R5 protected net opened {n} {bo.get(n, 0)}->{co.get(n, 0)}"[:120]
+        return ""
+
+    def r2():
         new = new_keys(base.get("keys", base.get("err_keys")), cand.get("keys", cand.get("err_keys")))
         if kind is not None:
             from .gaps import KIND_OF_TYPE
             new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
-        if new:
-            return False, f"R2 new DRC key {next(iter(new))[0]}"[:120]
-    if locked_ok is not None and not locked_ok():
-        return False, "R3 locked copper changed"
-    if mode == "repair":
+        return f"R2 new DRC key {next(iter(new))[0]}"[:120] if new else ""
+
+    def r3():
+        return "R3 locked copper changed" if locked_ok is not None and not locked_ok() else ""
+
+    def r4():
         sc = score or (lambda m: [m["shorts"], m["opens"], m["errors"]])
-        if not sc(cand) < sc(base):
-            return False, "R4 score not lower"
-        if target and "gap_ids" in cand and not any(t not in cand["gap_ids"] for t in target):
-            return False, "target gap still there"
-    elif mode == "build" and not cand["opens"] < base["opens"]:
-        return False, "R4 opens not lower"
-    return True, ""
+        return "" if sc(cand) < sc(base) else "R4 score not lower"
+
+    def rt():
+        return "target gap still there" if target and "gap_ids" in cand and not any(t not in cand["gap_ids"] for t in target) else ""
+
+    rules = [("R0", r0), ("R1", r1)] + ([("R5", r5)] if protect else []) + ([("R2", r2)] if mode == "repair" else []) + [("R3", r3)]
+    if mode == "repair":
+        rules += [("R4", r4), ("target", rt)]
+    elif mode == "build":
+        rules += [("R4", lambda: "" if cand["opens"] < base["opens"] else "R4 opens not lower")]
+    why = run_rules(rules, trace)
+    return (not why), why
 
 
 def check(candidate, base, kicad_cli="kicad-cli", log=print, stats=None, report=None, keep=None):

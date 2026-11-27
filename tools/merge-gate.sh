@@ -8,6 +8,7 @@
 set -u
 WT=${1:?worktree}; HERE=$(cd "$(dirname "$0")/.." && pwd); BASE=${2:-$HERE/docs/TEST-BASELINE.txt}
 PY=${PY:-/usr/bin/python3}
+"$PY" "$HERE/tools/ledger-lint.py" "$WT" || true          # B2: information only, never fails the gate (yet)
 out=$(mktemp); trap 'rm -f "$out"' EXIT
 # Gate queue (2026-11-26): 5-6 concurrent gates on 32 cores gave load 90-170, timeouts (rc 124, 149 failures) and
 # timing flakes. At most GATE_SLOTS gates run at once; the rest wait for a slot (the wait is not part of the timeout).

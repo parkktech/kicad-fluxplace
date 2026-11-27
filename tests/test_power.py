@@ -259,10 +259,10 @@ def test_widen_necks_a_narrow_pad_end_and_widens_only_the_far_part(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     PW.widen(src, G4_CONS, out)
     trs = _g4_tracks(out, "VBAT")
-    pad_piece = [t for t in trs if abs(t[0] - 0.15) < 1e-3]     # the piece at the pad keeps the old width
+    pad_piece = [t for t in trs if abs(t[0] - 0.25) < 1e-3]     # the piece at the pad takes the pad's width (0.25 mm, probe ok)
     far_piece = [t for t in trs if abs(t[0] - round(need, 4)) < 1e-3]
     assert len(pad_piece) == 1 and len(far_piece) == 1
-    assert abs(pad_piece[0][1] - 2) < 1e-3 and abs(pad_piece[0][3] - (2 + need)) < 1e-3   # split max(W, 0.5) from the pad
+    assert abs(pad_piece[0][1] - 2) < 1e-3 and abs(pad_piece[0][3] - (2 + max(need, 0.5))) < 1e-3   # split max(W, 0.5) from the pad
     assert abs(far_piece[0][3] - 18) < 1e-3
 
 
@@ -280,8 +280,7 @@ def _locked_flags(path, net):
 
 
 def test_locked_rail_track_is_not_widened_by_default_protect_empty_keeps_lock(tmp_path):
-    """PHASE3G G1b d: the cause of the old skip was `t.IsLocked()`; now a locked rail track of an unprotected net is widened
-    in place and stays locked."""
+    """W37: a locked rail track of an unprotected net gets a wider UNLOCKED track over it; the locked original is kept as it was."""
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
@@ -290,8 +289,11 @@ def test_locked_rail_track_is_not_widened_by_default_protect_empty_keeps_lock(tm
     rec = PW.widen(src, G4_CONS, out)
     need = _g4_need()
     assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and rec["skipped"]["locked_mm"] == 0
-    assert [round(w, 4) for w, *_ in _g4_tracks(out, "VBAT")] == [round(need, 4)]
-    assert _locked_flags(out, "VBAT") == [True]
+    assert sorted(round(w, 4) for w, *_ in _g4_tracks(out, "VBAT"))[-1] == round(need, 4)
+    assert sorted(_locked_flags(out, "VBAT")) == [False, True]
+    assert any(abs(w - _g4_tracks(src, "VBAT")[0][0]) < 1e-6 for w, *_ in _g4_tracks(out, "VBAT"))      # the locked original width is intact
+    rec2 = PW.widen(out, G4_CONS, str(tmp_path / "out2.kicad_pcb"))                                     # idempotent: no second overlay
+    assert rec2["widened_mm"] == 0
 
 
 def test_locked_rail_track_of_protected_net_is_skipped_and_counted(tmp_path):
@@ -321,7 +323,7 @@ def test_protected_pair_leg_named_net_is_left_alone_when_passed_in_protect(tmp_p
     assert rec["widened_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["locked_mm"] > 0
 
 
-def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
+def test_necked_locked_rail_track_stays_whole_and_the_far_part_is_overlaid_unlocked(tmp_path):
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     need = _g4_need()
@@ -329,11 +331,13 @@ def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
     _lock_all(src)
     out = str(tmp_path / "out.kicad_pcb")
     PW.widen(src, G4_CONS, out)
-    assert _locked_flags(out, "VBAT") == [True, True]
+    assert sorted(_locked_flags(out, "VBAT")) == [False, True]
     assert len(_g4_tracks(out, "VBAT")) == 2 and any(abs(t[0] - round(need, 4)) < 1e-3 for t in _g4_tracks(out, "VBAT"))
 
 
-def test_pour_zone_skip_is_counted_per_net(tmp_path, monkeypatch):
+def test_copper_inside_a_same_net_pour_is_widened_too(tmp_path, monkeypatch):
+    """W34: check() (D71da) gives a zone no carve-out, so the rung must not skip the narrow copper inside one (it refused every rail
+    that had a zone: ledger "route gate (W16 route-4)")."""
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     from fluxplace import gaps as GP
@@ -343,10 +347,8 @@ def test_pour_zone_skip_is_counted_per_net(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda board: {"VBAT"})
     out = tmp_path / "out.kicad_pcb"
     rec = PW.widen(src, G4_CONS, str(out))
-    assert rec["widened_mm"] == 0 and not out.exists()
-    assert rec["skipped"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
-    assert rec["skipped"]["locked_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
-
+    assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and out.exists()
+    assert rec["skipped"]["pour_zone_mm"] == 0
 
 def test_add_vias_places_the_missing_via_beside_the_existing_one(tmp_path, monkeypatch):
     from fluxplace import handroute as HR, routediag as RD
@@ -392,3 +394,85 @@ def test_pour_rerun_on_a_board_with_rail_zones_does_not_touch_decayed_bindings_a
     assert not [f for f in os.listdir(tmp_path) if ".strip." in f]
     rec = PW.pour_rails(out, CONS_POUR, str(tmp_path / "out3.kicad_pcb"), layers=4, nets=["+3V3"])
     assert rec["added"] == [] and rec["before"] is None and not (tmp_path / "out3.kicad_pcb").exists()
+
+
+def test_widened_locked_rail_stub_passes_the_protection_check_and_a_pair_change_is_refused(tmp_path):
+    """W37 (ledger "route (W16 finish-2, 1f163d6)"): the widen added copper over the locked stub, it did not change it; the manifest
+    commit check accepts that and still refuses a modified protected item."""
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    from test_routerules_syn import _board
+    from fluxplace import boardwrite as BW
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 9, 18, 9, "SIG")])
+    _lock_all(src)
+    man = BW.seed(src)
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert BW.verify(src, out, manifest=man)["ok"]
+    b = P.LoadBoard(out)                                                    # a modified protected (locked) item is refused
+    for t in b.GetTracks():
+        if t.GetNetname() == "SIG":
+            t.SetWidth(t.GetWidth() + 100000)
+    bad = str(tmp_path / "bad.kicad_pcb")
+    P.SaveBoard(bad, b)
+    assert BW.verify(src, bad, manifest=man)["changed"] == ["SIG"]
+
+
+# ---- W42: widen to each run's own need; power_mag weighted by shortfall -----------------------------------------------
+def test_widen_targets_the_runs_own_solved_need_not_the_rail_need(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    need = _g4_need()
+    run = {"layers": ["F.Cu"], "len": 16.0, "min_w": 0.15, "need": need, "n": 1, "members": [0], "layer": "F.Cu"}
+    seg = {"layer": "F.Cu", "x1": 2.0, "y1": 6.0, "x2": 18.0, "y2": 6.0, "width": 0.15, "need": need, "len": 16.0}
+    real = PW.check
+
+    def fake(facts, cons, dc=None, board=None, detail=None):
+        detail["VBAT"] = [{"run": run, "segs": [seg], "need_run": 0.32, "amps": 0.3, "cleared": False}]
+        return []
+    monkeypatch.setattr(PW, "check", fake)
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    monkeypatch.setattr(PW, "check", real)
+    ws = [w for w, *_ in _g4_tracks(out, "VBAT")]
+    assert ws and min(ws) == pytest.approx(0.35, abs=1e-3) and need > 0.7       # ceil05(0.32), not the rail's need
+
+
+def test_widen_leaves_a_run_that_is_already_wide_enough_for_its_own_current(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    need = _g4_need()
+    run = {"layers": ["F.Cu"], "len": 16.0, "min_w": 0.15, "need": need, "n": 1, "members": [0], "layer": "F.Cu"}
+    seg = {"layer": "F.Cu", "x1": 2.0, "y1": 6.0, "x2": 18.0, "y2": 6.0, "width": 0.15, "need": need, "len": 16.0}
+    monkeypatch.setattr(PW, "check", lambda f, c, dc=None, board=None, detail=None: detail.update(
+        VBAT=[{"run": run, "segs": [seg], "need_run": 0.15, "amps": 0.05, "cleared": True}]) or [])
+    out = str(tmp_path / "out.kicad_pcb")
+    assert PW.widen(src, G4_CONS, out)["widened_mm"] == 0 and not os.path.exists(out)
+
+
+def test_power_width_value_is_a_shortfall_so_a_partial_widen_scores_lower():
+    from test_power_neck import seg, cons, STACK
+    def val(w):
+        f = {"copper_layers": 2, "stackup": STACK, "track_geom": [seg(0, 0, 30, 0, w)]}
+        return [x for x in PW.check(f, cons(2.0, False)) if x["code"] == "POWER_WIDTH"][0]["value"]
+    a, b, c = val(0.15), val(0.4), val(0.8)
+    assert a > b > 0 and a < 30.0 + 1e-9 and 0 < b < a
+    assert c == 0 or c < b
+
+
+def _dups(path):
+    from fluxplace import dedupe
+    return len(dedupe.duplicates(open(path, errors="surrogateescape").read()))
+
+
+def test_widen_never_stacks_an_exact_duplicate_under_a_wide_twin(tmp_path):
+    """W68: two unlocked narrow tracks with the same ends (the second reversed): widening both made two identical wide tracks
+    (DUPLICATE_COPPER at the route gate's close commit). The second is now removed as covered by the first."""
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (18, 6, 2, 6, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert _dups(out) == 0 and len(_g4_tracks(out, "VBAT")) == 1, _g4_tracks(out, "VBAT")

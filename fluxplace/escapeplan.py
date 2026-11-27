@@ -65,6 +65,8 @@ def plan_params(cons=None, **over):
     pr["design_pitch_mm"] = (pr["design_track_mm"] or pr["track_mm"]) + (pr["design_clearance_mm"] or pr["clearance_mm"])
     pr["design_pitch_mm"] = max(pr["design_pitch_mm"], pr["pitch_mm"])
     pr["slot_mm"] = round(pr["via_mm"] + pr["clearance_mm"] + 0.02, 3)
+    from . import forbid as FB
+    pr["forbid"] = FB.windows(cons)            # mask windows stripped before routing (B7): still forbidden to foreign copper
     return pr
 
 
@@ -194,7 +196,10 @@ class Obstacles:
                 n += 1
         self.kt = [z for z in B["zones"] if z["keepout"] and z["no_tracks"] and z["pts"]]
         self.kv = [z for z in B["zones"] if z["keepout"] and z.get("no_vias", z["no_tracks"]) and z["pts"]]
-        for z in self.kt + self.kv:
+        from . import forbid as FB
+        mo = [dict(z) for z in B.get("mask_open", []) if z["pts"]]
+        self.mo = [dict(z) for z in FB.augment({"copper": B["copper"], "mask_open": mo}, pr.get("forbid"))["mask_open"]]
+        for z in self.kt + self.kv + self.mo:
             xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
             z["_bb"] = (min(xs), min(ys), max(xs), max(ys))
 
@@ -222,25 +227,34 @@ class Obstacles:
                 return True
         return False
 
-    def keepout_hit(self, x, y, layers, vias=False):
+    def keepout_hit(self, x, y, layers, vias=False, net=None, r=0.0):
+        """Name of the forbidden region a track point (layers = its layer) or a via (vias=True, every layer) of copper radius r touches, else None.
+        Regions: rule-area keep-outs (no tracks / no vias) and solder-mask openings (B["mask_open"]: another net's copper there is exposed);
+        the only exemption is the opening's own net (the copper zone that covers it); net=None blocks every net."""
         for z in (self.kv if vias else self.kt):
             if not (z["layers"] & layers):
                 continue
             b = z["_bb"]
-            if b[0] <= x <= b[2] and b[1] <= y <= b[3] and GM.poly_has(z["pts"], x, y):
+            if b[0] - r <= x <= b[2] + r and b[1] - r <= y <= b[3] + r and GM.poly_near(z["pts"], x, y, r):
                 return z.get("name") or z.get("owner") or "keep-out"
+        for z in self.mo:
+            if not (vias or z["layers"] & layers) or (net and net == z["owner"]):
+                continue
+            b = z["_bb"]
+            rr = r + GM.MASK_MARGIN
+            if b[0] - rr <= x <= b[2] + rr and b[1] - rr <= y <= b[3] + rr and GM.poly_near(z["pts"], x, y, rr):
+                return z["name"]
         return None
 
-    def keepout_rect(self, rect, layers, vias=False):
-        for z in (self.kv if vias else self.kt):
-            if not (z["layers"] & layers) or not GM.overlap(z["_bb"], rect):
-                continue
-            for x in (rect[0], (rect[0] + rect[2]) / 2, rect[2]):
-                for y in (rect[1], (rect[1] + rect[3]) / 2, rect[3]):
-                    if GM.poly_has(z["pts"], x, y):
-                        return z.get("name") or z.get("owner") or "keep-out"
-            if any(rect[0] <= px <= rect[2] and rect[1] <= py <= rect[3] for px, py in z["pts"]):
-                return z.get("name") or z.get("owner") or "keep-out"
+    def seg_hit(self, a, b, w, layer, net=None):
+        """keepout_hit along the track a-b (0.1 mm samples, copper half-width w / 2) on `layer`."""
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        n = max(1, int(L / 0.1))
+        for i in range(n + 1):
+            x, y = a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n
+            z = self.keepout_hit(x, y, frozenset({layer}), net=net, r=w / 2)
+            if z:
+                return z
         return None
 
 
@@ -285,7 +299,7 @@ def lane_free(ob, B, pr, q, d, layers, length):
         if s >= best:
             break
         x, y = sx + d[0] * s, sy + d[1] * s
-        z = ob.keepout_hit(x, y, frozenset(layers))
+        z = ob.keepout_hit(x, y, frozenset(layers), net=q["net"], r=hw)
         if z:
             best, why = s, f"keep-out {z}"
             break
@@ -442,7 +456,7 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
         allc = frozenset(B["copper"])
         if not GM.in_outline(B, (x - via_r, y - via_r, x + via_r, y + via_r), pr["edge_clr_mm"]):
             ok = False
-        elif ob.keepout_hit(x, y, allc, vias=True) or ob.keepout_rect((x - via_r, y - via_r, x + via_r, y + via_r), allc, True):
+        elif ob.keepout_hit(x, y, allc, vias=True, r=via_r):
             ok = False
         else:
             for kind, rc, n, ref_, num in ob.hits(box, 0.0, allc, ""):

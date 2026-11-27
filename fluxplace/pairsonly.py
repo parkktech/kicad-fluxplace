@@ -158,7 +158,12 @@ def _commit_guard(board, out, sel, rows, log):
     from . import boardwrite as BW
     if not os.path.exists(out):
         return
-    man = BW.fresh_manifest(board, log)
+    try:
+        man = BW.fresh_manifest(board, log)
+    except BW.ManifestStale as e:                       # B1: an unexplained edit is not legitimised: the input board is the output
+        log(f"  commit refused: {e}")
+        shutil.copy(board, out)
+        return
     if not man["nets"]:
         man = BW.seed_from_board(board, None, log=log)
     if not man["nets"]:
@@ -227,9 +232,11 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                                reason=f"{len(lk)} locked item(s): " + "; ".join(lk[:6]) + (" ..." if len(lk) > 6 else "") + " (use --unlock to re-route and re-lock this pair)")
                     log(f"  {name}: refused, {row['reason']}")
                     continue
-                if set(pr) & zoff:
+                if zoff is None:                         # A6: impedance UNKNOWN is never "in tolerance": the pair is re-laid
+                    row["impedance_unknown"] = True
+                elif set(pr) & zoff:
                     row["impedance_off"] = sorted(set(pr) & zoff)
-                if aud0[pr]["status"] == "complete" and not (set(pr) & zoff) and name not in force:
+                if aud0[pr]["status"] == "complete" and zoff is not None and not (set(pr) & zoff) and name not in force:
                     row.update(status="already_ok", reason="already connected, matched and in tolerance: not touched")
                     continue
                 if lk:

@@ -45,6 +45,7 @@ def board(tmp_path, body, name="b.kicad_pcb", outline=(0, 0, 100, 80), edge=None
     edge = edge or f'(gr_rect (start {x0} {y0}) (end {x1} {y1}) (layer "Edge.Cuts"))\n'
     p = tmp_path / name
     p.write_text(HEAD + edge + body + ")\n")
+    (tmp_path / (name[:-len(".kicad_pcb")] + ".kicad_pro")).write_text("{}")      # B3a: the pipeline refuses a board without its project file
     return str(p)
 
 

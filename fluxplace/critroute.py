@@ -15,8 +15,13 @@ CLASSES = ("rf", "clock")            # netclass classes pre-routed by default; t
 PACKET_MAX = 4096                    # bytes per packet file
 MAX_CONNS, MAX_HOT, MAX_AVOID = 6, 4, 6
 HOT_MM = 15.0                        # a hot region counts when its centre is within this of a connection end
+RF_VIA_COST = 20.0                   # suggest via cost (mm of track) for an RF net: every layer transition is an impedance discontinuity
 GRID_MM = 10.0                       # density.compute default grid: region x/y is the cell corner
 ASK = "order, layers, avoid circles [x, y, r] for this net; no coordinates of copper"
+
+
+class _Refused(Exception):
+    """The guarded lay declined the path (its reason is the message): a measured outcome, not an error."""
 
 
 def _log(msg):
@@ -70,7 +75,8 @@ def _fit(p):
 def packet(board, net, cons, spec, cons_path=None, cls=None, R=None, B=None):
     """Packet for one critical net (keys as the recipe's schema). `cls`, `R`, `B` may be passed in to avoid recomputing."""
     from . import density as DS, gaps, handroute as HR, netclass as NC, routediag as RD
-    B = B if B is not None else RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(B if B is not None else RD.load(board), FB.windows(cons))      # B7
     cls = cls if cls is not None else NC.classify(B, cons, spec)
     R = R if R is not None else HR.open_nets(board, constraints=cons_path)
     idx = [i for i, r in enumerate(R["connections"]) if r["net"] == net][:MAX_CONNS]
@@ -186,14 +192,22 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     order = [n for n in acts.get("order", []) if n in names]
     order += [n for n in names if n not in order]
     default_layers = gaps.signal_layers(board)
+    from . import rfroute as RFR
+    rf_outer = RFR.outer_layers(default_layers)
+    rf_w = RFR.widths(board, cons, [c["net"] for c in crit if c["class"] == "rf"], rf_outer) if rf_outer else {}
     cur, base = board, gaps.measure(board)
     tried, kept, lines, n_try, open_now = set(), [], [], 0, None
     for net in order:
         a = acts.get("nets", {}).get(net, {})
         layers = a.get("layers") or default_layers
+        width = None
+        if net in rf_w:                                 # RF: outer layers at the impedance width, never the default width on an inner layer
+            layers = [x for x in layers if x in rf_outer] or rf_outer
+            width = rf_w[net]["w"]
         avoid = _avoid(a.get("avoid"))
         while True:
-            R = HR.open_nets(cur, constraints=cons_path)
+            M = HR._model(cur, cons_path)
+            R = HR.open_nets(cur, constraints=cons_path, M=M)
             open_now = {r["net"] for r in R["connections"]}
             todo = [(i, r) for i, r in enumerate(R["connections"]) if r["net"] == net and _key(r) not in tried]
             if not todo:
@@ -202,12 +216,14 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             tried.add(_key(rec))
             n_try += 1
             t0 = time.time()
-            r = HR.suggest(cur, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None)
+            r = HR.suggest(cur, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None, width=width, rec=rec, M=M, via_cost=RF_VIA_COST if net in rf_w else 2.0)
             result, why, tmp = "no-path", str(r.get("reason") or "")[:200], None
             if r.get("found"):
-                tmp = HR._tmp_beside(cur, f"critroute{n_try}")
+                tmp = HR._tmp_beside(board, f"critroute{n_try}")   # named from the stage input: a name built on `cur` grew by one tag per kept path (ENAMETOOLONG at ~14)
                 try:
-                    HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
+                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True, width=width)
+                    if not res.get("accepted"):             # a refused lay never writes `tmp`: it is still the empty mkstemp slot (W30: "Unexpected end of input")
+                        raise _Refused(str(res.get("reason") or "lay refused")[:200])
                     m = gaps.measure(tmp)
                     ok = m["opens"] < base["opens"] and m["shorts"] <= base["shorts"]
                     result = "kept" if ok else "dropped"
@@ -218,13 +234,15 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                         kept.append({"net": net, "conn": i, "len_mm": r.get("length_mm")})
                         cur, base = tmp, m
                         tmp = None
+                except _Refused as e:
+                    result, why = "refused", str(e)
                 except Exception as e:                      # noqa: BLE001 - a failed lay is one failed try, not a stage error
                     result, why = "error", f"{type(e).__name__}: {str(e)[:160]}"
             if tmp:
                 _drop(tmp)
             rec_log = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "stage": "critroute", "net": net, "conn": i,
                        "class": next((c["class"] for c in crit if c["net"] == net), None), "method": "suggest+lay",
-                       "layers": layers, "avoid": len(avoid), "result": result, "why": why,
+                       "layers": layers, "width": width, "avoid": len(avoid), "result": result, "why": why,
                        "s": round(time.time() - t0, 1), "ai_tokens": acts.get("tokens", 0)}
             calllog.append(rec_log, attempts)
             lines.append(f"{net} conn {i}: {result} ({why})")
@@ -240,7 +258,9 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
 
 def stage(c, n, board):
     """Pipeline stage `critroute`. No actions file and `[ai] mode` = "packet" (default): writes the packets and returns
-    verdict "packets" (the pipeline stops with exit 5). Otherwise lays the suggested paths (defaults when no file)."""
+    verdict "packets" (the pipeline stops with exit 5) only when `[ai] answer` = "required". Otherwise (default "optional") an
+    unanswered packet set does not stop the flow: each net gets its own try with the default order and layers, and the
+    result carries `ai_unanswered` (count, packet files); the packets stay on disk for an optional agent pass."""
     from . import gaps
     d = c.dir(n, "critroute")
     ai = os.path.join(d, "ai")
@@ -249,7 +269,8 @@ def stage(c, n, board):
     if not crit:
         return {"verdict": "pass", "line": "critroute: no critical net open", "board": board}
     from . import netclass as NC, routediag as RD, handroute as HR
-    B = RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(RD.load(board), FB.windows(c.cons))      # B7
     cls = NC.classify(B, c.cons, c.spec)
     R = HR.open_nets(board, constraints=c.cons_path)
     names = [r["net"] for r in crit]
@@ -260,14 +281,25 @@ def stage(c, n, board):
     apath = os.path.join(ai, "actions.json")
     mode = str(((c.cons or {}).get("ai") or {}).get("mode", "packet"))
     acts = load_actions(apath, names, gaps.copper_layers(board)) if os.path.exists(apath) else None
+    unanswered = None
     if acts is None and mode == "packet":
-        return {"verdict": "packets", "board": board, "next": [f"write {apath} (order, nets: layers, avoid circles) and re-run"],
-                "line": f"critroute: {len(names)} packet(s) in {ai}; write {apath} and re-run"}
+        if gaps.ai_answer_required(c.cons):
+            return {"verdict": "packets", "board": board, "next": [f"write {apath} (order, nets: layers, avoid circles) and re-run"],
+                    "line": f"critroute: {len(names)} packet(s) in {ai}; write {apath} and re-run"}
+        unanswered = True
     res = apply(board, os.path.join(d, "board.kicad_pcb"), acts, c.cons_path, c.cons, calllog.attempts_path(board), crit=crit)
     still = [x for x in names if x in res["open_nets"]]
     with open(os.path.join(d, "stage.log"), "a") as fh:
         fh.write("\n".join(res["lines"]) + "\n")
     line = (f"critroute: {len(res['kept'])} path(s) kept, {len(names) - len(still)}/{len(names)} critical net(s) closed"
             + (f"; open: {', '.join(still)}" if still else ""))
-    return {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
-            "next": [f"critroute open: {x}" for x in still]}
+    out = {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
+           "next": [f"critroute open: {x}" for x in still]}
+    if unanswered:
+        from . import packets as PK, questions as QS
+        ans = {**{str(k): str(v) for k, v in ((c.cons or {}).get("answers") or {}).items()}, **QS.parse_answers(getattr(getattr(c, "a", None), "answer", None))}
+        ua = PK.resolve([(os.path.join(ai, _safe(x) + ".packet.json"), x) for x in names], set(still), ans, ai_dir=ai)
+        out["ai_unanswered"] = ua
+        if ua["questions"]:
+            out.update(verdict="questions", next=[f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]])
+    return out

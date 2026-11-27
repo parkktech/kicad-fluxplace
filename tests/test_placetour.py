@@ -206,13 +206,13 @@ def _script_stage(monkeypatch, tmp_path, rounds, keys):
         out = []
         for j in jobs:
             cid = j["tag"].split("-", 1)[1]
-            out.append({"tag": j["tag"], "routed": f"/routed/{cid}", "blame": {"k": keys[cid]}, "key": list(keys[cid]),
+            out.append({"tag": j["tag"], "routed": f"/routed/{cid}", "blame": {"k": keys[cid]}, "key": [0, 0, 0] + list(keys[cid]),
                         "png": None})
         return out
 
     monkeypatch.setattr(PTm, "judge", lambda a, b, outdir, P, cons=None, spec=None, log=None:
                         {"routed": "/routed/input", "blame": {"k": keys["input"]}, "source": "route_review", "secs": 0})
-    monkeypatch.setattr(PTm, "judge_key", lambda routed, blame, cons=None: tuple(blame["k"]))
+    monkeypatch.setattr(PTm, "class_key", lambda routed, blame, cons=None, spec=None: (0, 0, 0) + tuple(blame["k"]))
     monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None: [{"id": "x", "kind": "nudge", "moves": {}}])
     monkeypatch.setattr(PTm, "tier1", fake_tier1)
     monkeypatch.setattr(PTm, "gate_state", lambda B, cons, spec: {"collision": 0})
@@ -402,3 +402,71 @@ def test_stage_reports_honoured_rows_on_the_written_board(monkeypatch, tmp_path)
     assert [(x["id"], x["hard"], x["ok"]) for x in pg[0]["criteria"] if x["id"] == "far"] == [("far", True, False)]
     gate = next(l for l in lines if l["kind"] == "gate_open")
     assert [(x["id"], x["hard"], x["ok"]) for x in gate["candidates"][0]["criteria"] if x["id"] == "far"] == [("far", True, False)]
+
+
+# ---- judge guard, minor gains, budgets
+def _k(opens, hot=1, occ=0.5, vias=600, det=80.0, cls=(0, 0, 0)):
+    return tuple(cls) + (opens, hot, occ, vias, det)
+
+
+def test_beats_guard_cases():
+    P = PT.params({})
+    ref = _k(44, hot=1, occ=0.51, vias=609)
+    assert PT._beats(_k(43, hot=1, occ=0.51, vias=610), ref, P)                       # plain gain, guard holds
+    assert not PT._beats(ref, ref, P) and not PT._beats(_k(45), ref, P)               # not smaller
+    assert PT.guard_why(_k(42, hot=3, occ=1.56, vias=632), ref, P) == "guard: hot 1->3"
+    assert not PT._beats(_k(42, hot=3, occ=1.56, vias=632), ref, P)
+    assert PT.guard_why(_k(42, hot=1, occ=0.51, vias=632), ref, P) == "guard: vias +23"
+    assert PT._beats(_k(42, hot=1, occ=0.51, vias=627), ref, P)                       # +18 <= 3 % of 609
+    assert PT._beats(_k(40, hot=3, vias=700), ref, P)                                 # gain 4 > guard_opens: guard off
+    assert PT._beats(_k(44, hot=1, occ=0.51, vias=609, det=79.0), ref, P)            # no open gain: plain order, no guard
+    assert PT._beats(_k(44, hot=2, occ=0.6, vias=609), _k(44, hot=3, occ=1.5, vias=609), P)
+    assert PT._beats(_k(43, cls=(0, 0, 0)), _k(44, cls=(1, 0, 0)), P)                 # class opens differ: guard off
+    assert PT._beats(_k(50, hot=9, vias=900, cls=(0, 0, 0)), _k(40, cls=(1, 0, 0)), P)
+    assert PT.guard_why(_k(43, hot=2), _k(44, hot=1), PT.params({"placetour": {"guard_opens": 0}})) == ""    # guard_opens 0: off
+    assert not PT._beats(_k(43, vias=640), ref, PT.params({"placetour": {"guard_vias_frac": 0.01}}))
+
+
+def test_minor_gain_counts_as_stale_but_advances(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (5, 1, 0.5, 600, 80.0), "A": (4, 1, 0.5, 600, 80.0), "B": (4, 1, 0.5, 598, 79.0), "C": (4, 1, 0.5, 590, 70.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], ["B"], ["C"]], keys)
+    c = _stage_ctx(tmp_path, {"max_rounds": 5, "no_gain_rounds": 2})
+    r = PTm.stage(c, 3, board)
+    d = c.dir(3, "placetour")
+    prog = __import__("json").load(open(os.path.join(d, "progress.json")))
+    assert prog["rounds"] == 3 and prog["reason"] == "no gain for 2 round(s)"      # A real, B and C decimal-only: stale 1, 2
+    assert open(r["board"]).read() == "moved-C"                                       # the minor winners still advanced the board
+    table = open(os.path.join(d, "TOURNAMENT.md")).read()
+    assert "| r1-A |" in table and "winner" in table and "minor" in table
+
+
+def test_stage_guard_refusal_in_verdict(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (5, 1, 0.5, 600, 80.0), "A": (3, 3, 1.5, 640, 78.0), "B": (5, 1, 0.5, 600, 79.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A", "B"]], keys)
+    c = _stage_ctx(tmp_path, {"max_rounds": 1})
+    r = PTm.stage(c, 3, board)
+    table = open(os.path.join(c.dir(3, "placetour"), "TOURNAMENT.md")).read()
+    assert "guard: hot 1->3" in table and open(r["board"]).read() == "moved-B"
+
+
+def test_stage_budget_skips_a_round_that_does_not_fit(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (9, 0, 0.0, 0, 0.0), "A": (8, 0, 0.0, 0, 0.0), "B": (7, 0, 0.0, 0, 0.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], ["B"]], keys)
+    now, fake = {"t": 1000.0}, PTm.LA._run_jobs
+
+    def slow_jobs(*a, **k):
+        now["t"] += 50.0                                                              # one judge = 50 s of a 1-minute budget
+        return fake(*a, **k)
+    monkeypatch.setattr(PTm.LA, "_run_jobs", slow_jobs)
+    monkeypatch.setattr(PTm.time, "time", lambda: now["t"])
+    c = _stage_ctx(tmp_path, {"max_rounds": 5, "no_gain_rounds": 9, "budget_min": 1.0})
+    PTm.stage(c, 3, board)
+    prog = __import__("json").load(open(os.path.join(c.dir(3, "placetour"), "progress.json")))
+    assert prog["rounds"] == 1 and "budget_min" in prog["reason"]
+
+
+def test_params_budget_default():
+    assert PT.params({})["budget_min"] == 45.0 and PT.params({"placetour": {"budget_min": "10"}})["budget_min"] == 10.0

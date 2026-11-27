@@ -222,6 +222,42 @@ def neck_heat_c(current_a, length_mm, width_mm, oz):
     return current_a ** 2 * CU_RHO_OHM_M * (length_mm * 1e-3) ** 2 / (8 * CU_K_W_MK * a * a)
 
 
+def neck_width_mm(current_a, length_mm, oz, rise_c=DEFAULT_RISE_C):
+    """D71da test 2 inverted: the narrowest width (mm) for which a run `length_mm` long holds dT <= rise_c at `current_a`
+    (dT = I^2 rho L^2 / (8 k A^2) -> w = I L sqrt(rho / (8 k dT)) / t)."""
+    t = CU_UM_PER_OZ * oz * 1e-6
+    return current_a * (length_mm * 1e-3) * math.sqrt(CU_RHO_OHM_M / (8 * CU_K_W_MK * rise_c)) / t * 1e3
+
+
+def neck_drop_mv(current_a, length_mm, width_mm, oz):
+    """DC drop (mV) across a neck-down at full rail current: I rho L / (w t)."""
+    return current_a * CU_RHO_OHM_M * (length_mm * 1e-3) / ((width_mm * 1e-3) * (CU_UM_PER_OZ * oz * 1e-6)) * 1e3
+
+
+LADDER_MM = (1.4, 1.0, 0.6)     # W14 measured (ONE-SHOT-LEDGER 2026-11-19 "rails first"): widest first IPC, 1.4, 1.0, 0.6
+LADDER_INNER_MAX_MM = 1.0       # inner layers only at the small widths (W14: a wide inner spine eats pair capacity)
+
+
+def ladder_widths(cons, net, top_mm, track_mm=0.15):
+    """Rung widths (mm, widest first) the rails step tries for one pour rail: its routed width `top_mm` (IPC outer), then
+    `[route] power_ladder_mm` (default 1.4, 1.0, 0.6) below it, never under the signal width `track_mm`."""
+    rt = (cons or {}).get("route") or {}
+    rungs = [float(x) for x in rt.get("power_ladder_mm", LADDER_MM)]
+    out = [round(float(top_mm), 2)]
+    for w in sorted(rungs, reverse=True):
+        if w < out[-1] - 1e-6 and w >= float(track_mm) - 1e-6:
+            out.append(round(w, 2))
+    return out
+
+
+def ladder_layers(cons, sig, width_mm, fallback=False):
+    """Layers of a rung: outer copper for the rail's own (first) rung and for any width above LADDER_INNER_MAX_MM; every
+    signal layer for a fallback rung at or below it."""
+    if not fallback or width_mm > LADDER_INNER_MAX_MM + 1e-9:
+        return rail_layers(cons, sig)
+    return list(sig)
+
+
 def narrow_runs(segs, vias=()):
     """Group narrow segments [{layer, x1, y1, x2, y2, len, width, need}] into connected runs (shared endpoints within
     NECK_JOIN_MM on a layer; narrow ends that meet at one of the net's `vias` [{x, y, dia_mm}] are one run across the
@@ -254,7 +290,10 @@ def narrow_runs(segs, vias=()):
             par[find(i)] = find(at[0])
     runs = {}
     for i, g in enumerate(segs):
-        d = runs.setdefault(find(i), {"layers": set(), "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0})
+        d = runs.setdefault(find(i), {"layers": set(), "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0, "members": []})
+        d["members"].append(i)
+        if "x1" in g and "at" not in d:
+            d["at"] = (round(g["x1"], 2), round(g["y1"], 2))
         d["layers"].add(g["layer"])
         d["len"] += g.get("len", 0.0)
         d["min_w"] = min(d["min_w"], g["width"])
@@ -322,11 +361,285 @@ def _neck_tests(run, r, outer, stackup=None):
     return fails
 
 
-def check(facts, cons, dc=None):
+def _is_decap(ref):
+    return str(ref).upper().startswith("C")
+
+
+def _board_ctx(board_path, rails):
+    """pcbnew view for the per-run physics: {b, pads: {net: [(ref, num, box, value, pin function)]}, copper: {net: (segs, vias)}}."""
+    import pcbnew
+    if not (isinstance(board_path, str) and os.path.exists(board_path)):
+        return None
+    b = pcbnew.LoadBoard(board_path)
+    pads, copper = {}, {}
+    for p in b.GetPads():
+        if p.GetNetname() in rails:
+            bb = p.GetBoundingBox()
+            bb.Inflate(pcbnew.FromMM(0.1))
+            fp = p.GetParentFootprint()
+            cu = {b.GetLayerName(l) for l in p.GetLayerSet().CuStack()}
+            pads.setdefault(p.GetNetname(), []).append((fp.GetReference(), p.GetNumber(), bb, fp.GetValue(),
+                                                        (p.GetPinFunction() or p.GetName() or ""),
+                                                        (pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)), cu,
+                                                        (pcbnew.ToMM(bb.GetX()), pcbnew.ToMM(bb.GetY()),
+                                                         pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()))))
+    for t in b.GetTracks():
+        n = t.GetNetname()
+        if n not in rails:
+            continue
+        segs, vias = copper.setdefault(n, ([], []))
+        if t.GetClass() == "PCB_VIA":
+            vias.append((pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y), pcbnew.ToMM(t.GetWidth()) / 2))
+        elif t.GetClass() == "PCB_TRACK":
+            segs.append((b.GetLayerName(t.GetLayer()), pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y),
+                         pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y), pcbnew.ToMM(t.GetWidth())))
+    return {"b": b, "pads": pads, "copper": copper}
+
+
+def parse_ohms(value):
+    """'10k' -> 10000.0, '4k7' -> 4700.0, '0R' -> 0.0, '220' -> 220.0, '1M' -> 1e6; None when the Value is not a resistance."""
+    import re
+    v = str(value or "").strip().replace("Ω", "R").replace("ohm", "R").replace(" ", "")
+    m = re.match(r"^(\d+)([kKmMrR])(\d+)$", v)              # 4k7, 2R2
+    if m:
+        v = f"{m.group(1)}.{m.group(3)}{m.group(2)}"
+    m = re.match(r"^(\d+(?:\.\d+)?)([kKmMrR]?)", v)
+    if not m:
+        return None
+    return float(m.group(1)) * {"": 1.0, "r": 1.0, "k": 1e3, "m": 1e6}[m.group(2).lower()]
+
+
+def _seg_dist(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def end_kind(ctx, net, run, segs):
+    """What a run with no end pad is: "dangling stub" (an end touches nothing: no pad, via, other same-net copper or zone fill:
+    nothing downstream, 0 A), or "via/junction link" (every end lands on a via, a wider same-net track or a pour: a link
+    inside the rail tree, its current is not resolvable from the pads) -> (kind, free_ends)."""
+    import pcbnew
+    wide, vias = ctx["copper"].get(net, ([], []))
+    mem = [segs[i] for i in run["members"]]
+    deg = {}
+    for g in mem:
+        for k in (("x1", "y1"), ("x2", "y2")):
+            key = (round(g[k[0]], 2), round(g[k[1]], 2))
+            deg[key] = deg.get(key, 0) + 1
+    free = 0
+    for (x, y), d in deg.items():
+        if d != 1:
+            continue
+        others = any(_seg_dist(x, y, x1, y1, x2, y2) <= w / 2 + 0.02 and w > max(g["width"] for g in mem) + 1e-6
+                     for _l, x1, y1, x2, y2, w in wide)
+        onvia = any(math.hypot(x - vx, y - vy) <= vr + 0.02 for vx, vy, vr in vias)
+        inzone = False
+        for z in ctx["b"].Zones():
+            if z.GetNetname() == net:
+                for lname in {g["layer"] for g in mem}:
+                    if not z.IsOnLayer(ctx["b"].GetLayerID(lname)):
+                        continue
+                    fill = z.GetFilledPolysList(ctx["b"].GetLayerID(lname))
+                    if fill is not None and fill.OutlineCount() and fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0):
+                        inzone = True
+        if not (others or onvia or inzone):
+            free += 1
+    return ("dangling stub" if free else "via/junction link"), free
+
+
+def zone_credit_mm(ctx, net, layer, seg, band_mm):
+    """Conducting width (mm) across segment `seg` ({x1,y1,x2,y2,width}) from filled same-net zones on `layer`: the area of the
+    zone fill inside the rectangle of the segment's length and `2 * band_mm` across, divided by the length (never below the
+    track's own width). Measured on the board's stored fill; no fill, no credit."""
+    import pcbnew
+    b = ctx["b"]
+    L = math.hypot(seg["x2"] - seg["x1"], seg["y2"] - seg["y1"])
+    lid = b.GetLayerID(layer)
+    if L < 0.01:
+        return seg["width"]
+    ux, uy = (seg["x2"] - seg["x1"]) / L, (seg["y2"] - seg["y1"]) / L
+    nx, ny = -uy * band_mm, ux * band_mm
+    rect = pcbnew.SHAPE_POLY_SET()
+    rect.NewOutline()
+    for x, y in ((seg["x1"] + nx, seg["y1"] + ny), (seg["x2"] + nx, seg["y2"] + ny), (seg["x2"] - nx, seg["y2"] - ny), (seg["x1"] - nx, seg["y1"] - ny)):
+        rect.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    got = 0.0
+    for z in b.Zones():
+        if z.GetNetname() != net or not z.IsOnLayer(lid):
+            continue
+        fill = z.GetFilledPolysList(lid)
+        if fill is None or fill.OutlineCount() == 0:
+            continue
+        inter = pcbnew.SHAPE_POLY_SET(rect)
+        inter.BooleanIntersection(fill)
+        got += inter.Area() / 1e12                 # nm^2 -> mm^2
+    return max(seg["width"], got / L)
+
+
+def _pad_amps(pad, npins, rows, src, tot, volts):
+    """Current (A) one pad of a rail draws, and the source of the figure: -> (amps | None, how). None = unknown.
+    Capacitor 0 A DC; MOSFET gate pin 0 A; resistor at most V_rail / R from its Value (0R = a series link: unknown); the
+    rail's source part: its total / its pins on the net; a load named by a single-load [[dcdrop]] row (`to`): that row's
+    current_a (per pin: / the part's pins on the net unless the row names the pin). Anything else: unknown."""
+    ref, pin = pad[0], str(pad[4]).upper()
+    if _is_decap(ref):
+        return 0.0, "capacitor 0 A DC"
+    if str(ref).upper().startswith("Q") and (pin in ("G", "GATE") or pin.startswith("G") and pin[1:].isdigit()):
+        return 0.0, "MOSFET gate 0 A"
+    if str(ref).upper().startswith("R") and ref != src:
+        ohms = parse_ohms(pad[3])
+        if ohms and volts:
+            return volts / ohms, f"resistor V/R ({pad[3]})"
+        return None, f"unknown ({ref} {pad[3] or 'no value'}: " + ("0R series link" if ohms == 0 else "no resistance value or rail voltage") + ")"
+    if ref == src and tot:
+        return tot / max(1, npins[ref]), "pin share (source)"
+    row = next((d for d in rows if len(d["to"] if isinstance(d.get("to"), list) else [d.get("to")]) == 1
+                and str((d["to"] if isinstance(d.get("to"), list) else [d["to"]])[0]).split(".")[0] == ref and d.get("current_a")), None)
+    if row is None:
+        return None, f"unknown ({ref} load current not in the budget)"
+    to = str((row["to"] if isinstance(row["to"], list) else [row["to"]])[0])
+    return float(row["current_a"]) / (1 if "." in to else max(1, npins[ref])), "budget (dcdrop)"
+
+
+def rail_flows(ctx, cons, net, r, rows):
+    """W40 tree-flow solve of one rail (powerflow.solve) on the copper `rows` (the net's facts track_geom rows) -> the per-row
+    current list [{amps | None, unk, mode, loads}] and its context (source label), cached in ctx["flows"]; None when the rail has no
+    pads or copper to solve. Source pads: the [power] source part, the `from` part of its [[dcdrop]] rows, and an inductor / ferrite bead (L, FB) whose
+    single-load row carries the rail's whole current (the source's series element). Loads: `_pad_amps` per pad."""
+    from . import powerflow as PF
+    import pcbnew
+    cache = ctx.setdefault("flows", {})
+    if net in cache:
+        return cache[net]
+    cache[net] = None
+    pads = (ctx or {}).get("pads", {}).get(net) or []
+    if not rows or not pads or any(len(p) < 8 for p in pads) or any("x1" not in g for g in rows):
+        return None
+    tot = r["current_a"]
+    pw = (cons or {}).get("power", {}).get(net) or {}
+    drows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
+    src = str(pw.get("source") or (drows[0].get("from") if drows else "") or "").split(".")[0]
+    srcs = {src} - {""}
+    for d in drows:
+        if d.get("from"):
+            srcs.add(str(d["from"]).split(".")[0])
+        to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
+        ref0 = str(to[0]).split(".")[0].upper()
+        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
+            srcs.add(str(to[0]).split(".")[0])
+    volts = r.get("max_v") or 0.0
+    npins = {}
+    for pad in pads:
+        npins[pad[0]] = npins.get(pad[0], 0) + 1
+    gp = []
+    for pad in pads:
+        role = "source" if pad[0] in srcs else "load"
+        a_ = None
+        if role == "load":
+            a_, _h = _pad_amps(pad, npins, drows, src, tot, volts)
+        gp.append({"ref": pad[0], "x": pad[5][0], "y": pad[5][1], "layers": pad[6] or None, "box": pad[7], "role": role, "amps": a_})
+    outer = {"F.Cu", "B.Cu"}
+    segs = [dict(g, t_mm=0.035 * float(r.get("oz_outer" if g["layer"] in outer else "oz_inner") or 1.0)) for g in rows]
+    vias = [(x, y, rad) for x, y, rad in ctx["copper"].get(net, ([], []))[1]]
+    zones = []
+    b = ctx["b"]
+    for z in b.Zones():
+        if z.GetNetname() != net:
+            continue
+        for lname in {g["layer"] for g in rows}:
+            lid = b.GetLayerID(lname)
+            if not z.IsOnLayer(lid):
+                continue
+            fill = z.GetFilledPolysList(lid)
+            if fill is not None and fill.OutlineCount():
+                zones.append({"layer": lname, "contains": (lambda f: lambda x, y: f.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0))(fill)})
+    res = PF.solve(segs, vias, gp, zones, cap=tot or None)
+    res["src"] = sorted(srcs)
+    cache[net] = res
+    return res
+
+
+def run_current_flow(res, run, segs):
+    """The current of one narrow run from the rail's tree-flow solve (`rail_flows`): the largest figure of its members, or the
+    rail total with the unknown parts when any member's branch has an unknown load -> (amps, source, unknown refs) | None."""
+    fl = [res["flow"][segs[i]["_row"]] for i in run["members"] if "_row" in segs[i]]
+    if len(fl) != len(run["members"]):
+        return None
+    unk = sorted({u for f in fl for u in f["unk"]})
+    src = "+".join(res["src"])
+    if unk:
+        return None, f"unknown ({', '.join(unk)}: load current not in the budget)", unk
+    f = max(fl, key=lambda x: x["amps"])
+    mode = {"tree": "tree flow", "mesh": "mesh bound", "mesh-solve": "mesh solve", "dangling": "dangling (no load behind it)",
+            "unreached": "no source path (open copper)", "nosource": "no source pad on the copper"}.get(f["mode"], f["mode"])
+    return f["amps"], f"{mode} {src}: {f['loads']} load(s) downstream" if f["mode"] in ("tree", "mesh", "mesh-solve") else mode, []
+
+
+def run_current(ctx, cons, net, r, run, segs):
+    """Current (A) one narrow run really carries, and where the figure comes from: -> (amps, source, unknown part refs).
+    The run's end pads are the pads of the net whose box holds a segment end.  Per pad: capacitor 0 A DC; MOSFET gate pin (pin
+    function G / GATE) 0 A; resistor at most V_rail / R from its Value (0R = a series link: unknown); the rail's source part total /
+    its pins on the net; a load named by a single-load [[dcdrop]] row (`to`) that row's current_a (per pin: / the part's pins on the
+    net unless the row names the pin).  Diodes / TVS and anything else without a figure: unknown -> the rail total, flagged.
+    A run with no end pad is classified (`end_kind`): a dangling stub carries 0 A; a via/junction link stays unknown."""
+    tot = r["current_a"]
+    pads = (ctx or {}).get("pads", {}).get(net) or []
+    ends = [(segs[i][k1], segs[i][k2]) for i in run["members"] for k1, k2 in (("x1", "y1"), ("x2", "y2"))]
+    import pcbnew
+    hit = {}
+    for x, y in ends:
+        pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        for pad in pads:
+            if pad[2].Contains(pt):
+                hit[(pad[0], pad[1])] = pad
+    if not hit:
+        kind, _free = end_kind(ctx, net, run, segs)
+        if kind == "dangling stub":
+            return 0.0, "dangling stub (no load behind it)", []
+        return tot, "unknown (no end pad: via/junction link inside the rail tree)", []
+    pw = (cons or {}).get("power", {}).get(net) or {}
+    rows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
+    src = str(pw.get("source") or (rows[0].get("from") if rows else "") or "").split(".")[0]
+    volts = r.get("max_v") or 0.0
+    npins = {}
+    for pad in pads:
+        npins[pad[0]] = npins.get(pad[0], 0) + 1
+    amps, how, unk = 0.0, set(), []
+    for (ref, num), pad in hit.items():
+        a_, h_ = _pad_amps(pad, npins, rows, src, tot, volts)
+        how.add(h_)
+        if a_ is None:
+            unk.append(ref)
+        else:
+            amps += a_
+    if unk:
+        return tot, "+".join(sorted(how)), sorted(set(unk))
+    return amps, "+".join(sorted(how)), []
+
+
+def _overlaid(s, rows):
+    """True when another same-net track on the layer is wider and lies over `s` (both ends on its copper): a wider piece laid
+    over a locked narrow one (power.widen, W37) supersedes it, so the narrow one is not counted twice."""
+    if "x1" not in s:
+        return False
+    for o in rows:
+        if o is s or "x1" not in o or o["layer"] != s["layer"] or o["width"] <= s["width"] + 1e-6:
+            continue
+        if all(_seg_dist(x, y, o["x1"], o["y1"], o["x2"], o["y2"]) <= o["width"] / 2 + 0.02 for x, y in ((s["x1"], s["y1"]), (s["x2"], s["y2"]))):
+            return True
+    return False
+
+
+def check(facts, cons, dc=None, board=None, detail=None):
     """Review findings (level, code, msg, refs): POWER_WIDTH, POWER_VIAS (FAIL), POWER_NECKDOWN_OK (INFO),
-    POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da)."""
+    POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da).
+    POWER_WIDTH `value` = the shortfall in equivalent narrow mm: sum over failing runs of length x (1 - width / the run's own need), so
+    any widening lowers it (W42). `detail` (a dict) receives {net: [{run, segs, need_run, cleared, amps}]} for every narrow run."""
     out = []
     dc = dc or {}
+    ctx = None
     has_dc = {d.get("net") for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict)}
     layers = facts.get("copper_layers")
     inner = set(facts.get("plane_layers") or ())
@@ -337,19 +650,52 @@ def check(facts, cons, dc=None):
         if r is None or r.get("track_mm") is None:
             continue
         narrow = []
-        for s in facts.get("track_geom") or []:
-            if s["net"] != net or s.get("kind") != "track":
-                continue
+        net_rows = [s for s in facts.get("track_geom") or [] if s["net"] == net and s.get("kind") == "track"]
+        for ri, s in enumerate(net_rows):
             need = r["width_outer"] if s["layer"] in outer else r["width_inner"]
             if need is None:
                 need = r["track_mm"]
-            if s["width"] < need - 1e-6:
-                narrow.append(dict(s, need=need))
+            if s["width"] < need - 1e-6 and not _overlaid(s, net_rows):
+                narrow.append(dict(s, need=need, _row=ri))
         if narrow:                                   # D71da has no pour carve-out: a zone on the net proves no track
             bad, ok = [], []
             dropf = _net_drop_fail(net, dc, net in has_dc)
+            if board and ctx is None:
+                ctx = _board_ctx(board, {n for n, rr in plan_.items() if rr and rr.get("track_mm") is not None}) or False
             for run in narrow_runs(narrow, [v for v in facts.get("vias") or [] if v.get("net") == net and "x" in v]):
-                f = _neck_tests(run, r, outer, facts.get("stackup"))
+                rr = r
+                if ctx:                              # W34: the run's own current and conducting width (record both)
+                    if net not in (ctx.get("flows") or {}):
+                        try:
+                            rail_flows(ctx, cons, net, r, net_rows)
+                        except Exception:            # noqa: BLE001 - the solve is an improvement; the per-run physics stays
+                            ctx.setdefault("flows", {})[net] = None
+                    got = run_current_flow(ctx["flows"][net], run, narrow) if ctx.get("flows", {}).get(net) else None
+                    if got is None:
+                        amps, how, unk = run_current(ctx, cons, net, r, run, narrow)
+                    else:
+                        amps, how, unk = got
+                        if amps is None:             # a load on the branch is unknown: the rail total, flagged
+                            amps = r["current_a"]
+                    cw = min(zone_credit_mm(ctx, net, narrow[i]["layer"], narrow[i], narrow[i]["need"]) for i in run["members"])
+                    rise = r.get("rise_c") or DEFAULT_RISE_C
+                    need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
+                                    ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0
+                    run.update(amps=amps, amps_src=how, unk_refs=unk, cred_w=round(cw, 3), min_w_track=run["min_w"], need_run=round(need_run, 3))
+                    if detail is not None:
+                        detail.setdefault(net, []).append({"run": run, "segs": [narrow[i] for i in run["members"]], "need_run": need_run,
+                                                           "amps": amps, "cleared": cw >= need_run - 1e-6})
+                    if cw >= need_run - 1e-6:        # wide enough for the current it really carries: not a constriction
+                        run["cleared"] = True
+                        continue
+                    run["min_w"] = cw
+                    rr = dict(r, current_a=amps)
+                elif detail is not None:
+                    detail.setdefault(net, []).append({"run": run, "segs": [narrow[i] for i in run["members"]], "need_run": run["need"],
+                                                       "amps": r["current_a"], "cleared": False})
+                nr_ = run.get("need_run") or run["need"]
+                run["short_mm"] = run["len"] * max(0.0, 1.0 - run["min_w"] / nr_) if nr_ else 0.0
+                f = _neck_tests(run, rr, outer, facts.get("stackup"))
                 (bad if f or dropf else ok).append((run, f))
             if ok:
                 out.append({"level": "INFO", "code": "POWER_NECKDOWN_OK", "refs": [net],
@@ -359,10 +705,14 @@ def check(facts, cons, dc=None):
             if bad:
                 tot = sum(x["len"] for x, _f in bad)
                 bad.sort(key=lambda t: -t[0]["len"])
-                det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x['need']:.2f}"
+                det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x.get('need_run', x['need']):.2f}"
+                                + (f" ({x['amps']:.2f} A {x['amps_src']}, credited {x['cred_w']:g})" if "amps" in x else "")
                                 + (": " + ", ".join(f) if f else "") for x, f in bad[:4])
+                nunk = sum(1 for x, _f in bad if x.get("unk_refs") or str(x.get("amps_src", "")).startswith("unknown"))
+                urefs = sorted({r_ for x, _f in bad for r_ in x.get("unk_refs") or []})
+                det += (f"; {nunk} run(s) with current unknown (rail total used)" + (f", parts: {', '.join(urefs[:12])}" if urefs else "") if nunk else "")
                 det += (f"; +{len(bad) - 4} more run(s)" if len(bad) > 4 else "") + (f"; net: {dropf}" if dropf else "")
-                out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
+                out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": round(sum(x["short_mm"] for x, _f in bad), 3),
                             "msg": f"{net}: {len(bad)} narrow run(s), {tot:.1f} mm, not proven for the {r['current_a']:g} A "
                                    f"copper ({r['width_source']}, {r['oz_outer']:g}/{r['oz_inner']:g} oz): {det}"})
         nv = sum(1 for v in facts.get("vias") or [] if v["net"] == net)
@@ -423,6 +773,23 @@ def _spine_segments(b, nc, L):
         if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == nc and t.GetLayer() == L:
             s, e = t.GetStart(), t.GetEnd()
             out.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y), pcbnew.ToMM(e.x), pcbnew.ToMM(e.y), pcbnew.ToMM(t.GetWidth())))
+    return out
+
+
+def pad_spine(b, nc, L, width_mm):
+    """R036: the spine of a rail the router never laid (or laid on inner layers only): a minimum spanning tree over the net's pads that
+    touch copper layer `L`, straight segments `width_mm` wide. -> [(x1, y1, x2, y2, w) mm]; [] for fewer than two pads."""
+    import pcbnew
+    pts = [(pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)) for p in b.GetPads()
+           if p.GetNetCode() == nc and p.IsOnLayer(L)]
+    if len(pts) < 2:
+        return []
+    done, out = {0}, []
+    while len(done) < len(pts):
+        i, j = min(((i, j) for i in done for j in range(len(pts)) if j not in done),
+                   key=lambda ij: math.hypot(pts[ij[0]][0] - pts[ij[1]][0], pts[ij[0]][1] - pts[ij[1]][1]))
+        out.append((pts[i][0], pts[i][1], pts[j][0], pts[j][1], width_mm))
+        done.add(j)
     return out
 
 
@@ -506,8 +873,13 @@ def pour_rails(board_path, cons, out, layers=None, nets=None):
         if ni is None:
             rec["skipped"][net] = "net not on board"
             continue
-        for L in (pcbnew.F_Cu, pcbnew.B_Cu):
-            segs = _spine_segments(b, ni.GetNetCode(), L)
+        spines = {L: _spine_segments(b, ni.GetNetCode(), L) for L in (pcbnew.F_Cu, pcbnew.B_Cu)}
+        if not any(spines.values()):                      # R036: no outer spine: one over the net's pads on the outer layer that has most
+            w = max(0.15, float(plan(cons, layers=layers)[net]["track_mm"]) - 2.0 * over)      # the pour is spine + 2 * over: at least the IPC width
+            tries = {L: pad_spine(b, ni.GetNetCode(), L, w) for L in spines}
+            best = max(tries, key=lambda L: (len(tries[L]), L == pcbnew.F_Cu))
+            spines[best] = tries[best]
+        for L, segs in spines.items():
             if not segs:
                 continue
             rings = rail_outline(segs, over)
@@ -552,7 +924,7 @@ def pour_rails(board_path, cons, out, layers=None, nets=None):
         return _guard_measure(DG.measure(out), DG)
 
     def drop(z):                                         # back to the accepted set (kept zones only)
-        b.Remove(z)
+        b.Delete(z)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
         b.Save(out)
         OG.refill(out)
 
@@ -630,35 +1002,133 @@ def _pad_min_at(pads, net, x, y):
     return min(hit) if hit else None
 
 
+def _unreached(b, rails, pads, vias_of):
+    """{net: [{layer, len_mm, width_mm, need_mm, at, refs}]} narrow runs (check()'s own grouping) still failing D71da's
+    length / heat tests: the rail cannot reach its width there, a placement finding (parts around `at`, free a corridor)."""
+    import pcbnew
+    out = {}
+    outer = ("F.Cu", "B.Cu")
+    for net, r in rails.items():
+        segs = []
+        for t in b.GetTracks():
+            if t.GetClass() != "PCB_TRACK" or t.GetNetname() != net:
+                continue
+            lay = b.GetLayerName(t.GetLayer())
+            need = _need_on(r, lay)
+            w = pcbnew.ToMM(t.GetWidth())
+            if w < need - 1e-6:
+                s, e = t.GetStart(), t.GetEnd()
+                segs.append({"layer": lay, "x1": pcbnew.ToMM(s.x), "y1": pcbnew.ToMM(s.y), "x2": pcbnew.ToMM(e.x),
+                             "y2": pcbnew.ToMM(e.y), "len": pcbnew.ToMM(t.GetLength()), "width": w, "need": need})
+        for run in narrow_runs(segs, vias_of.get(net, ())):
+            if not _neck_tests(run, r, set(outer)):
+                continue
+            refs = sorted({ref for n_, ref, x, y in pads if n_ == net and
+                           any(math.hypot(segs[i][k] - c, segs[i][m] - d) < 1.5 for i in run["members"]
+                               for k, m, c, d in (("x1", "y1", x, y), ("x2", "y2", x, y)))})
+            out.setdefault(net, []).append({"layer": run["layer"], "len_mm": round(run["len"], 2), "width_mm": round(run["min_w"], 3),
+                                            "need_mm": round(run["need"], 3), "at": run.get("at"), "refs": refs[:6]})
+    for net in out:
+        out[net].sort(key=lambda x: -x["len_mm"])
+    return out
+
+
+def _run_targets(board, cons):
+    """W42: each failing run's own width target from its solved current (check()'s per-run physics) ->
+    {(layer, x1, y1, x2, y2 rounded 0.01 mm, both orientations): {"need": width (0.05 mm steps, never above the rail's need),
+    "amps", "cleared"}}. {} when the check cannot run: widen then falls back to the rail's need."""
+    from . import boardfile
+    out = {}
+    try:
+        detail = {}
+        check(boardfile.facts_from_file(board), cons, None, board=board, detail=detail)
+    except Exception:                                    # noqa: BLE001 - the per-run target is an improvement; the rail need stays
+        return out
+    for net, runs in detail.items():
+        for d in runs:
+            if not d["need_run"]:                        # no current behind it (dangling stub): the rail's need stays
+                continue
+            for g in d["segs"]:
+                tgt = min(g["need"], max(0.05, _ceil05(d["need_run"])))
+                for a, b in (((g["x1"], g["y1"]), (g["x2"], g["y2"])), ((g["x2"], g["y2"]), (g["x1"], g["y1"]))):
+                    out[(g["layer"], round(a[0], 2), round(a[1], 2), round(b[0], 2), round(b[1], 2))] = {
+                        "need": tgt, "amps": d["amps"], "cleared": d["cleared"]}
+    return out
+
+
+def _covered_by_twin(b, t, width_mm):
+    """W68: another track of `t`'s net and layer with the same two ends (either order, to 0.1 um) and a width >= width_mm is on `b`."""
+    import pcbnew
+
+    def pt(v):
+        return round(pcbnew.ToMM(v.x), 4), round(pcbnew.ToMM(v.y), 4)
+
+    def ends(o):
+        return {pt(o.GetStart()), pt(o.GetEnd())}
+    mine = ends(t)
+    return any(o is not t and o.GetClass() == "PCB_TRACK" and o.GetNetCode() == t.GetNetCode() and o.GetLayer() == t.GetLayer()
+               and pcbnew.ToMM(o.GetWidth()) >= width_mm - 1e-6 and ends(o) == mine for o in b.GetTracks())
+
+
 def widen(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
     the segment's own copper skipped; the probe model is built once, so widenings do not see each other: the close guard
     judges the result). A segment that ends in a pad narrower than its new width is split max(W, 0.5 mm) from that pad and
-    only the far part is widened. Rails that check() exempts (pour rail with a same-net zone) are left alone.
+    only the far part is widened.
+    W34 (ledger "route gate (W16 route-4)"): copper inside a same-net pour is widened too (check() has no pour carve-out, D71da:
+    skipping it made this rung refuse every rail that had a zone). Last rung of the ladder: a run no longer than D71da's
+    NECK_MAX_MM may stay narrow at the neck-proof width (`neck_width_mm`, heat test with the run's own length) when the probe
+    refuses anything wider; each one is recorded in `necks` with its length, dT and DC drop (mV, at the rail's full current).
     PHASE3G G1b d: a LOCKED rail track is a candidate too, unless its net is in `protect` (drcguard.protected_nets: pair legs,
-    RF). Its width changes in place and it stays locked; a necked split part inherits the lock.
-    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net": {net: {"widened_mm", "left_mm"}},
-    "skipped": {"locked_mm", "pour_zone_mm", "by_net": {net: {"locked_mm", "pour_zone_mm"}}}} (skipped = narrow copper
-    left alone: locked copper of a protected net, copper inside a same-net pour zone; mm of track length)."""
+    RF). W37: a locked track is never modified (the protection manifest keeps it intact): the wider piece is a new unlocked track
+    over it, same ends (a pad-end neck splits only an unlocked track).
+    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net", "necks": [...], "unreached": {net: [run]},
+    "skipped": {"locked_mm", "pour_zone_mm" (always 0 now), "by_net"}} (skipped = narrow copper left alone: locked copper of a
+    protected net; mm of track length)."""
     import pcbnew
     from . import gaps as GP, handroute as HR
-    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}, "skipped": {"locked_mm": 0.0, "pour_zone_mm": 0.0, "by_net": {}}}
+    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}, "necks": [], "unreached": {},
+           "skipped": {"locked_mm": 0.0, "pour_zone_mm": 0.0, "by_net": {}}}
     protect = set(protect or ())
     rails = _rails_on(board, cons, nets)
     if not rails:
         return rec
-    zone_nets = GP._zone_nets(board)
     b = pcbnew.LoadBoard(board)
     M = HR._model(board)                                 # the board's own rules (constraints: a file path, not used here)
     pads = [(p.GetNetname(), p.GetBoundingBox(), min(pcbnew.ToMM(p.GetSize().x), pcbnew.ToMM(p.GetSize().y)))
             for p in b.GetPads() if p.GetNetname()]
+    pad_pos = [(p.GetNetname(), p.GetParentFootprint().GetReference(), pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y))
+               for p in b.GetPads() if p.GetNetname()]
+    vias_of = {}
+    for v in b.GetTracks():
+        if v.GetClass() == "PCB_VIA" and v.GetNetname() in rails:
+            vias_of.setdefault(v.GetNetname(), []).append({"x": pcbnew.ToMM(v.GetPosition().x), "y": pcbnew.ToMM(v.GetPosition().y),
+                                                           "dia_mm": pcbnew.ToMM(v.GetWidth())})
     tot = lambda net: rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
 
     def skip(net, kind, mm):
         rec["skipped"][kind] += mm
         rec["skipped"]["by_net"].setdefault(net, {"locked_mm": 0.0, "pour_zone_mm": 0.0})[kind] += mm
+    # the D71da runs of every narrow rail track: a short run may be necked, so its length bounds the last rung
+    cand, segs = {}, {}
+    for t in b.GetTracks():
+        r = rails.get(t.GetNetname())
+        if t.GetClass() != "PCB_TRACK" or r is None:
+            continue
+        lay = b.GetLayerName(t.GetLayer())
+        need = _need_on(r, lay)
+        if pcbnew.ToMM(t.GetWidth()) < need - 1e-6:
+            s_, e_ = t.GetStart(), t.GetEnd()
+            segs.setdefault(t.GetNetname(), []).append((t, {"layer": lay, "x1": pcbnew.ToMM(s_.x), "y1": pcbnew.ToMM(s_.y), "x2": pcbnew.ToMM(e_.x),
+                                                          "y2": pcbnew.ToMM(e_.y), "len": pcbnew.ToMM(t.GetLength()),
+                                                          "width": pcbnew.ToMM(t.GetWidth()), "need": need}))
+    for net, lst in segs.items():
+        for run in narrow_runs([g for _t, g in lst], vias_of.get(net, ())):
+            for i in run["members"]:
+                cand[lst[i][0].m_Uuid.AsString()] = run
     changed = 0
+    tg = _run_targets(board, cons)
     for t in list(b.GetTracks()):
         net = t.GetNetname()
         r = rails.get(net)
@@ -671,17 +1141,30 @@ def widen(board, cons, out, nets=None, protect=()):
             continue
         s, e = t.GetStart(), t.GetEnd()
         a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
+        own = tg.get((lay, round(a[0], 2), round(a[1], 2), round(z[0], 2), round(z[1], 2)))
+        amps = r["current_a"]
+        if own is not None:                              # W42: the run's own D71da width from its solved current
+            if own["cleared"] or cur >= own["need"] - 1e-6:
+                continue
+            need, amps = own["need"], own["amps"] or r["current_a"]
         L = math.hypot(z[0] - a[0], z[1] - a[1])
-        if r["pour"] and net in zone_nets:
-            skip(net, "pour_zone_mm", L)
-            continue
-        if t.IsLocked() and net in protect:
+        locked = t.IsLocked()
+        if locked and net in protect:
             skip(net, "locked_mm", L)
             continue
+        if locked and any(o is not t and o.GetClass() == "PCB_TRACK" and not o.IsLocked() and o.GetNetCode() == t.GetNetCode()
+                          and o.GetLayer() == t.GetLayer() and pcbnew.ToMM(o.GetWidth()) >= need - 1e-6
+                          and {(o.GetStart().x, o.GetStart().y), (o.GetEnd().x, o.GetEnd().y)} <= {(s.x, s.y), (e.x, e.y)}
+                          for o in b.GetTracks()):
+            continue                                     # already overlaid by an earlier widen: idempotent
         near = next((k for k, pt in enumerate((a, z)) if (_pad_min_at(pads, net, *pt) or need) < need - 1e-6), None)
         step = max(need, 0.5)
+        pad_w = _pad_min_at(pads, net, *(a, z)[near]) if near is not None else None
+        if near is not None:                             # the pad-end neck: at most D71da's NECK_MAX_MM long, as wide as the pad
+            step = min(step, NECK_MAX_MM)
+        near_w = max(cur, math.floor((pad_w or 0.0) * 20 + 1e-9) / 20.0) if pad_w else cur
         split = None
-        if near is not None:                             # necked: the near part (step long) keeps the old width
+        if near is not None:                             # necked: the near part (step long) is the pad neck
             if L < step + 0.05:
                 tot(net)["left_mm"] += L
                 rec["left_mm"] += L
@@ -692,9 +1175,16 @@ def widen(board, cons, out, nets=None, protect=()):
             lo, hi = split, far
         else:
             lo, hi = a, z
+        ladder = [round(need * f, 4) for f in WIDEN_FRACS]
+        run = cand.get(t.m_Uuid.AsString())
+        wn = None
+        if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and near is None:
+            oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
+            wn = math.ceil(neck_width_mm(amps, run["len"], oz, r.get("rise_c") or DEFAULT_RISE_C) * 20 + 1e-9) / 20.0
+            if wn < need - 1e-6:
+                ladder = sorted({*ladder, round(wn, 4)}, reverse=True)
         chosen = None
-        for f in WIDEN_FRACS:
-            W = round(need * f, 4)
+        for W in ladder:
             if W <= cur + 1e-6:
                 break
             if HR.probe_prims(M, net, [("seg", lay, lo, hi)], width=W, skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
@@ -707,19 +1197,42 @@ def widen(board, cons, out, nets=None, protect=()):
         wide_mm = math.hypot(hi[0] - lo[0], hi[1] - lo[1])
         if split is not None:
             left_mm = step
+            if near_w > cur + 1e-6 and not HR.probe_prims(M, net, [("seg", lay, near_pt, split)], width=near_w,
+                                                          skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
+                near_w = cur                                 # the pad neck takes the pad's width only where the probe accepts it
             nt = pcbnew.PCB_TRACK(b)                       # the near part: its own track at the old width
             nt.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(near_pt[0]), pcbnew.FromMM(near_pt[1])))
             nt.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1])))
-            nt.SetWidth(pcbnew.FromMM(cur))
+            nt.SetWidth(pcbnew.FromMM(near_w))
             nt.SetLayer(t.GetLayer())
             nt.SetNetCode(t.GetNetCode())
-            nt.SetLocked(t.IsLocked())                     # the necked split inherits the lock
-            b.Add(nt)
+            nt.SetLocked(False)                            # W37: the near part overlays unlocked; a locked original stays whole
+            if not locked and not _covered_by_twin(b, nt, near_w):    # W68: no exact duplicate of a neck piece that is already there
+                b.Add(nt)
             sp = pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1]))
-            t.SetStart(sp) if near == 0 else t.SetEnd(sp)
+            if not locked:
+                t.SetStart(sp) if near == 0 else t.SetEnd(sp)
             tot(net)["left_mm"] += left_mm
             rec["left_mm"] += left_mm
-        t.SetWidth(pcbnew.FromMM(chosen))
+        if locked:                                       # W37: a locked item is never modified: the wide piece is new, unlocked copper over it
+            wt = pcbnew.PCB_TRACK(b)
+            wt.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(lo[0]), pcbnew.FromMM(lo[1])))
+            wt.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(hi[0]), pcbnew.FromMM(hi[1])))
+            wt.SetWidth(pcbnew.FromMM(chosen))
+            wt.SetLayer(t.GetLayer())
+            wt.SetNetCode(t.GetNetCode())
+            wt.SetLocked(False)
+            if not _covered_by_twin(b, wt, chosen):      # W68: a piece as wide with the same ends is already there (an earlier pass)
+                b.Add(wt)
+        elif _covered_by_twin(b, t, chosen):             # W68: a track with the same ends is already as wide: widening this one would stack an exact duplicate
+            b.Remove(t)
+        else:
+            t.SetWidth(pcbnew.FromMM(chosen))
+        if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)
+            oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
+            rec["necks"].append({"net": net, "layer": lay, "at": [round(a[0], 2), round(a[1], 2)], "run_len_mm": round(run["len"], 2),
+                                 "width_mm": chosen, "dT_c": round(neck_heat_c(amps, run["len"], chosen, oz), 2),
+                                 "drop_mv": round(neck_drop_mv(amps, run["len"], chosen, oz), 2), "amps": amps})
         tot(net)["widened_mm"] += wide_mm
         rec["widened_mm"] += wide_mm
         changed += 1
@@ -730,9 +1243,31 @@ def widen(board, cons, out, nets=None, protect=()):
     for n in list(sk["by_net"]):
         sk["by_net"][n] = {k: round(v, 3) for k, v in sk["by_net"][n].items()}
     rec["widened_mm"], rec["left_mm"] = round(rec["widened_mm"], 3), round(rec["left_mm"], 3)
+    try:
+        rec["unreached"] = _unreached(b, rails, pad_pos, vias_of)
+    except Exception as e:                                # noqa: BLE001 - the findings are a report, never a reason to lose the widening
+        rec["unreached_error"] = f"{type(e).__name__}: {str(e)[:100]}"
     if changed:
         pcbnew.SaveBoard(out, b)
         GP._sidecars(board, out)
+    return rec
+
+
+def widen_guarded(board, cons, out, nets=None, protect=()):
+    """W34: `widen` for the route stage: kept only when the DRC guard (shorts, errors, track opens) is no higher afterwards, else
+    `out` is removed. -> widen's record plus {"dropped": reason | None, "before", "after"}."""
+    from . import drcguard as DG
+    rec = widen(board, cons, out, nets=nets, protect=protect)
+    rec.update(dropped=None, before=None, after=None)
+    if not os.path.exists(out):
+        return rec
+    rec["before"], rec["after"] = _guard_measure(DG.measure(board), DG), _guard_measure(DG.measure(out), DG)
+    worse = [k for k in GUARD_KEYS if rec["after"][k] > rec["before"][k]]
+    if worse:
+        rec["dropped"] = ", ".join(f"{k} {rec['before'][k]} -> {rec['after'][k]}" for k in worse)
+        for f in (out, os.path.splitext(out)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_prl"):
+            if os.path.exists(f):
+                os.remove(f)
     return rec
 
 

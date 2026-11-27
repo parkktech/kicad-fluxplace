@@ -108,6 +108,19 @@ def poly_has(pts, x, y):
     return ins
 
 
+MASK_MARGIN = 0.05      # mm: copper this close to a solder-mask opening is bridged by the opening's mask expansion
+
+
+def poly_near(pts, x, y, r):
+    """True when the disc (x, y, r) touches the polygon `pts`: centre inside it, or within r of an edge."""
+    if poly_has(pts, x, y):
+        return True
+    for i in range(len(pts)):
+        if _seg_pt((x, y), pts[i - 1], pts[i]) <= r:
+            return True
+    return False
+
+
 class Hash:
     """Spatial hash of rectangles keyed by (ref, side)."""
 

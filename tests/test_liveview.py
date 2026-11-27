@@ -611,12 +611,12 @@ def test_watcher_and_candidate_write_lines_and_snapshots_and_are_off_without_a_s
     assert LV.candidate("floorplan", "g_0", P.B, M, [["fan-out blocked", 0]], [{"id": "fan-out", "ok": True, "value": 9, "limit": 9, "text": ""}], {},
                         generation=1, is_leader=True, leader="g_0") == "live/place/leader-000002.json"
     assert LV.candidate("floorplan", "result", path, None, None, None, {}, lane="accepted", phase="gate", full=True) == "live/place/accepted-000003.json"
-    ev = _lines(W / "events.jsonl")
+    ev = [e for e in _lines(W / "events.jsonl") if e["kind"] != "narration"]     # narration: tests/test_narrate.py
     assert [(e["kind"], e.get("phase") or e.get("lane"), e.get("cand")) for e in ev] == [
         ("placement_progress", "anneal", "g_0"), ("placement_snapshot", "trial", "g_0"), ("placement_progress", "judge", "g_0"),
         ("placement_snapshot", "leader", "g_0"), ("placement_progress", "gate", "result"), ("placement_snapshot", "accepted", "result")]
     assert ev[0]["key"] == [["cost", 12.346]] and (ev[0]["trial"], ev[0]["trials"]) == (0, 1000)
-    ops = _lines(tmp_path / "ops.jsonl")                         # the ops feed gets every line, also those with a `path` field
+    ops = [o for o in _lines(tmp_path / "ops.jsonl") if o["kind"] != "narration"]   # the ops feed gets every line (narration: test_narrate)
     assert [(o["kind"], o.get("path")) for o in ops] == [(e["kind"], e.get("path")) for e in ev] and all("text" in o for o in ops)
     assert not (W / "live/errors.jsonl").exists()
 
@@ -700,3 +700,49 @@ def test_budget_row_through_criteria_carries_hard():
     from fluxplace import liveview as LV
     r = {"kind": "support", "name": "U1.7 own bypass", "verdict": "fail", "value": 9, "target": 5, "max": 5, "unit": "mm", "hard": False}
     assert LV.criteria([r])[0]["hard"] is False
+
+
+# ---------------------------------------------------------------- owner answer item (kind answer)
+def _answer_item(qid, choice, iid="ans00001"):
+    return _item(id=iid, kind="answer", answer={"id": qid, "choice": choice})
+
+
+def _asked(W, qid="q1", choices=("x", "y")):
+    (W / "b.questions.json").write_text(json.dumps({"questions": [{"id": qid, "options": [{"choice": c} for c in choices]}]}))
+
+
+def test_answer_item_is_recorded_in_the_fluxmap_moves_to_applied_and_changes_no_row(tmp_path, monkeypatch, capsys):
+    W, path, B, M, fb = _fb(tmp_path, monkeypatch, [_answer_item("q1", "y")])
+    _asked(W)
+    assert fb.boundary(generation=0) == [] and fb.rows == []
+    assert json.loads((W / "b.fluxmap.json").read_text())["answers"] == {"q1": "y"}
+    assert os.listdir(W / "feedback/applied") == ["2026-00-ans00001.json"] and os.listdir(W / "feedback/inbox") == []
+    assert "Owner answered q1 = y (applies from the next stage start)" in capsys.readouterr().out
+    assert not list((W).glob("*.tmp"))
+
+
+def test_answer_item_keeps_existing_map_keys_and_is_refused_for_unknown_id_or_bad_choice(tmp_path, monkeypatch):
+    W, path, B, M, fb = _fb(tmp_path, monkeypatch, [_answer_item("nope", "x", "ans00001"), _answer_item("q1", "zz", "ans00002")])
+    _asked(W)
+    (W / "b.fluxmap.json").write_text(json.dumps({"fluxmap": 1, "answers": {"other": "a"}}))
+    fb.boundary(generation=0)
+    assert (W / "feedback/refused/2026-00-ans00001.json.reason.txt").read_text().strip() == "unknown question or choice"
+    assert (W / "feedback/refused/2026-01-ans00002.json.reason.txt").read_text().strip() == "unknown question or choice"
+    assert json.loads((W / "b.fluxmap.json").read_text())["answers"] == {"other": "a"}
+
+
+def test_answer_item_shape_and_length_are_checked(tmp_path):
+    ctx = _ctx()
+    ctx["asked"] = {"q1": ("b.kicad_pcb", {"x"})}
+    assert LV.check_item(_answer_item("q1", "x"), ctx) is None
+    assert LV.check_item(_answer_item("", "x"), ctx) and LV.check_item(_answer_item("q1", ""), ctx)
+    assert LV.check_item(_answer_item("q1", "x" * 81), ctx)
+    assert LV.check_item(_item(kind="answer", answer="q1"), ctx)
+    assert LV.check_item(_answer_item("q1", "x"), dict(ctx, asked={})) == "unknown question or choice"
+
+
+def test_crowding_answer_keep_is_accepted_from_the_floorplan_report(tmp_path, monkeypatch):
+    W, path, B, M, fb = _fb(tmp_path, monkeypatch, [_answer_item("crowding", "keep", "ans00001")])
+    (W / "b.floorplan.json").write_text(json.dumps({"history": [{"crowding": {"options": [{"key": "a-fill"}]}}]}))
+    fb.boundary(generation=0)
+    assert json.loads((W / "b.fluxmap.json").read_text())["answers"] == {"crowding": "keep"}

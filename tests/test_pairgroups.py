@@ -145,7 +145,7 @@ def test_route_nets_exclude_failed_pair_legs(tmp_path, monkeypatch):
     c, calls, runner = TK._ctx(tmp_path, monkeypatch, [0, 0, 0])
     monkeypatch.setattr(K, "_run_pairgroups", lambda c_, d, s, o, failed, b, **kw: (failed.add("USB_DP"), shutil.copy(s, o), 0)[2])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "route"]     # gated USB legs: no KRT diff (F1)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "route"]     # gated USB legs: no plain route (F1); W39: pairleft steps lay them, no leg left open in this fake
     route = calls[-1]
     nets = route[route.index("--nets") + 1:route.index("--layers")] if "--layers" in route else []
     assert "USB_DP" not in nets and "USB_DM" in nets and "X" in nets

@@ -4433,9 +4433,12 @@ def _main(argv=None):
     RDIR.set_dir(getattr(a, "report_dir", None))
     _silk_hook(a)
     guard = _guard_begin(a)
+    from fluxplace import liveview as LVW
     try:
         if a.cmd in OUT.COMPACT_CMDS:
             rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
+        elif a.cmd in LVW.STAGE_CMDS:          # N12: plain-words start / heartbeat / end for a stage run on its own
+            rc = LVW.run_command(a.cmd, a.fn, a)
         else:
             rc = a.fn(a)
     except SystemExit as e:

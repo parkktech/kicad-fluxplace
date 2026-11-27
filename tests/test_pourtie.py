@@ -102,3 +102,34 @@ def test_track_on_pour_layer_cuts_a_tie_and_repair_retries_it(tmp_path):
     rep = PT.repair_in_memory(b, rec)
     assert rep["lost"] >= 1                                              # detected
     assert rep["repaired"] + len(rep["unrepaired"]) == rep["lost"]      # every lost tie is repaired or listed with a reason
+
+
+def test_5a_rail_without_a_routed_spine_gets_a_spine_zone_at_least_the_ipc_width(tmp_path, monkeypatch):
+    """R036: a 5 A rail whose IPC width does not fit a track gets a pour along a pad spanning tree even when no router laid a spine."""
+    from test_power import _stub_dg, CLEAN
+    from fluxplace import power as PW, gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    b = pcbnew.BOARD()
+    b.SetCopperLayerCount(4)
+    for x0, y0, x1, y1 in ((0, 0, 40, 0), (40, 0, 40, 30), (40, 30, 0, 30), (0, 30, 0, 0)):
+        _seg(b, x0, y0, x1, y1, "Edge.Cuts")
+    b.Add(pcbnew.NETINFO_ITEM(b, "VBATT"))
+    for ref, x, y in (("U1", 6, 15), ("U2", 20, 15), ("U3", 34, 15)):
+        _pad_fp(b, ref, x, y, "VBATT")
+    for pad in b.GetPads():                                      # SMD pads on F.Cu only (the fixture's SetLayer leaves the set on B.Cu)
+        ls = pcbnew.LSET()
+        ls.AddLayer(pcbnew.F_Cu)
+        pad.SetLayerSet(ls)
+    src = str(tmp_path / "rail.kicad_pcb")
+    b.Save(src)
+    cons = {"power": {"VBATT": {"max_current_ma": 5000, "max_v": 14.5}}}
+    r = PW.plan(cons, layers=4)["VBATT"]
+    assert r["pour"] and r["track_mm"] > 1.0                      # IPC width for 5 A is far over a signal track
+    out = str(tmp_path / "rail-out.kicad_pcb")
+    rec = PW.pour_rails(src, cons, out, layers=4)
+    assert rec["added"] == ["VBATT/F.Cu"]
+    z = [z for z in pcbnew.LoadBoard(out).Zones() if z.GetNetname() == "VBATT"]
+    assert len(z) == 1
+    bb = z[0].GetBoundingBox()
+    assert pcbnew.ToMM(bb.GetHeight()) >= r["width_outer"] and pcbnew.ToMM(bb.GetWidth()) >= 28     # spans all three pads

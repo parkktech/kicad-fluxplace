@@ -9,11 +9,14 @@ W = the stage workdir = the folder of the event stream (env FLUXPLACE_EVENTS). S
 A nested run (env FLUXPLACE_NESTED: the ghost and candidate pipelines a stage starts) is never shown: thousands of trials
 are not a view. The 3D export is on only when the constraints have a `[live]` table (it costs a process and 1 GB for 16 s).
 """
+import contextlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
+import threading
 import time
 
 from . import events
@@ -23,6 +26,17 @@ PROGRESS_S = 2.0                   # at most one placement_progress per stage in
 PROGRESS_KEYS = ("phase", "generation", "generations", "trial", "trials", "arm", "cand", "seed", "pair", "key", "leader", "leader_key",
                  "is_leader", "criteria", "verdict", "why", "rows_rev", "elapsed_s", "eta_s")
 _last = {}
+NARR_S = 8.0                       # a "doing" narration line at least this often while a stage works (no silence over 10 s)
+_beat_wait = lambda stop, secs: stop.wait(secs)   # the heartbeat's pause (a seam: tests drive it with a fake clock)
+_narr = {}                         # stage -> the latest "doing" text, repeated by the heartbeat
+_narr_gen = {}                     # stage -> the last generation narrated (one round line per generation)
+_watch = {"stage": None}           # the stage whose heartbeat runs in this process (nested watches do nothing)
+START_TEXT = {
+    "ready": "Checking the parts list, the stackup and the board outline before any part is moved. Done when every check is kept or waived.",
+    "modules": "Grouping the parts into modules around their anchor parts. Done when every part belongs to a module.",
+    "floorplan": "Seating the modules on the board, then searching for a better arrangement. Done when the search ends and the best layout is kept.",
+    "placetour": "Trying small part moves and judging each one with a quick route. Done when the best moves are kept.",
+}
 
 
 def work():
@@ -59,6 +73,74 @@ def _write(path, obj):
     os.replace(tmp, path)
 
 
+# ---------------------------------------------------------------- N12: narration (plain words, one line per phase)
+def narrate(stage, text, phase="doing", eta_s=None, remember=True):
+    """One narration line: phase start | doing | end, plain words for the owner. Never raises; off without a stream."""
+    try:
+        if os.environ.get("FLUXPLACE_NESTED") or not events.enabled():
+            return None
+        phase = phase if phase in ("start", "doing", "end") else "doing"
+        text = " ".join(str(text).split())[:300]
+        if phase == "doing" and remember:       # the heartbeat's own fallback line is never remembered (it would freeze its elapsed time)
+            _narr[str(stage)] = text
+        _emit("narration", stage=stage, phase=phase, text=text, eta_s=eta_s)
+        return {"stage": stage, "phase": phase, "text": text, "eta_s": eta_s}
+    except Exception as e:                       # noqa: BLE001
+        _err("narrate", e)
+        return None
+
+
+def own_stage(stage, text, phase):
+    """Start / end line of a stage run directly (ready, modules, floorplan): skipped under the pipeline, which emits its own."""
+    if not os.environ.get(events.ENV_STAGE):
+        return narrate(stage, text, phase)
+    return None
+
+
+STAGE_CMDS = ("ready", "modules", "floorplan")     # commands that are also pipeline stages (run directly: their own start / end)
+
+
+def run_command(stage, fn, a):
+    """A stage command run on its own (not under the pipeline): start line, heartbeat, end line. Returns fn's rc; never
+    swallows an exception. The end line says how it stopped."""
+    own_stage(stage, START_TEXT.get(stage) or f"Running the {stage} check. Done when it reports pass or fail.", "start")
+    t0, done = time.monotonic(), "stopped"
+    try:
+        with watching(stage):
+            rc = fn(a)
+        done = "done" if not rc else f"exit {rc}"
+        return rc
+    finally:
+        own_stage(stage, f"{stage} {done} after {time.monotonic() - t0:.1f} s.", "end")
+
+
+@contextlib.contextmanager
+def watching(stage):
+    """Heartbeat for the life of a stage: a "doing" line every NARR_S seconds with the stage's latest phase text, so no stage
+    is silent for long. One per process: a nested watch does nothing. Off without a stream."""
+    if _watch["stage"] is not None or not events.enabled() or os.environ.get("FLUXPLACE_NESTED"):
+        yield
+        return
+    stop, t0 = threading.Event(), time.monotonic()
+    _watch["stage"] = stage
+    _narr.pop(stage, None)
+    _narr_gen.pop(stage, None)
+
+    def beat():
+        while not _beat_wait(stop, NARR_S):
+            text = _narr.get(stage)
+            narrate(stage, text or f"Still working on the {stage} stage, {int(time.monotonic() - t0)} s so far.", "doing", remember=False)
+
+    th = threading.Thread(target=beat, name="narration-heartbeat", daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        th.join(1.0)
+        _watch["stage"] = None
+
+
 # ---------------------------------------------------------------- L1: placement_progress
 def _key(key):
     """A judge key as [[term, value], ...]; a term not judged yet keeps its null."""
@@ -80,6 +162,8 @@ def criteria(rows):
                 out[-1]["hard"] = r["hard"]
         else:
             out.append({"id": str(r.get("id")), "ok": r.get("ok"), "value": r.get("value"), "limit": r.get("limit"), "text": str(r.get("text", ""))})
+            if "hard" in r:
+                out[-1]["hard"] = r["hard"]
     return out
 
 
@@ -108,6 +192,12 @@ def progress(stage, phase, always=False, **fields):
                  criteria=criteria(fields.get("criteria")), verdict=fields.get("verdict") or "running")
         f["text"] = _text(stage, f)
         _emit("placement_progress", stage=stage, **f)
+        if always and f["generation"] is not None and _narr_gen.get(stage) != f["generation"]:
+            _narr_gen[stage] = f["generation"]
+            g, big = f["generation"], f["generations"]
+            best = ", ".join(f"{k} {v}" for k, v in (f["leader_key"] or f["key"] or [])[:2]) or "not judged yet"
+            narrate(stage, f"{stage} round {g}{f' of {big}' if big is not None else ''}: best so far {best}", "doing",
+                    eta_s=f["eta_s"])
         return f
     except Exception as e:                       # noqa: BLE001 - the view never fails a stage
         _err("progress", e)
@@ -158,6 +248,20 @@ def cells_of(grid, rect):
     return a if a == b else f"{a}:{b}"
 
 
+def _why_parts(B, parts, M, meta):
+    """N13: per part `parked` (courtyard wholly outside the board outline) and `why` = {owner (the owner IC of its module, or null),
+    module, fixed (reason class or null), rows [{id, ok, hard}] of the graded rows that name the part}. Pure."""
+    x0, y0, x1, y1 = B["bbox"]
+    anchor = {m["name"]: m.get("anchor") for m in (M or {}).get("modules") or []}
+    rows = criteria((meta or {}).get("criteria"))
+    toks = [(r, set(re.split(r"[^A-Za-z0-9_]+", r["id"]))) for r in rows]
+    for p in parts:
+        c = (B["parts"].get(p["ref"]) or {}).get("court")
+        p["parked"] = bool(c) and (c[2] < x0 or c[0] > x1 or c[3] < y0 or c[1] > y1)       # courtyard wholly outside the outline
+        mine = [{"id": r["id"], "ok": r["ok"], "hard": r.get("hard")} for r, t in toks if p["ref"] in t]
+        p["why"] = {"owner": anchor.get(p["mod"]), "module": p["mod"], "fixed": p["fixed"], "rows": mine}
+
+
 def snapshot_dict(B, seq, M=None, cons=None, regions=None, meta=None, board=""):
     """The full placement snapshot of the board model B (routediag.load shape; a floorplan2.Plan keeps its own in Plan.B):
     snapshot._build with no tracks and vias, plus mod / fixed / h per part, grid, modules, regions, keepouts and the meta
@@ -174,6 +278,7 @@ def snapshot_dict(B, seq, M=None, cons=None, regions=None, meta=None, board=""):
         p["fixed"] = ((why.get(r) or {}).get("reason") or "undeclared") if r in fixed else None
         p["h"] = IT.height(B, cons, r)
     g = d["grid"] = grid_of(B["bbox"])
+    _why_parts(B, d["parts"], M, meta)
     mods = []
     for m in (M or {}).get("modules") or []:
         cs = [B["parts"][r]["court"] for r in m["members"] if r in B["parts"]]
@@ -445,10 +550,10 @@ def _glb_child(jobfile):
 
 # ---------------------------------------------------------------- L4: owner feedback items (schema v1)
 ITEM_MAX_BYTES, TEXT_MAX = 16_000, 400
-KINDS = ("note", "pin", "region", "near", "away", "gate")
-ITEM_KEYS = {"v", "id", "ts", "author", "kind", "text", "target", "pin", "region", "other", "dist_mm", "gate", "cand", "snapshot", "scope"}
+KINDS = ("note", "pin", "region", "near", "away", "gate", "answer")
+ITEM_KEYS = {"v", "id", "ts", "author", "kind", "text", "target", "pin", "region", "other", "dist_mm", "gate", "cand", "snapshot", "scope", "answer"}
 SUB_KEYS = {"target": {"part", "module", "group"}, "pin": {"at", "rot", "side"}, "region": {"cells", "rect", "keep"},
-            "other": {"part", "module", "cell", "edge"}, "gate": {"id", "action", "choice"}}
+            "other": {"part", "module", "cell", "edge"}, "gate": {"id", "action", "choice"}, "answer": {"id", "choice"}}
 EDGES = ("N", "E", "S", "W")
 
 
@@ -500,6 +605,12 @@ def check_item(a, ctx):
         if why:
             return why
     x0, y0, x1, y1 = ctx["bbox"]
+    if kind == "answer":
+        an = a.get("answer")
+        if not isinstance(an, dict) or set(an) - {"id", "choice"} or not all(isinstance(an.get(k), str) and 0 < len(an[k]) <= 80 for k in ("id", "choice")):
+            return "answer.id and answer.choice are non-empty strings of at most 80 characters"
+        asked = (ctx.get("asked") or {}).get(an["id"])
+        return None if asked and an["choice"] in asked[1] else "unknown question or choice"
     if kind == "note":
         return None if a.get("text") else "missing key text"
     if kind == "pin":
@@ -551,6 +662,29 @@ def check_item(a, ctx):
     return "a reject needs text" if g["action"] == "reject" and not a.get("text") else None
 
 
+def asked_questions(W):
+    """{question id: (board path, {choice keys})} as last asked in this workdir: the stage questions files (`*.questions.json`) and the
+    crowding options of the floorplan report (`*.floorplan.json`, history[-1].crowding.options plus keep)."""
+    import glob
+    out = {}
+    for p in sorted(glob.glob(os.path.join(W, "*.questions.json"))):
+        board = p[:-len(".questions.json")] + ".kicad_pcb"
+        try:
+            qs = json.load(open(p, encoding="utf-8")).get("questions") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        for q in qs:
+            out.setdefault(q["id"], (board, {o["choice"] for o in q.get("options") or []}))
+    for p in sorted(glob.glob(os.path.join(W, "*.floorplan.json"))):
+        try:
+            cr = json.load(open(p, encoding="utf-8"))["history"][-1].get("crowding") or {}
+        except (OSError, ValueError, KeyError, IndexError, AttributeError, TypeError):
+            continue
+        if cr.get("options"):
+            out["crowding"] = (p[:-len(".floorplan.json")] + ".kicad_pcb", {o["key"] for o in cr["options"]} | {"keep"})
+    return out
+
+
 def load_feedback(path, ctx):
     """(item, None) or (None, reason) for one inbox file. Never raises. A `.tmp` file is (None, None): not read."""
     try:
@@ -591,7 +725,7 @@ class Feedback:
         self.members = {"part": {r: [r] for r in B["parts"]}, "module": mods, "group": groups}
         self.hard_fixed = {r for r in MD.fixed_set(B, self.cons0) if MD.MECH.match(r) or (why.get(r) or {}).get("reason") in HARD_PIN_REASONS}
         self.ctx = {"parts": set(B["parts"]), "modules": set(mods), "groups": set(groups), "grid": grid_of(B["bbox"]), "bbox": B["bbox"],
-                    "gates": {}, "seen": set()}
+                    "gates": {}, "seen": set(), "asked": {}}
         self.replay = {}                         # item file name -> (stage, generation) it took effect at in the stored log
         if self.on():
             for line in self._log_lines():
@@ -668,6 +802,17 @@ class Feedback:
                         return f"near {near['dist_mm']:g} mm is under away {away['dist_mm']:g} mm of row {o['id']}"
         return None
 
+    def _answer(self, a, path, name, stored, generation):
+        """an owner answer to an open question: recorded in the board's map now, so the NEXT stage start asks nothing and applies it.
+        Nothing of the running stage changes."""
+        qid, choice = a["answer"]["id"], a["answer"]["choice"]
+        if not stored:
+            os.replace(path, os.path.join(self.dir, "applied", name))
+        from . import questions as QS
+        QS.record_answer(self.ctx["asked"][qid][0], qid, choice)
+        self._log(a, "applied", generation, effect=f"answer {qid} = {choice} recorded in the map", file=name)
+        print(f"Owner answered {qid} = {choice} (applies from the next stage start)", flush=True)
+
     def boundary(self, generation=None):
         """Read the inbox: refuse, log, turn into rows. On a re-run the items of applied/ take effect at their recorded
         boundary. -> the rows that came into force at this call (rows_rev rose when the list is not empty)."""
@@ -678,6 +823,7 @@ class Feedback:
             for sub in ("applied", "refused", "gates"):
                 os.makedirs(os.path.join(self.dir, sub), exist_ok=True)
             self.ctx["gates"] = {g: list(c) for g, c in self.open_gates.items()}
+            self.ctx["asked"] = asked_questions(self.W)
             todo = [(os.path.join(self.dir, "applied", n), n, True) for n in sorted(os.listdir(os.path.join(self.dir, "applied")))
                     if self.replay.get(n) == (self.stage, generation)]
             todo += [(os.path.join(self.dir, "inbox", n), n, False) for n in sorted(os.listdir(os.path.join(self.dir, "inbox"))) if n.endswith(".json")]
@@ -693,6 +839,9 @@ class Feedback:
                 self.ctx["seen"].add(a["id"])
                 if not stored:
                     self._log(a, "received", generation, file=name)
+                if a["kind"] == "answer":
+                    self._answer(a, path, name, stored, generation)
+                    continue
                 row = self.row_of(a)
                 why = self.conflict(row) if row else None
                 if why:

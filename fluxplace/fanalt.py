@@ -67,6 +67,7 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
     cls = NC.classify(B, cons, spec)
     pn = EP.plane_nets(B, cons, cls, EP.plan_params(cons))
     items = G.Items.of_board(B)
+    ob = EP.Obstacles(B, EP.plan_params(cons), True)         # forbidden regions (rule areas, mask openings), net aware
     step, reach = 0.05, A["reach"]
     blks = []
     u = lambda: str(uuid.uuid4())
@@ -75,8 +76,13 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
     def commit(pin, kind, pts, layer, via, net):
         segs = [(a, b) for a, b in zip(pts, pts[1:]) if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-4] if pts else []
         for a, b in segs:
-            if items.gap_seg(a, b, w, layer, net, clr)[0] < clr - 1e-6:
+            if items.gap_seg(a, b, w, layer, net, clr)[0] < clr - 1e-6 or ob.seg_hit(a, b, w, layer, net):
                 return False
+        for v in B["vias"] if via else ():                  # a new via centre inside another via's copper: KiCad flags the track end that sits on it
+            if math.hypot(via[0] - v["x"], via[1] - v["y"]) < v["d"] / 2 + 0.01:
+                return False
+        if via and ob.keepout_hit(via[0], via[1], frozenset(cu), vias=True, net=net, r=via[2] / 2):
+            return False
         if via and items.gap_via(via[0], via[1], via[2], net, clr)[0] < clr - 1e-6:
             return False
         if via and any(math.hypot(v["x"] - via[0], v["y"] - via[1]) < max((via[3] + v["drill"]) / 2 + h2h, ((via[2] + v["d"]) / 2 + clr) if snv == "freerouting" else 0.0) - 1e-6 for v in B["vias"]):   # drilled holes keep hole-to-hole even on one net

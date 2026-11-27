@@ -122,7 +122,8 @@ def test_load_ai_action_drops_invalid(monkeypatch, tmp_path):
     assert a["tokens"] == 812 and a["why"] == "try"
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
-    assert GP.load_ai_action(str(bad), "b") == {"actions": [], "tokens": 0, "why": "", "dropped": []}
+    r = GP.load_ai_action(str(bad), "b")
+    assert r["actions"] == [] and r["dropped"] == [] and r["refused"].startswith("unreadable action file")
 
 
 # ---- apply ----
@@ -740,7 +741,7 @@ def test_a4_invalid_answer_applies_nothing(apply_env, tmp_path):
     assert res["status"] == "invalid" and res["commit"] is False
     assert apply_env["calls"] == [] and not os.path.exists(out)
     fb = json.load(open(os.path.join(ctx["ai_dir"], _sid(GP.ai_key(GAP)) + ".feedback.json")))
-    assert "route: nets > 6" in json.dumps(fb["dropped"]) and fb["refused"] == "action invalid"
+    assert "route: nets > 6" in json.dumps(fb["dropped"]) and fb["refused"].startswith("action invalid")
     assert ctx["ai_used"] == {}
 
 
@@ -964,3 +965,49 @@ def test_b10_pair_asym_without_connection_is_a_topology_row(monkeypatch, tmp_pat
     rows = GP._proposal_rows(ctx["ai_dir"])
     assert rows and rows[0]["gap_id"] == gap["id"] and rows[0]["proposal"] == "topology"
     assert not os.path.exists(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(gap))[:80] + ".packet.json"))
+
+
+def test_invalid_action_file_refused_with_reason(monkeypatch, tmp_path):
+    """B12/R051: the loader states why a file is refused (check-ai-actions.sh logic), check_ai_actions reports every pending file."""
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    ai = tmp_path / "ai"; ai.mkdir()
+    (ai / "ok.action.json").write_text(json.dumps({"actions": [{"do": "give_up", "why": "x"}]}))
+    (ai / "bad.action.json").write_text(json.dumps({"actions": [{"do": "give_up"}, {"do": "zap"}]}))
+    (ai / "junk.action.json").write_text("{nope")
+    (ai / "noact.action.json").write_text(json.dumps({"why": "forgot"}))
+    rows = {r["file"]: r for r in GP.check_ai_actions(str(ai), "b")}
+    assert rows["ok.action.json"]["ok"] and rows["ok.action.json"]["kept"] == ["give_up"]
+    assert not rows["bad.action.json"]["ok"] and rows["bad.action.json"]["lost"] == 1 and "unknown do" in rows["bad.action.json"]["reason"]
+    assert "unreadable" in rows["junk.action.json"]["reason"] and rows["noact.action.json"]["reason"] == "no actions list"
+
+
+def test_r_ai_refuses_unreadable_answer_with_reason(apply_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
+    ctx = _ctx(tmp_path)
+    os.makedirs(ctx["ai_dir"])
+    sid = critroute._safe(GP.ai_key(GAP))[:80]
+    open(os.path.join(ctx["ai_dir"], sid + ".action.json"), "w").write("{garbage")
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    assert res["status"] == "invalid" and "unreadable action file" in res["why"] and apply_env["calls"] == []
+    fb = json.load(open(os.path.join(ctx["ai_dir"], sid + ".feedback.json")))
+    assert "unreadable action file" in fb["refused"]
+
+
+def test_memo_key_changes_when_a_same_name_answer_is_rewritten(tmp_path):
+    """B12/R052: ai_memo_part keys name + content hash."""
+    f = tmp_path / "g.action.json"
+    f.write_text('{"actions": []}')
+    k1 = GP.ai_memo_part(str(tmp_path), ["g.action.json"])
+    assert GP.ai_memo_part(str(tmp_path), ["g.action.json"]) == k1
+    f.write_text('{"actions": [{"do": "give_up"}]}')
+    k2 = GP.ai_memo_part(str(tmp_path), ["g.action.json"])
+    assert k1 != k2 and k2.startswith("ai:g.action.json@")
+
+
+def test_hs_leg_stub_join_boundary_and_rip_allowance():
+    """B12/R050 (ddd2861): a path on a hs-pair leg is a stub join up to HS_STUB_MM (+ripped copper), an open leg has no cap."""
+    cu = ["F.Cu"]
+    ok = lambda mm, **k: GP._ai_action({"do": "path", "net": "LEG", "path": f"F.Cu: 0,0 {mm},0"}, cu, hs_legs={"LEG"}, **k)[0]
+    assert ok(GP.HS_STUB_MM) is not None and ok(GP.HS_STUB_MM + 0.1) is None
+    assert ok(GP.HS_STUB_MM + 0.5, rip_mm=1.0) is not None                  # copper ripped in the same file extends the cap
+    assert ok(9.0, open_legs={"LEG"}) is not None                           # an open leg has no stub cap

@@ -4,6 +4,8 @@
   r    [power] rails    spine routes of the [power] rails at their width (PHASE3B)
   p    pairgroups       Python step (PHASE3C): failed pairs re-laid per connector group; skipped when none is incomplete
   3    route_diff.py    the pair nets that are still open
+  rf   route.py         the RF nets (the [rf] nets and the nets named as RF) before the rest: a plain net never takes their room
+                        (PLAN-PLACE-GAPS phase 2: pairs and rails were already ahead of plain nets, RF nets were not)
   4    route.py         every net but the legs of pairs p could not lay, plane nets as --power-nets, --keep-input-copper
 
 Each call reads the previous call's board and writes the next (the .kicad_pro travels along).  Exit 0 and 3 (some
@@ -168,12 +170,21 @@ def base_flags(R, d):
     return [*RR.size_args(R), "--escalation", "off", "--strict-sizes", *(["--fab-overrides", fo] if fo else [])]
 
 
-def run_step(cmd, log, cap_s=CAP_S, status_path=None, step=None):
+NO_RIP_STEPS = ("rf", "route", "pairleft", "pairleft-single")      # steps that route over the copper of earlier steps: they must not rip it
+
+
+def no_rip_env():
+    """The router's environment with its pre-existing-net rip-up off: KRT registers unlocked pre-existing nets (<= 30 segments, <= 6 vias)
+    as rip candidates, and --keep-input-copper only guards its cleanup, so a later step could rip an earlier step's rf / pair / rail copper."""
+    return dict(os.environ, KICAD_RIP_PREEXISTING="0")
+
+
+def run_step(cmd, log, cap_s=CAP_S, status_path=None, step=None, env=None):
     """-> (rc, seconds); rc 124 on the cap, -N when killed by a signal.  Never retried."""
     from . import routestatus as RS
     t = time.time()
     try:
-        r = RS.run_logged(cmd, cwd=os.path.dirname(os.path.dirname(cmd[1])), timeout=cap_s, out=cmd[3], log_path=log,
+        r = RS.run_logged(cmd, cwd=os.path.dirname(os.path.dirname(cmd[1])), timeout=cap_s, out=cmd[3], log_path=log, env=env,
                           status_path=status_path, extra={"router": "krt-whole", "current_step": step}, keep_open=True)
         rc = r.returncode
     except subprocess.TimeoutExpired:
@@ -224,10 +235,23 @@ def _restore_project(source_board, output_board):
     return changed
 
 
-def _post(best, d, planes, R):
-    """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill."""
+def _post(best, d, planes, R, protect=()):
+    """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill.
+    Ends the snap leaves (clearance-refused) go to the via-to-end move, then the joiner (the close-stage fallbacks); each is DRC-guarded,
+    lock-respecting and skips the `protect` nets (the manifest's nets), the last fallback (centre) included."""
     from . import snapiter as SI, planetie as PT, opengate as OG
     snap = SI.run(best, best, log=lambda _m: None)
+    if snap.get("centred_left") != 0:
+        for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run), ("centre", SI.centre_run)):
+            try:
+                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect))      # W46: the centre move too (it moved locked copper of 25 protected nets: PROTECTED_CHANGED at the stage commit)
+            except Exception as e:                           # noqa: BLE001 - a fallback failure keeps the snapped board
+                snap[key] = {"error": str(e)[:160]}
+                break
+            if snap[key].get("centred_left") == 0:
+                break
+        left = [r.get("centred_left") for r in (snap, snap.get("via") or {}, snap.get("joiner") or {}, snap.get("centre") or {}) if r.get("centred_left") is not None]
+        snap["centred_left"] = left[-1] if left else snap.get("centred_left")
     ties = PT.run_guarded(best, best, [net for net, _lay in planes], RC.open_by_net, log=lambda _m: None, workdir=d,
                           plane_layers=[lay for _net, lay in planes],
                           rules={"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]})
@@ -280,6 +304,41 @@ def route_net_set(allnets, failed_legs, hs_block, still_open):
     return ("*",) if not excluded else sorted(set(allnets) - excluded)
 
 
+def _partners(pn, cons=None):
+    """{leg: partner} over `pn` (graph.diff_pairs naming: _P/_N, _DP/_DM anywhere in the name)."""
+    from . import graph, constraints as C
+    out = {}
+    for slave, master in graph.diff_pairs(list(pn), exclude=C.not_pairs(cons or {})).items():
+        out[slave], out[master] = master, slave
+    return out
+
+
+def left_pair_legs(src, pn, hs_block, failed_legs, cons=None, still=None):
+    """W39: legs of the deferred pairs the pairs gate / pairgroups left open on `src`: the pairs of `pn` with a leg in
+    `hs_block | failed_legs` and a leg open. Both legs of a pair always travel together."""
+    still = set(RC.open_by_net(src)) if still is None else set(still)
+    mine = set(hs_block) | set(failed_legs)
+    par = _partners(set(pn) | mine, cons)             # pairgroups' failures come from the audit's pair list, which `pn` may lack
+    return sorted(x for x in par if (x in mine or par[x] in mine) and (x in still or par[x] in still))
+
+
+def pair_fallback_rows(board, legs, cons=None):
+    """W39 pair-quality finding for the pairs `legs` of `board`: [{pair, closed, p_mm, n_mm, skew_mm}] (lengths from KiCad's DRC)."""
+    from . import netlen
+    left = set(RC.open_by_net(board))
+    par = _partners(legs, cons)
+    pairs = sorted({tuple(sorted((x, par[x]))) for x in legs if x in par})
+    try:
+        ln = netlen.pair_lengths(board, pairs) or {}
+    except Exception:                                       # noqa: BLE001 - a finding without lengths is still a finding
+        ln = {}
+    out = []
+    for pr in pairs:
+        m = ln.get(pr) or {}
+        out.append({"pair": list(pr), "closed": not (set(pr) & left), "p_mm": m.get("p"), "n_mm": m.get("n"), "skew_mm": m.get("skew")})
+    return out
+
+
 def run(c, n, board, runner=run_step):
     """the route stage in krt-whole mode -> stage result dict.  `runner(cmd, log)` -> (rc, s): replaceable in tests."""
     import json
@@ -322,10 +381,28 @@ def run(c, n, board, runner=run_step):
     pour_rail_nets = [n for n in rail_nets if PWR.is_pour(c.cons, n)]     # PHASE3E 5: only pour rails are outer-only
     other_rail_nets = [n for n in rail_nets if n not in pour_rail_nets]
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
+    ladder_rec = {}                                          # W34: net -> [{width, layers, connected}] per rung, for the result
     if pour_rail_nets:
-        steps.append(("rails-pour", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=pour_rail_nets, extra=xtra)))
+        steps.append(("rails-pour", lambda s0, o0: lambda s, o: _rails_ladder(a, c, base, rails, pour_rail_nets, sig, s, o, xtra, ladder_rec, runner, spath)))
     if other_rail_nets:
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
+    from . import railbranch as RB                           # W46: rail branches at each connection's D71da width; the plain step skips rail nets
+    try:
+        branch_nets = RB.branch_nets(c.cons, {x for x, _l in planes})
+    except Exception:                                        # noqa: BLE001 - no [power] facts: no branch step
+        branch_nets = []
+    branch_rec = {}
+    if branch_nets:
+        def _branch(s, o):
+            mk = lambda src, out, lay, widths, ns: cmd_route(a.router_py, a.router_dir, src, out, lay, base, widths, out[:-10] + ".json", nets=ns, extra=xtra)
+            rn = lambda cmd, log, cap_s: runner(cmd, log, cap_s=min(CAP_S, cap_s), status_path=spath, step="rails-branch", env=no_rip_env())
+            try:
+                return RB.route(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, lambda: budget - (time.time() - t0), branch_rec)
+            except Exception as e:                           # noqa: BLE001 - a failed branch step leaves the board as it was; reported
+                branch_rec["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+                shutil_copy(s, o)
+                return 0
+        steps.append(("rails-branch", lambda s, o: _branch))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
         return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn)
@@ -334,16 +411,91 @@ def run(c, n, board, runner=run_step):
     def _route_nets(src):
         still = set(RC.open_by_net(src))                     # re-read after pairgroups: a pair it completed is back in
         hs_rec["excluded"] = sorted(hs_block & still)
-        return route_net_set(allnets, failed_legs, hs_block, still)
+        got = route_net_set(allnets, failed_legs | set(rf_nets), hs_block, still)
+        if not branch_nets:
+            return got
+        try:
+            have = {str(p.GetNetname()) for p in _pcb().LoadBoard(src).GetPads()} - {""}   # nets with a pad on THIS step's board (the router refuses a net it cannot find)
+        except Exception:                                    # noqa: BLE001 - unreadable board: the nets read at the start
+            have = set(allnets)
+        return sorted(((have if got == ("*",) else set(got)) & have) - set(branch_nets))     # W46: rail nets belong to the rail steps
     if diff:
         for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
                           lambda s, o, gnets=gnets, glay=glay, gw=gw, ggap=ggap: cmd_diff(
                               a.router_py, a.router_dir, s, o, gnets, glay, base, o[:-10] + ".json", width=gw, gap=ggap)))
+    fb_rec = {"coupled": [], "singles": [], "pairs": []}      # W39: deferred pairs the route stage lays itself, KRT first
+    def _copy_step(src, dst):
+        shutil_copy(src, dst)
+        return 0
+    def _pairleft_coupled(src, dst):
+        """a deferred (gated / pairgroups-failed) pair still open: route_diff, coupled, per geometry group. A failed call keeps its input."""
+        legs = left_pair_legs(src, pn, hs_block, failed_legs, c.cons)
+        if not legs:
+            return _copy_step(src, dst)
+        fb_rec["coupled"] = legs
+        cur = src
+        for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, src, legs, sig)):
+            nxt = f"{dst[:-10]}.g{gi}.kicad_pcb"
+            _carry(cur, nxt)
+            if os.path.exists(nxt):
+                os.remove(nxt)
+            cap = min(CAP_S, max(0.0, budget - (time.time() - t0)))
+            if cap <= 0:
+                break
+            rc, _s = runner(cmd_diff(a.router_py, a.router_dir, cur, nxt, gnets, glay, base, nxt[:-10] + ".json", width=gw, gap=ggap),
+                            nxt[:-10] + ".log", cap_s=cap, status_path=spath, step="pairleft")
+            if rc in (0, 3) and os.path.exists(nxt):
+                _restore_project(board, nxt)
+                cur = nxt
+        shutil_copy(cur, dst)
+        return 0
+    def _pairleft_singles(src, dst):
+        """after the coupled attempt: a pair still open is two plain legs, KRT, never silently: recorded as a pair-quality finding."""
+        legs = left_pair_legs(src, pn, hs_block, failed_legs, c.cons)
+        fb_rec["singles"] = legs
+        if not legs:
+            return _copy_step(src, dst)
+        cap = min(CAP_S, max(0.0, budget - (time.time() - t0)))
+        if cap <= 0:
+            return _copy_step(src, dst)
+        rc, _s = runner(cmd_route(a.router_py, a.router_dir, src, dst, sig, base, {}, dst[:-10] + ".json", nets=legs, extra=xtra),
+                        dst[:-10] + ".log", cap_s=cap, status_path=spath, step="pairleft-single", env=no_rip_env())
+        if rc in (0, 3) and os.path.exists(dst):
+            _restore_project(board, dst)
+            return 0
+        return _copy_step(src, dst)
+    if hs_block or opn:
+        steps.append(("pairleft", lambda s, o: _pairleft_coupled))
+        steps.append(("pairleft-single", lambda s, o: _pairleft_singles))
+    from . import review as RV
+    rfc = set(((c.cons or {}).get("rf") or {}).get("nets") or [])
+    try:                                                     # the same class rule as the placement gaps (name, pin names, mate)
+        from . import placegaps as PG
+        of = PG._net_class(PG.Ctx(stage="route", board=board, cons=c.cons or {}, spec=getattr(c, "spec", None)))
+        is_rf_net = lambda n: n in rfc or of(n)[0] == "rf"
+    except Exception:                                        # noqa: BLE001 - no board facts: the name rule
+        is_rf_net = lambda n: n in rfc or RV.is_rf(n)
+    rf_nets = sorted(n for n in allnets if is_rf_net(n) and n not in pn and n not in rail_nets and n not in {x for x, _l in planes})
+    rf_rec = {"nets": rf_nets, "layers": [], "widths": {}, "unknown_width": [], "open": [], "routed": []}
+    if rf_nets:                                              # RF before plain: one router call on the RF nets, the route step never takes them
+        from . import rfroute as RFR
+        outer = RFR.outer_layers(sig) or list(sig)           # outer layers over the GND planes first; an unroutable RF net stays open
+        rfw = RFR.widths(board, c.cons, rf_nets, outer)
+        rf_rec.update(layers=outer, widths=rfw, unknown_width=sorted(n for n in rf_nets if not rfw[n]["w"]))
+        rf_power = {n: rfw[n]["w"] for n in rf_nets if rfw[n]["w"]}
+        steps.append(("rf", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, outer, base, rf_power, o[:-10] + ".json", nets=rf_nets, extra=xtra)))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
-    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s), extra=xtra)))
+    def _plain(s, o):
+        ns = _route_nets(s)
+        if not ns:                                           # W46: every net is a rail / pair / RF net owned by an earlier step: nothing for the plain router
+            return lambda s_, o_: (shutil_copy(s_, o_), 0)[1]
+        return cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=ns, extra=xtra)
+    steps.append(("route", _plain))
+    if branch_nets:                                          # W46: the plain step's tracks split rail zone fills (KRT does not repair zone nets outside its --nets):
+        steps.append(("rails-branch2", lambda s, o: _branch))        # the same class-by-class pass reconnects what it cut, at the same D71da widths
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
@@ -364,9 +516,9 @@ def run(c, n, board, runner=run_step):
                 t1 = time.time()
                 rc, secs = cmd(cur, dst), round(time.time() - t1, 1)
             else:
-                rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name)
+                rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name, **({"env": no_rip_env()} if name in NO_RIP_STEPS else {}))
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups") or name.startswith("diff") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "rails-branch", "rails-branch2", "pairgroups", "rf", "pairleft-single") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -379,12 +531,18 @@ def run(c, n, board, runner=run_step):
             discarded.append({"step": name, "sections": changed})
         cur = dst
     shutil_copy(cur, best)
+    if fb_rec["coupled"] or fb_rec["singles"]:                 # W39: the pair-quality finding (lengths on the board before cleanup)
+        try:
+            fb_rec["pairs"] = pair_fallback_rows(best, fb_rec["coupled"] or fb_rec["singles"], c.cons)
+        except Exception as e:                                  # noqa: BLE001
+            fb_rec["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     post, post_error = None, None
     if ((c.cons or {}).get("route") or {}).get("whole_post", True):
         keep = best + ".prepost"
         shutil_copy(best, keep)
         try:
-            post = _post(best, d, planes, R)
+            from . import boardwrite as BW
+            post = _post(best, d, planes, R, protect=sorted((BW.load_manifest(board) or {}).get("nets") or {}))
         except Exception as e:                               # snap / plane ties failed: the routed board stands, flagged
             shutil_copy(keep, best)
             post_error = {"type": type(e).__name__, "message": str(e)[:300]}
@@ -398,6 +556,14 @@ def run(c, n, board, runner=run_step):
             shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the pour
         pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    wid = {"widened_mm": 0.0, "necks": [], "unreached": {}, "dropped": None}   # W34: narrow rail copper widened / necked per D71da
+    try:
+        wo = os.path.join(d, "widened.kicad_pcb")
+        wid = PWR.widen_guarded(best, c.cons, wo, nets=set(rail_nets) | set(PWR.plan(c.cons, layers=nl)))
+        if os.path.exists(wo):
+            shutil_copy(wo, best)
+    except Exception as e:                                   # noqa: BLE001 - the routed board stands without the widening
+        wid["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     mask = {"blocks": 0, "inferred": 0, "skipped": 0, "written": False}   # PHASE3F A7: mask openings re-cut after the copper
     try:
         from . import thermal as TH
@@ -409,8 +575,11 @@ def run(c, n, board, runner=run_step):
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the re-cut
         mask["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
-                 "pour": pour, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
+                 "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets), "branch": branch_rec}
     left = RC.open_by_net(best)
+    if rf_nets:
+        from . import rfroute as RFR
+        rf_rec["routed"], rf_rec["open"] = RFR.split(rf_nets, left)
     try:
         from . import qualaudit as QA, routediag as RD, netclass as NC
         Bq = RD.load(best)
@@ -449,19 +618,82 @@ def run(c, n, board, runner=run_step):
         line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
     elif pour["dropped"]:
         line += f"; rail pour dropped ({pour['dropped_reason']})"
+    if wid.get("widened_mm") or wid.get("necks"):
+        line += f"; rails widened {wid.get('widened_mm', 0):g} mm, {len(wid.get('necks') or [])} neck-down(s) proven (D71da)"
+    if wid.get("unreached"):
+        line += "; rail width NOT reached (placement finding): " + ", ".join(f"{n} {len(v)} run(s) near {','.join(sorted({r for x in v for r in x['refs']})[:4])}" for n, v in sorted(wid["unreached"].items()))
+    if branch_rec:
+        br, bn, bo = RB.summary({k: v for k, v in branch_rec.items() if isinstance(v, dict)})
+        line += f"; rail branches routed {br} ({bn} neck-down(s) proven), {bo} left open at their width" + (f" ({branch_rec['error']})" if branch_rec.get("error") else "")
     if rails_rec["rail_refused"]:
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "mask": mask},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "rf": rf_rec, "mask": mask, "pair_fallback": fb_rec},
               open(os.path.join(d, "result.json"), "w"), indent=1)
+    if rf_rec["open"]:
+        line += (f"; RF FINDING: {len(rf_rec['open'])} RF net(s) not routable on the outer layers at their impedance width, left OPEN "
+                 f"(never routed at default width): " + ", ".join(rf_rec["open"]))
+    if rf_rec["unknown_width"]:
+        line += "; RF width unknown (no stackup / reference plane): " + ", ".join(rf_rec["unknown_width"])
+    if fb_rec["pairs"]:
+        line += "; pair fallback (pair-quality finding): " + ", ".join(
+            f"{'/'.join(r['pair'])} {'closed' if r['closed'] else 'OPEN'}" + (f" skew {r['skew_mm']:.2f} mm" if r.get("skew_mm") is not None else "") for r in fb_rec["pairs"][:6])
     if hs_rec["excluded"]:
         line += f"; {len(hs_rec['excluded'])} gated pair leg(s) left to the pairs gate: " + ", ".join(hs_rec["excluded"][:6])
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "hs_excluded": hs_rec["excluded"]}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"]}
+
+
+def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):
+    """W34 (W14 measured ladder, ONE-SHOT-LEDGER 2026-11-19 "rails first"): the pour rails, before everything else, one router
+    call per rung: widest first (the rail's IPC outer width, then `[route] power_ladder_mm` 1.4 / 1.0 / 0.6), outer layers above
+    1.0 mm and every signal layer at or below it (power.ladder_layers).  A rung routes only the rails the previous rung left
+    open, on the board it wrote (a rail keeps its wide copper and finishes narrower, as W14 did).  A single call for a rail with
+    one rung.  -> rc; rung 0 writes dst's summary json, later rungs `<dst>.r<k>.json`, `rec` gets {net: [{width, layers, open}]}."""
+    from . import power as PWR
+    cur, todo, k = src, list(nets), 0
+    ladders = {n: PWR.ladder_widths(c.cons, n, rails[n], R_TRACK(base, a)) for n in nets}
+    base_json = dst[:-10] + ".json"
+    while todo:
+        widths = {n: ladders[n][k] for n in todo if k < len(ladders[n])}
+        if not widths:
+            break
+        lows = {n: w for n, w in widths.items() if w <= PWR.LADDER_INNER_MAX_MM + 1e-9 and k > 0}
+        groups = [(g, PWR.ladder_layers(c.cons, sig, min(g.values()), fallback=k > 0)) for g in
+                  ({n: w for n, w in widths.items() if n not in lows}, lows) if g]
+        for gi, (g, lay) in enumerate(groups):
+            out_k = f"{dst[:-10]}.r{k}{gi}.kicad_pcb"
+            summ = base_json if (k == 0 and gi == 0) else f"{dst[:-10]}.r{k}{gi}.json"
+            cmd = cmd_route(a.router_py, a.router_dir, cur, out_k, lay, base, {**rails, **g}, summ, nets=list(g), extra=xtra)
+            rc, _s = runner(cmd, dst[:-10] + (".log" if (k == 0 and gi == 0) else f".r{k}{gi}.log"), cap_s=CAP_S, status_path=spath, step="rails-pour")
+            if rc not in (0, 3) or not os.path.exists(out_k):
+                if k == 0 and gi == 0:
+                    return rc
+                continue
+            _restore_project(src, out_k)
+            cur = out_k
+            for n, w in g.items():
+                rec.setdefault(n, []).append({"width": w, "layers": lay})
+        still = RC.open_by_net(cur, fill=False)
+        for n in todo:
+            if rec.get(n):
+                rec[n][-1]["open"] = int(still.get(n, 0))
+        todo = [n for n in todo if still.get(n)]
+        k += 1
+    shutil_copy(cur, dst)
+    return 0
+
+
+def R_TRACK(base, a):
+    """the signal track width the rails never go below: the --track-width of the recipe flags."""
+    try:
+        return float(base[base.index("--track-width") + 1])
+    except (ValueError, IndexError):
+        return float(getattr(a, "track", 0.15) or 0.15)
 
 
 def _rail_refused(rail_nets, rows):

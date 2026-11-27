@@ -6,7 +6,7 @@ from fluxplace import events_sample as ES
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "events-sample")
 KINDS = {"run_start", "stage_start", "stage_end", "progress", "iteration", "log", "snapshot", "parts", "artifact",
          "eta", "run_end", "placement_progress", "placement_snapshot", "glb_ready", "glb_failed", "gate_open", "gate_closed",
-         "feedback_result"}
+         "feedback_result", "narration"}
 
 
 def _check_w(W):
@@ -28,6 +28,8 @@ def _check_w(W):
     assert open(os.path.join(W, "png", "lookahead-1.png"), "rb").read(8) == b"\x89PNG\r\n\x1a\n"
     assert json.load(open(os.path.join(W, "eta.json")))["model"]
     assert json.load(open(os.path.join(W, "run.json")))["run"] == ES.RUN
+    narr = [r for r in rows if r["kind"] == "narration"]                            # N12: start / doing / doing (plain words)
+    assert [r["phase"] for r in narr] == ["start", "doing", "doing"] and all(r["text"] and r["eta_s"] is None or r["eta_s"] for r in narr)
     place = [r for r in rows if r["kind"] == "placement_snapshot"]                   # the placer view (liveview.py)
     assert [(r["lane"], r["full"], r["moved"]) for r in place] == [("leader", True, 0), ("leader", False, 1)]
     d = json.load(open(os.path.join(W, place[1]["path"])))

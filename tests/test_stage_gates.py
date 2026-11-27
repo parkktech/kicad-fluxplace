@@ -9,7 +9,7 @@ from test_pipeline import _board, _args
 
 def test_gate_defaults_and_override():
     assert GP.gate_kinds({}, "pairs") == ["pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance"]
-    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias"]     # PHASE3I F2: rails are laid by route
+    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias", "rf-impedance", "net-contract"]     # A6; PHASE3I F2: rails are laid by route
     assert GP.gate_kinds({"flow": {"gates": {"pairs": []}}}, "pairs") == []
 
 
@@ -27,7 +27,7 @@ def test_flow_stops_at_pairs_gate_with_exit_5(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setitem(PL.FUNCS, "pairs", lambda c, n, board: {"verdict": "pass", "line": "pairs ok", "board": board})
     monkeypatch.setitem(PL.FUNCS, "tune", lambda c, n, board: seen.append("tune") or {"verdict": "pass", "board": board})
-    monkeypatch.setattr(PL, "_gate_check", lambda c, n, name, board, kinds, src=None: {
+    monkeypatch.setattr(PL, "_gate_check", lambda c, n, name, board, kinds, src=None, later=(): {
         "verdict": "packets", "board": board, "line": f"gate {name}: packets", "next": ["gap pair:A/B"],
         "gate": {"kinds": kinds, "stop": "packets", "dir": ""}})
     a = _args(tmp_path, b, flow="constructive", from_stage="pairs", to_stage="tune")
@@ -143,7 +143,7 @@ def test_pair_impedance_kind_and_route_power_default():
     g = {"kind": "pair-impedance", "class": "hs-pair", "sev": 1}
     assert GP.in_scope(g, ["pair-impedance"]) and not GP.in_scope({**g, "class": "pair"}, ["pair-impedance"])
     assert GP.score_terms({"shorts": 0, "opens": 0, "errors": 0}, [g])["hs_pair"] == 1
-    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias"]     # no `power` stage: rails are laid by `route`
+    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias", "rf-impedance", "net-contract"]     # A6: no `power` stage: rails are laid by `route`
 
 
 def test_gate_budget_from_flow_constraint(tmp_path, monkeypatch):
@@ -175,7 +175,7 @@ def test_ledger_gets_the_gated_verdict(tmp_path, monkeypatch):
     orig_after = PL2._Ledger.after
     monkeypatch.setattr(PL2._Ledger, "after", lambda self, name, n, res: seen.append((name, res["verdict"])) or orig_after(self, name, n, res))
     monkeypatch.setitem(PL2.FUNCS, "pairs", lambda c, n, board: {"verdict": "pass", "line": "pairs ok", "board": board})
-    monkeypatch.setattr(PL2, "_gate_check", lambda c, n, name, board, kinds, src=None: {
+    monkeypatch.setattr(PL2, "_gate_check", lambda c, n, name, board, kinds, src=None, later=(): {
         "verdict": "packets", "board": board, "line": "gate", "next": [], "gate": {"kinds": kinds, "stop": "packets", "dir": ""}})
     b = _board(tmp_path)
     assert PL2.run(_args(tmp_path, b, flow="constructive", from_stage="pairs", to_stage="pairs")) == 5
@@ -195,7 +195,7 @@ def test_packets_answered_gate_is_rechecked_without_stage_rerun(tmp_path, monkey
     ran, checked = [], []
     monkeypatch.setitem(PL2.FUNCS, "pairs", lambda c, n_, board: ran.append("pairs") or {"verdict": "pass", "board": board})
 
-    def gate(c, n_, name, board, kinds, src=None):
+    def gate(c, n_, name, board, kinds, src=None, later=()):
         checked.append(os.path.basename(board))
         return {"verdict": "pass", "board": board, "line": "ok", "next": [], "gate": {"kinds": kinds, "stop": "clean", "dir": gd}}
     monkeypatch.setattr(PL2, "_gate_check", gate)

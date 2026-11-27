@@ -40,7 +40,7 @@ def params(cons):
             "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)), "exit_reserve_mm": float(e.get("exit_reserve_mm", 4.0)), "near_mm": float(e.get("blocker_near_mm", 2.0)),
             "inner_cost_gated": float(e.get("inner_cost", 3.0)),        # PHASE3G G3d: gated pairs stay outer unless blocked
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
-            "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
+            "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits") if isinstance(e.get("reserve_exits"), bool) else None,
             "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
             "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1))),
             "skew_frac": float(e.get("skew_frac", 0.85)), "max_uncoupled": float(e.get("max_uncoupled_mm", 0.0)),
@@ -101,8 +101,10 @@ def rules_for(board, B, cons, R, p, P, proj=None):
             "target": fv.get("impedance_diff"), "family": fam, "class": c.get("name") or "-", "prio": int(c.get("priority", 1 << 31)) if c else 1 << 31}
 
 
-def terminals(B, p, n, pad_max):
-    """([{p, n, c, sep}], [unpaired pads]): P and N pads matched same part first, then nearest."""
+def terminals(B, p, n, pad_max, merge_twins=False):
+    """([{p, n, c, sep}], [unpaired pads]): P and N pads matched same part first, then nearest.  `merge_twins`: the two terminals of
+    one part whose pads interleave (a USB-C receptacle: two pads per net, DM, DP, DM, DP) become ONE terminal (the closer pad pair)
+    with `twin` = the other pad of each net, joined by `twin_join` before the pair leaves."""
     Pp = [q for q in B["pads"] if q["net"] == p and not q.get("np")]
     Np = [q for q in B["pads"] if q["net"] == n and not q.get("np")]
     cand = sorted((a["ref"] != b["ref"], math.hypot(a["x"] - b["x"], a["y"] - b["y"]), i, j) for i, a in enumerate(Pp) for j, b in enumerate(Np))
@@ -115,7 +117,67 @@ def terminals(B, p, n, pad_max):
         a, b = Pp[i], Np[j]
         out.append({"p": a, "n": b, "c": ((a["x"] + b["x"]) / 2, (a["y"] + b["y"]) / 2), "sep": d,
                     "name": a["ref"] if a["ref"] == b["ref"] else f"{a['ref']}/{b['ref']}"})
-    return out, [q for i, q in enumerate(Pp) if i not in ui] + [q for j, q in enumerate(Np) if j not in uj]
+    lone = [q for i, q in enumerate(Pp) if i not in ui] + [q for j, q in enumerate(Np) if j not in uj]
+    if merge_twins:
+        out = _merge_twins(out, Pp, Np)
+    return out, lone
+
+
+def _merge_twins(terms, Pp, Np):
+    by = {}
+    for t in terms:
+        if t["p"]["ref"] == t["n"]["ref"]:
+            by.setdefault(t["p"]["ref"], []).append(t)
+    for ref, ts in by.items():
+        if len(ts) != 2 or sum(1 for q in Pp if q["ref"] == ref) != 2 or sum(1 for q in Np if q["ref"] == ref) != 2:
+            continue
+        pads = [q for t in ts for q in (t["p"], t["n"])]
+        a0, b0 = max(((a, b) for a in pads for b in pads), key=lambda ab: math.hypot(ab[0]["x"] - ab[1]["x"], ab[0]["y"] - ab[1]["y"]))
+        ux, uy = G.unit((a0["x"], a0["y"]), (b0["x"], b0["y"]))
+        proj = lambda q: (q["x"] - a0["x"]) * ux + (q["y"] - a0["y"]) * uy
+        if max(abs(-(q["x"] - a0["x"]) * uy + (q["y"] - a0["y"]) * ux) for q in pads) > 0.1:        # one straight pad row (a receptacle), not a chip's two columns
+            continue
+        row = sorted([(proj(q), "p") for q in (ts[0]["p"], ts[1]["p"])] + [(proj(q), "n") for q in (ts[0]["n"], ts[1]["n"])])
+        if [k for _x, k in row] in (list("pnpn"), list("npnp")):       # P N P N along the row: interleaved (nested P N N P is not)
+            # the terminal is the OUTER pad pair on the end of the row nearer the other terminals: its twins then sit on one side of
+            # it and the pair leaves past the row end, not under the jumpers
+            far = [t["c"] for t in terms if t not in ts]
+            by_pad = {id(q): x for x, q in ((proj(q), q) for q in pads)}
+            sel = sorted(pads, key=lambda q: by_pad[id(q)])
+            lo, hi = sel[:2], sel[2:]
+            if far:
+                fx, fy = sum(c[0] for c in far) / len(far), sum(c[1] for c in far) / len(far)
+                dlo = math.hypot(sum(q["x"] for q in lo) / 2 - fx, sum(q["y"] for q in lo) / 2 - fy)
+                dhi = math.hypot(sum(q["x"] for q in hi) / 2 - fx, sum(q["y"] for q in hi) / 2 - fy)
+                pri, twn = (lo, hi) if dlo <= dhi else (hi, lo)
+            else:
+                pri, twn = lo, hi
+            pp = next(q for q in pri if q["net"] == ts[0]["p"]["net"])
+            pn = next(q for q in pri if q is not pp)
+            tp_ = next(q for q in twn if q["net"] == pp["net"])
+            tn_ = next(q for q in twn if q is not tp_)
+            terms = [dict(ts[0], p=pp, n=pn, c=((pp["x"] + pn["x"]) / 2, (pp["y"] + pn["y"]) / 2), sep=math.hypot(pp["x"] - pn["x"], pp["y"] - pn["y"]),
+                          twin={"p": tp_, "n": tn_}) if t is ts[0] else t for t in terms if t is not ts[1]]
+    return terms
+
+
+def coupled_preferred(B, cons, p, n, pad_max=None):
+    """Why the pair p/n is "coupled-preferred" (None = a real pair for pairlay): its P and N pads do not form two or more
+    terminals within pad_max_mm, or pads of either leg stay unpaired (the pair runs through a passive, a divider or a transformer
+    winding). pairlay cannot lay it, the gate does not count it as an open pair; the router lays the two legs as single nets,
+    side by side where it can (it has no coupling hint). A pair of a controlled-impedance or high-speed family is never one."""
+    from . import review as RV
+    fam = max((f for f in ((cons or {}).get("pairs") or {}) if p.startswith(f)), key=len, default=None)
+    if fam and "impedance_diff" in (((cons or {}).get("pairs") or {}).get(fam) or {}):
+        return None
+    if re.sub(r"\d+$", "", p.upper().split("_")[0]) in RV._HS_FAMILIES:
+        return None
+    terms, lone = terminals(B, p, n, pad_max if pad_max is not None else params(cons)["pad_max"])
+    if len(terms) < 2:
+        return "no two terminals (P and N pads further apart than [pairlay] pad_max_mm)"
+    if lone:
+        return "unpaired pad(s) " + ", ".join(f"{q['ref']}.{q['num']}" for q in lone[:4])
+    return None
 
 
 def tree(terms):
@@ -180,9 +242,31 @@ def via_half_pitch(via, via_gap, dist, step):
     return kv_s, kv_d, [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
 
 
+SOFT_RESERVE_COST = 6           # x cunit (0.1 mm): entering a cell of a peer's / higher tier's reserved corridor costs 0.6 mm of path
+
+
+def _soft_cost(ctx, grid, sig, pr, cost):
+    """corridors reserved for pairs not yet emitted that are NOT hard for `pr` (peers and higher tiers, see _lay_pair): a per-layer
+    extra cost of entering their cells, max-merged with `cost`.  Nothing soft -> `cost` unchanged."""
+    tier = ctx.get("tier")
+    soft = [fp for q, fp in ctx.get("reserve", {}).items() if tier is not None and q != pr and q not in ctx["done"] and not tier(q) < tier(pr)]
+    if not soft:
+        return cost
+    import numpy as np
+    D0 = {l: np.full(grid.F.dist[l].shape, 1e9, dtype=np.float64) for l in sig}
+    O0 = {l: np.full(grid.F.owner[l].shape, -1, dtype=grid.F.owner[l].dtype) for l in sig}
+    for fp in soft:
+        grid.put(D0, O0, fp, "", "soft")
+    arrs = [np.where(D0[l] < 0.02, SOFT_RESERVE_COST, 0).astype(np.uint8).ravel() for l in sig]
+    if not cost:
+        return [a.tobytes() for a in arrs]
+    return [np.maximum(np.frombuffer(bytes(x), dtype=np.uint8), a).tobytes() for x, a in zip(cost, arrs)]
+
+
 def _guide_cost(ctx, grid, sig, nets, cost):
     """pairs guide (lookahead, L7): per-layer extra cost of entering each cell, max-merged with the negotiation cost and
     capped at 255. No guide in ctx -> `cost` returned unchanged (the search is byte-identical to before)."""
+    cost = _soft_cost(ctx, grid, sig, nets, cost)
     g = ctx.get("guide")
     if not g:
         return cost
@@ -506,6 +590,88 @@ def _vpad(pad, x, y, d, copper):
             "layers": set(copper), "net": pad["net"], "angle": 0.0, "shape": "circle", "tht": True}
 
 
+def _dog_leg(ctx, rule, pad, v, net, with_via=True):
+    """a short stub (dog-leg) from `pad` to a via at `v` (`with_via` False: to a bare point) -> (pieces, length) | None when the
+    copper laid so far fouls it."""
+    items, clr, via, cu = ctx["items"], rule["clr"], rule["via"], ctx["grid"].B["copper"]
+    lay = next((l for l in cu if l in pad["layers"]), None)
+    w = rule["geo"].get(lay, (rule["w"],))[0]
+    if lay is None or (with_via and items.gap_via(v[0], v[1], via, net, clr, ctx["skip"])[0] < clr - 1e-6):
+        return None
+    for pts in PL.doglegs((pad["x"], pad["y"]), v, G.unit((pad["x"], pad["y"]), v), exts=(0.0,)):
+        pcs = [("seg", lay, a, b, w) for a, b in zip(pts, pts[1:])]
+        if PL.check(items, pcs, net, clr, ctx["skip"])[0] >= clr - 1e-6:
+            return pcs + ([("via", v[0], v[1], via)] if with_via else []), G.length(pts)
+    return None
+
+
+def twin_join(ctx, t, rule, pr):
+    """the two pads of one net in an interleaved double-pad row (USB-C receptacle: DM, DP, DM, DP at 0.5 mm) cannot meet on the pad
+    layer (the other net's pad sits between them): each leg gets a dog-bone via beside either pad and a jumper between the two vias on
+    a signal layer.  -> {net: pieces} (+ t["join_lead"] = {net: the primary pad's own stub}) | None when no length / side / layer is clear of the copper laid so far (checked leg by leg)."""
+    items, clr, via, sig = ctx["items"], rule["clr"], rule["via"], ctx["grid"].sig
+    tw = t["twin"]
+    others = [x["c"] for x in ctx.get("info", {}).get(pr, ([],))[0] if x is not t]
+    ex, ey = G.unit(t["c"], (sum(c[0] for c in others) / len(others), sum(c[1] for c in others) / len(others))) if others else (0.0, 0.0)
+    pads4 = [t["p"], t["n"], tw["p"], tw["n"]]
+    far = max(((a, b) for a in pads4 for b in pads4), key=lambda ab: math.hypot(ab[0]["x"] - ab[1]["x"], ab[0]["y"] - ab[1]["y"]))
+    ax = G.unit((far[0]["x"], far[0]["y"]), (far[1]["x"], far[1]["y"]))
+    pj = lambda q: (q["x"] - far[0]["x"]) * ax[0] + (q["y"] - far[0]["y"]) * ax[1]
+    outer = max((t["p"], t["n"]), key=lambda q: min(abs(pj(q) - pj(r)) for r in (tw["p"], tw["n"])))      # the primary pad farther from the twins
+    # the net of the outer primary pad has its jumper over the other primary pad: it goes AWAY from the other terminals (the pair
+    # leaves that way), the other net's jumper branches off its own stub on the exit side
+    sidepref = {outer["net"]: -1, (t["n"] if outer is t["p"] else t["p"])["net"]: 1}
+    mark = items.mark()
+    out, lead = {}, {}
+    try:
+        for net, a, b in ((pr[0], t["p"], tw["p"]), (pr[1], t["n"], tw["n"])):
+            ux, uy = G.unit((a["x"], a["y"]), (b["x"], b["y"]))
+            nrm = (-uy, ux)
+            sides = (1, -1) if sidepref.get(net, 0) * (nrm[0] * ex + nrm[1] * ey) >= 0 else (-1, 1)
+            done = None
+            play = next((l for l in sig if l in a["layers"]), None)
+            # first a jumper on the pad layer round the end of the other net's pad (no via), then dog-bone vias and a jumper on another layer
+            for with_via in (False, True):
+                for L in (0.8, 1.1, 1.5, 2.0, 2.6):
+                    for side in sides:
+                        for La, Lb in ((L, L), (L, L + 0.4), (L + 0.4, L)):
+                            va = (a["x"] + nrm[0] * side * La, a["y"] + nrm[1] * side * La)
+                            vb = (b["x"] + nrm[0] * side * Lb, b["y"] + nrm[1] * side * Lb)
+                            mk = items.mark()
+                            la = _dog_leg(ctx, rule, a, va, net, with_via)
+                            if la:
+                                _claim(items, la[0], net)
+                            lb = _dog_leg(ctx, rule, b, vb, net, with_via) if la else None
+                            if lb:
+                                _claim(items, lb[0], net)
+                                for lay in ([play] if not with_via else [l for l in sig if l != play] + [play]):
+                                    jp = [("seg", lay, va, vb, rule["geo"].get(lay, (rule["w"],))[0])]
+                                    if PL.check(items, jp, net, clr, ctx["skip"])[0] >= clr - 1e-6:
+                                        done = (la[0] + lb[0] + jp, la[0])
+                                        _claim(items, jp, net)           # the other net's stubs and jumper see this one
+                                        break
+                            if done:
+                                break
+                            items.rollback(mk)
+                        if done:
+                            break
+                    if done:
+                        break
+                if done:
+                    break
+            if not done:
+                return None
+            out[net] = done[0]
+            lead[net] = done[1]
+    finally:
+        items.rollback(mark)
+    for net, side in sidepref.items():                       # the exit-side net: its jumper (last piece) branches off the stub the pair leaves through
+        if side > 0 and net in out:
+            lead[net] = lead[net] + [out[net][-1]]
+    t["join_lead"] = lead                                    # the primary pads' own stubs (and that jumper): the pair leaves through them
+    return out
+
+
 def dogbone(ctx, t, rule, pr, limit=2):
     """new via-pair exits of a terminal: a short stub from each pad to its own via, the two vias side by side
     (a dog-bone per leg), so the pair can leave on any signal layer.  A terminal whose pads share no signal layer gets
@@ -522,16 +688,7 @@ def dogbone(ctx, t, rule, pr, limit=2):
     need = via + max(rule["via_gap"], clr)
 
     def leg(pad, v, net):
-        lay = next((l for l in cu if l in pad["layers"]), None)
-        w = rule["geo"].get(lay, (rule["w"],))[0]
-        g, _it = items.gap_via(v[0], v[1], via, net, clr, ctx["skip"])
-        if lay is None or g < clr - 1e-6:
-            return None
-        for pts in PL.doglegs((pad["x"], pad["y"]), v, G.unit((pad["x"], pad["y"]), v), exts=(0.0,)):
-            pcs = [("seg", lay, a, b, w) for a, b in zip(pts, pts[1:])]
-            if PL.check(items, pcs, net, clr, ctx["skip"])[0] >= clr - 1e-6:
-                return pcs + [("via", v[0], v[1], via)], G.length(pts)
-        return None
+        return _dog_leg(ctx, rule, pad, v, net)
     if shared and all(len(q["layers"]) > 1 for q in (P_, N_)):
         t["dog"] = out                                      # through-hole pads are on every layer already
         return out
@@ -703,12 +860,31 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
         e["status"], e["why"] = "not-laid", f"class gap {rule['gap']} below the clearance floor"
         return out
     D, O = grid.view()
+    tier = ctx.get("tier")
     for q, fp in ctx.get("reserve", {}).items():           # corridors the negotiation gave to pairs not yet emitted
-        if q != pr and q not in ctx["done"]:
+        # hard only against a LOWER tier (a larger (prio, kind)); peers and higher tiers see it as free space (the negotiation cost
+        # already steers them): a peer's corridor must not seal a high-speed pair in (W16 PCIE_TX / PCIE_CLK)
+        if q != pr and q not in ctx["done"] and (tier is None or tier(q) < tier(pr)):
             grid.put(D, O, fp, "", f"corridor of {q[0]}/{q[1]}")
     mark = items.mark()
     tp = time.time()
     newdone = set()
+    for t in terms:                                           # double pads of one net: joined first, then the pair leaves the pair of pads
+        if t.get("twin"):
+            jn = twin_join(ctx, t, rule, pr)
+            if jn is None:
+                items.rollback(mark)
+                e["status"], e["why"] = "not-laid", f"the two pads of each net at {t['name']} cannot be joined (no clear via / jumper beside the row)"
+                return out
+            for net, pcs in jn.items():
+                lead = t["join_lead"].get(net, [])
+                grid.put(D, O, [q for q in pcs if not any(q is x for x in lead)], net, "reserved")     # not the stub the pair itself leaves through
+                _claim(items, pcs, net)
+                if not plan_only:
+                    out["pcs"][net] += pcs
+            e["twin_join"] = {"at": t["name"], "pieces": sum(len(v) for v in jn.values())}
+            if plan_only:
+                e.setdefault("join_pcs", {}).update({net: [list(p) for p in pcs] for net, pcs in jn.items()})
     for a, b in secs:
         ta, tb = terms[a], terms[b]
         r = _section(ctx, D, O, ta, tb, rule, pr, plan_only, ctx.get("preset", {}).get((pr, a, b)))
@@ -777,7 +953,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     t0 = time.time()
     cons = cons or {}
     P = params(cons)
-    B = B or RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(B or RD.load(board), FB.windows(cons))    # B7: a stripped mask window stays forbidden to the pair copper
     if board:                                              # holes without a pad number are obstacles too
         try:
             B = dict(B, pads=B["pads"] + G.holes(board, B["copper"]))
@@ -815,7 +992,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 old.setdefault(o["net"], []).append((kind, o))
     info, key = {}, {}
     for pr in pl:
-        terms, lone = terminals(B, pr[0], pr[1], P["pad_max"])
+        terms, lone = terminals(B, pr[0], pr[1], P["pad_max"], merge_twins=True)
         if P["via_exit"] and not plan_only:
             for t in terms:
                 fp, fn = fan_exit(t["p"], old.get(pr[0], []), B["copper"]), fan_exit(t["n"], old.get(pr[1], []), B["copper"])
@@ -840,7 +1017,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
                 "limit": lambda net: guard_limit(cons, net),
                 "tol": lambda net: min(0.25 * guard_limit(cons, net), 0.25),
-                "reserve": neg["reserve"], "preset": neg["preset"], "done": set(), "guide": guide}
+                "reserve": neg["reserve"], "preset": neg["preset"], "done": set(), "guide": guide,
+                "tier": lambda q: key[q][:2] if q in key else (-1, -1)}
 
     def one_pass(order):
         ctx = mk_ctx()
@@ -924,7 +1102,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         gates = {pr: sum(r.get("gates", 0) for k, r in out.items() if k[0] == pr and r["ok"]) for pr in live}
         alone_fail = sorted({"/".join(k[0]) for k, r in out.items() if not r["ok"]})
         # emission order: negotiated pairs first, most constrained (fewest gates) first; then the unresolved and failed-alone ones
-        rank = {pr: (pr in unresolved or "/".join(pr) in alone_fail, gates.get(pr, 0), key[pr]) for pr in live}
+        # W16 route-3: an unsettled pair is re-ordered only inside its own (prio, kind) tier, never behind a lower tier (PCIE_TX was 22nd of 34)
+        rank = {pr: (key[pr][0], key[pr][1], pr in unresolved or "/".join(pr) in alone_fail, gates.get(pr, 0), key[pr][2:]) for pr in live}
         order0 = sorted(live, key=lambda pr: rank[pr]) + [pr for pr in order0 if pr not in live]
         res["negotiation"] = {"sections": len(secs_of), "passes": used, "unresolved": ["/".join(pr) for pr in sorted(unresolved)],
                               "failed_alone": alone_fail, "secs": round(time.time() - tn, 1), "workers": P["workers"]}
@@ -983,6 +1162,18 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     return res
 
 
+def has_twin_pads(board, cons, spec, P):
+    """True when a pair ends on a part with two pads per net in an interleaved row (USB-C receptacle): the generic fan-out leaves four
+    dead-end stubs there, so the pair exits are reserved before it runs (`[pairlay] reserve_exits` unset = this test)."""
+    from . import routediag as RD, netclass as NC, pairaudit as PA
+    try:
+        B = RD.load(board)
+        pairs = PA.pair_list(NC.classify(B, cons, spec))
+        return any(t.get("twin") for pr in pairs for t in terminals(B, pr[0], pr[1], P["pad_max"], merge_twins=True)[0])
+    except Exception:                                        # noqa: BLE001 - no verdict: the generic fan-out
+        return False
+
+
 def reserve_for_fanout(board, board_in, cons, spec, workdir):
     """pair-aware fan-out: plan every pair on the placement (no copper written), then give the fan-out a copy of its input
     board in which the planned exits are real locked copper - the first `reserve_mm` of both corridor ends at envelope
@@ -990,7 +1181,9 @@ def reserve_for_fanout(board, board_in, cons, spec, workdir):
     owns, seconds) | None.  `[pairlay] reserve_exits = false` keeps the generic fan-out."""
     from . import boardtext as BT
     P = params(cons)
-    if not P["enabled"] or not P["reserve_exits"]:
+    if not P["enabled"] or P["reserve_exits"] is False:
+        return None
+    if P["reserve_exits"] is None and not has_twin_pads(board_in, cons, spec, P):     # unset: on where the generic fan-out leaves dead stubs
         return None
     t0 = time.time()
     res = plan(board, cons, spec, plan_only=True)
@@ -1015,6 +1208,9 @@ def reserve_for_fanout(board, board_in, cons, spec, workdir):
         if e.get("status") != "planned":
             continue                                        # a pair without a plan keeps the generic fan-out on its pins
         nets += e["pair"]
+        for net, pcs in (e.get("join_pcs") or {}).items():
+            for p in pcs:
+                add(tuple(p), net)
         for s in e["sections"]:
             for p in s.get("keepfree", []):
                 add(p, e["pair"][0])
@@ -1187,9 +1383,8 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
                 B2 = RD.load(out)
                 opn = RC.text_open(B2)
                 aud = PA.audit(B2, [tuple(r["pair"]) for r in rep["pairs"]], cons, {n for n, k in opn.items() if k})
-                for r in rep["pairs"]:
-                    r["open"] = [opn.get(r["pair"][0], 0), opn.get(r["pair"][1], 0)]
-                    r["status"] = aud[tuple(r["pair"])]["status"] if r.get("state") not in ("c",) else r["status"]
+                FB.reconcile(rep, aud, opn)
+                FB.handoff_effort(rep, P)
         rep["complete"] = sum(1 for r in rep["pairs"] if r["status"] == "complete")
         rep["states"] = {k: sum(1 for r in rep["pairs"] if r.get("state") == k) for k in FB.STATES + ("a-mismatch",)}
         rep["handoff"] = sorted(n for r in rep["pairs"] if r.get("handoff") for n in r["pair"])

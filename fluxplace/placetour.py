@@ -4,7 +4,7 @@ Round 0 judges the input: a KRT `--quick 2` lean copy (lookahead.lean_krt) and r
 blame of the current best makes candidate part moves (turn, relieve, nudge, rot, pull); tier-1 gates and the predictor rank
 them in seconds; the best `judge_top` are judged by KRT in parallel (one interpreter each). The winner's MOVED board (no
 judge copper) is the next base when its judge key beats the best. Stops: no opens and no hot area, no gain for
-`no_gain_rounds`, `max_rounds`, or [flow] budget_min.
+`no_gain_rounds` (a "minor" gain, vias/detour only, counts as no gain), `max_rounds`, or [flow] budget_min (default [placetour] budget_min).
 """
 import copy
 import fnmatch
@@ -35,8 +35,9 @@ from . import routestatus as RS
 from . import snapshot as SN
 
 DEFAULTS = {"enabled": False, "max_rounds": 10, "no_gain_rounds": 2, "jobs": 4, "judge_top": 4, "judge_min": 4.0,
-            "cands": 12, "hot": 0.5, "nudge_mm": [0.5, 1.0, 2.0], "move_routed": True}
-_INT = ("max_rounds", "no_gain_rounds", "jobs", "judge_top", "cands")
+            "cands": 12, "ladder_budget_min": 15.0, "hot": 0.5, "nudge_mm": [0.5, 1.0, 2.0], "move_routed": True,
+            "guard_opens": 2, "guard_vias_frac": 0.03, "budget_min": 45.0}
+_INT = ("max_rounds", "no_gain_rounds", "jobs", "judge_top", "cands", "guard_opens")
 WORST = 10 ** 6
 KINDS = ("turn", "relieve", "nudge", "rot", "pull")
 
@@ -51,7 +52,10 @@ def params(cons):
     for k in _INT:
         P[k] = int(P[k])
     P["judge_min"] = float(P["judge_min"])
+    P["ladder_budget_min"] = float(P["ladder_budget_min"])
     P["hot"] = float(P["hot"])
+    P["guard_vias_frac"] = float(P["guard_vias_frac"])
+    P["budget_min"] = float(P["budget_min"])
     P["nudge_mm"] = [float(x) for x in P["nudge_mm"]]
     return P
 
@@ -121,7 +125,31 @@ def judge(a, board, outdir, P, cons=None, spec=None, log=print):
     return {"routed": routed, "blame": blame, "source": blame["source"], "secs": round(time.time() - t0, 1)}
 
 
-KEY_NAMES = ("ghost opens", "hot areas", "hot occupancy", "vias", "detour")       # judge_key, in order (live view)
+KEY_NAMES = ("hs opens", "rf opens", "power opens", "ghost opens", "hot areas", "hot occupancy", "vias", "detour")     # class_key, in order (live view)
+K_OPEN, K_HOT, K_OCC, K_VIAS = 3, 4, 5, 6                                        # positions in class_key (placegaps phase 1)
+OCC_EPS = 0.01                                                                   # hot occupancy change that counts as material
+
+
+def guard_why(k, ref, P):
+    """"" when the judge guard holds, else why not. It applies only when the class opens (first 3) are equal and k gains 1..guard_opens
+    signal opens: no rise in hot areas, no rise in vias beyond guard_vias_frac of ref's vias (a small open gain bought with a worse board)."""
+    if tuple(k[:K_OPEN]) != tuple(ref[:K_OPEN]) or not 1 <= ref[K_OPEN] - k[K_OPEN] <= int(P["guard_opens"]):
+        return ""
+    if k[K_HOT] > ref[K_HOT]:
+        return f"guard: hot {ref[K_HOT]}->{k[K_HOT]}"
+    if k[K_VIAS] - ref[K_VIAS] > float(P["guard_vias_frac"]) * ref[K_VIAS]:
+        return f"guard: vias +{k[K_VIAS] - ref[K_VIAS]}"
+    return ""
+
+
+def _beats(k, ref, P):
+    """k < ref lexicographically and the guard holds."""
+    return tuple(k) < tuple(ref) and not guard_why(k, ref, P)
+
+
+def _minor(k, ref):
+    """An improvement that changes none of class opens, signal opens, hot areas or hot occupancy: only vias / detour moved."""
+    return tuple(k[:K_OCC]) == tuple(ref[:K_OCC]) and round(abs(k[K_OCC] - ref[K_OCC]), 4) <= OCC_EPS + 1e-9
 
 
 def _lv(key):
@@ -136,6 +164,20 @@ def judge_key(routed_board, blame, cons=None):
     vias = len(RD.load(routed_board)["vias"])
     return (len(blame["open"]), len(blame["hot"]), round(sum(h["occ"] for h in blame["hot"]), 4), vias,
             round(sum(c["detour"] for c in blame["costly"]), 4))
+
+
+def class_key(routed_board, blame, cons=None, spec=None):
+    """judge_key with the open nets ranked by class in front: (hs-pair opens, rf opens, power opens) + judge_key. One hs or rf net
+    unrouted is worse than any number of plain opens or hot areas (PLAN-PLACE-GAPS section 3). No routed copy: the worst key."""
+    base = judge_key(routed_board, blame, cons)
+    if routed_board is None or blame is None:
+        return (WORST, WORST, WORST) + base
+    try:
+        from . import placegaps as PG
+        return tuple(PG.open_terms(routed_board, blame, cons, spec)) + base
+    except Exception as e:                                # noqa: BLE001 - classes unknown: say so, rank as plain
+        print(f"placetour: open nets not classed ({type(e).__name__}: {e}); the key ranks WORST")
+        return (WORST, WORST, WORST) + base
 
 
 # ------------------------------------------------------------------ P2 move generator
@@ -565,7 +607,7 @@ def _worker(jobfile):
         P = params(cons)
         P["judge_min"] = float(job["judge_min"])
         j = judge(a, job["board"], job["dir"], P, cons, spec)
-        key = judge_key(j["routed"], j["blame"], cons)
+        key = class_key(j["routed"], j["blame"], cons, spec)
         out.update(routed=j["routed"], blame=j["blame"], secs=j["secs"], key=list(key))
         if j["routed"]:
             fit = {"id": job["tag"], "key": list(key), "critical": job.get("critical", [])}
@@ -583,7 +625,7 @@ def _row(r, cid, kind, moved, t1key, jkey, png, verdict):
 
 def _report(path, P, start, end, accepted, removed_refs, groups, rounds_log):
     L = ["# PLACETOUR report", "", "| | input | output |", "|---|---|---|"]
-    names = ("judge opens (signal)", "hot areas", "hot occupancy", "vias", "detour sum")
+    names = ("hs-pair opens", "rf opens", "power opens", "judge opens (signal)", "hot areas", "hot occupancy", "vias", "detour sum")    # = class_key, in order
     for i, nm in enumerate(names):
         L.append(f"| {nm} | {start[i]} | {end[i]} |")
     L += ["", "## rounds", "| round | candidates | tier-1 survivors | judged | winner | judge key | verdict |", "|---|---|---|---|---|---|---|"]
@@ -611,18 +653,18 @@ def stage(c, n, board):
     a, cons, spec = c.a, c.cons, c.spec
     acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py", "freerouting_jar", "java")}
     crit = LA.critical_nets(board, cons, spec)
-    budget = float(((cons or {}).get("flow") or {}).get("budget_min") or 0)
+    budget = float(((cons or {}).get("flow") or {}).get("budget_min") or P["budget_min"] or 0)
     timing, rows, accepted, rounds_log, removed_refs = {}, [], [], [], set()
     _progress(spath, "running", "round 0: judge the input")
     j0 = judge(a, board, os.path.join(d, "r0-input"), P, cons, spec)
-    key0 = judge_key(j0["routed"], j0["blame"], cons)
+    key0 = class_key(j0["routed"], j0["blame"], cons, spec)
     best = {"board": board, "blame": j0["blame"], "key": key0, "routed": j0["routed"]}
     png0 = _png(j0["routed"] or board, "input", key0, crit, os.path.join(d, "input.png"))
     rows.append(_row(0, "input", "input", "-", None, key0, png0, "reference"))
     if j0["routed"]:
-        SN.active_take(j0["routed"], "placetour r0 judge input", force=True, opens=key0[0])
+        SN.active_take(j0["routed"], "placetour r0 judge input", force=True, opens=key0[K_OPEN])
     EV.artifact("png", png0, "input")
-    EV.iteration("place", 0, n=P["max_rounds"], metrics={"opens": key0[0], "hot": key0[1], "vias": key0[3]}, note="input")
+    EV.iteration("place", 0, n=P["max_rounds"], metrics={"hs_open": key0[0], "rf_open": key0[1], "opens": key0[K_OPEN], "hot": key0[K_HOT], "vias": key0[K_VIAS]}, note="input")
     LA._table(table, rows)
     from . import ready as RDY, parts as PTS                  # C7b: the rows of the input, measured now; the output is set against them
     ds_dir = PTS.resolve_dir(((cons or {}).get("docs") or {}).get("datasheets"), [getattr(a, "constraints", None), board])
@@ -631,17 +673,26 @@ def stage(c, n, board):
     LV.candidate("placetour", "input", board, None, _lv(key0), None, cons, ex, board=board, generation=0, generations=P["max_rounds"],
                  arm="move", is_leader=True, leader="input", full=True)
     stale, rounds, stop = 0, 0, "no round ran"
+    round_secs, judged_on, t_round = [], set(), time.time()
     for r in range(1, P["max_rounds"] + 1):
-        if budget and time.time() - t_stage > budget * 60:
-            stop = "flow budget_min"
+        left = budget * 60 - (time.time() - t_stage) if budget else None
+        if left is not None and (left <= 0 or (round_secs and left < sum(round_secs) / len(round_secs))):
+            stop = "budget_min" if left <= 0 else "budget_min (next round would not fit)"
             break
+        t_round = time.time()
         rounds = r
         Bb = RD.load(best["board"])
         _progress(spath, "running", f"round {r}: candidates", timing=timing, rounds=r - 1)
         cands = candidates(Bb, best["blame"], cons, P, seed=100 * r, spec=spec)
         rdir = os.path.join(d, f"r{r}")
         surv, _dropped = tier1(best["board"], cands, cons, spec, P, rdir, gate_state(Bb, cons, spec))
+        fresh = [x for x in surv if _key(x[1]["moves"]) not in judged_on]       # a candidate already judged on this very board gives the same key
+        if surv and not fresh:
+            stop = "no new candidate on this board"
+            break
+        surv = fresh
         top = surv[:P["judge_top"]]
+        judged_on |= {_key(x[1]["moves"]) for x in top}
         LV.progress("placetour", "tier1", always=True, generation=r, generations=P["max_rounds"], trial=len(surv), trials=len(cands), arm="move",
                     leader_key=_lv(best["key"]), why=f"{len(cands)} candidates, {len(surv)} pass tier 1, {len(top)} to judge")
         _progress(spath, "running", f"round {r}: {len(cands)} candidates, {len(surv)} tier-1, judging {len(top)}",
@@ -662,20 +713,23 @@ def stage(c, n, board):
         for (key1, cnd, p, rem), job, res in zip(top, jobs, results):
             jk = tuple(res["key"]) if res.get("key") else None
             if res.get("routed"):
-                SN.active_take(res["routed"], f"placetour r{r} judge {cnd['id']}", force=True, opens=jk[0])
+                SN.active_take(res["routed"], f"placetour r{r} judge {cnd['id']}", force=True, opens=jk[K_OPEN])
             if res.get("png"):
                 EV.artifact("png", res["png"], job["tag"])
             verdict = "fail: " + str(res.get("error") or "no routed copy") if jk is None else "kept"
-            if jk is not None and (winner is None or jk < winner[0]):
+            if jk is not None and jk < tuple(best["key"]):
+                verdict = guard_why(jk, best["key"], P) or verdict
+            if jk is not None and _beats(jk, best["key"], P) and (winner is None or jk < winner[0]):
                 winner = (jk, cnd, p, rem, res)
             rows.append(_row(r, job["tag"], cnd["kind"], _moved(cnd["moves"]), key1, jk, res.get("png"), verdict))
             LV.progress("placetour", "judge", always=True, generation=r, generations=P["max_rounds"], arm="move", cand=job["tag"], key=_lv(jk),
-                        leader_key=_lv(best["key"]), verdict="kept" if jk is not None and jk < tuple(best["key"]) else "dropped",
+                        leader_key=_lv(best["key"]), verdict="kept" if jk is not None and _beats(jk, best["key"], P) else "dropped",
                         why=verdict if jk is None else cnd["kind"])
-        improved = winner is not None and tuple(winner[0]) < tuple(best["key"])
+        improved = winner is not None and _beats(winner[0], best["key"], P)
+        minor = improved and _minor(winner[0], best["key"])
         if improved:
             jk, cnd, p, rem, res = winner
-            rows[-len(jobs) + [j["tag"] for j in jobs].index(f"r{r}-{cnd['id']}")]["verdict"] = "winner"
+            rows[-len(jobs) + [j["tag"] for j in jobs].index(f"r{r}-{cnd['id']}")]["verdict"] = "minor" if minor else "winner"
             for ref, v in cnd["moves"].items():
                 accepted.append({"round": r, "why": cnd["kind"], "ref": ref, "rot": v[2],
                                  "from": (round(Bb["parts"][ref]["pos"][0], 3), round(Bb["parts"][ref]["pos"][1], 3), Bb["parts"][ref]["angle"]),
@@ -686,19 +740,21 @@ def stage(c, n, board):
             for i in rem["vias"]:
                 removed_refs |= {ref for ref, _n in A["vias"][i] if ref in cnd["moves"]}
             best = {"board": p, "blame": res["blame"], "key": jk, "routed": res["routed"]}
-            stale = 0
-            SN.active_take(p, f"placetour r{r} winner", force=True, opens=jk[0])
+            stale = stale + 1 if minor and not any(jk[:K_OPEN]) else 0          # a decimal-only gain is not progress (while an hs/rf/power net is open it still is: keep looking)
+            judged_on = set()
+            SN.active_take(p, f"placetour r{r} winner", force=True, opens=jk[K_OPEN])
             EV.emit("parts", stage="placetour", i=r, refs=sorted(cnd["moves"]), why=cnd["kind"])
         else:
             stale += 1
         best_key = best["key"]
         winner_id = winner[1]["id"] if (winner and improved) else "-"
         rounds_log.append({"round": r, "cands": len(cands), "surv": len(surv), "judged": len(jobs), "winner": winner_id,
-                           "key": tuple(best_key), "verdict": "improved" if improved else "no gain"})
+                           "key": tuple(best_key), "verdict": ("minor" if minor else "improved") if improved else "no gain"})
         EV.iteration("place", r, n=P["max_rounds"], metrics={"candidates": len(cands), "tier1": len(surv), "judged": len(jobs),
-                                                             "opens": best_key[0], "hot": best_key[1], "vias": best_key[3],
+                                                             "hs_open": best_key[0], "rf_open": best_key[1], "opens": best_key[K_OPEN], "hot": best_key[K_HOT], "vias": best_key[K_VIAS],
                                                              "stale": stale}, note=winner_id)
         timing[f"round{r}_s"] = round(time.time() - t_stage, 1)
+        round_secs.append(time.time() - t_round)
         LV.candidate("placetour", f"r{r}-{winner_id}" if improved else f"r{r}-no-gain", best["board"] if improved else None, None, _lv(best_key), None, cons,
                      ex if improved else None, board=best["board"], generation=r, generations=P["max_rounds"], arm="move", is_leader=improved,
                      verdict="kept" if improved else "dropped", why="improved" if improved else "no gain")
@@ -706,13 +762,25 @@ def stage(c, n, board):
             ex.poll()
         LA._table(table, rows)
         _progress(spath, "running", f"round {r} done: best key {tuple(best_key)}", rounds=r, timing=timing)
-        if best_key[0] == 0 and best_key[1] == 0:
+        if best_key[K_OPEN] == 0 and best_key[K_HOT] == 0:
             stop = "clean (no opens, no hot area)"
             break
         if stale >= P["no_gain_rounds"]:
             stop = f"no gain for {stale} round(s)"
             break
         stop = "max_rounds"
+    ladder = None
+    if tuple(best["key"][:3]) != (0, 0, 0) and best["routed"]:                  # hs / rf / power nets still open: the ghost-open ladder
+        input_best = best["board"]
+        best, ladder = _close_ghost(a, cons, spec, best, d, P, acfg, board, spath, ds_dir)
+        if ladder:
+            stop += f"; ghost ladder: {len(ladder['accepted'])} repair(s), {ladder['stop']}"
+            pos = {r: (round(p["pos"][0], 3), round(p["pos"][1], 3), p["angle"]) for r, p in RD.load(input_best)["parts"].items()}
+            for step in ladder["accepted"]:
+                for ref, v in sorted(step["moves"].items()):
+                    accepted.append({"round": "ladder", "why": step["rung"], "ref": ref, "rot": v[2], "from": pos.get(ref), "to": tuple(v)})
+                    pos[ref] = tuple(v)
+                removed_refs |= set(step.get("removed_refs") or [])
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copy(best["board"], out)
     LA._copy_sidecar(best["board"], out)
@@ -727,6 +795,20 @@ def stage(c, n, board):
     nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
     hon = RDY.stage_honoured("placetour", spec, cons, rows_in, out, RD.load(out), ds_dir=ds_dir)
     nxt.append(hon["line"])
+    from . import placegaps as PG                                  # detect-only (PLAN-PLACE-GAPS phase 0): gap table of the result, no board change
+    pg = PG.detect_stage("placetour", out, cons, spec, d, ds_dir=ds_dir, blame=best["blame"], confirm=_confirm(a, out, d, P),
+                         attempts=ladder)
+    nxt.append(pg["line"])
+    crit_gaps = PG.critical(pg["gaps"])
+    fatal = [x for x in crit_gaps if x.get("cause", "unconfirmed") != "order"]    # an hs / rf net stays a FAIL unless the router alone routed it ("order")
+    imp = PG.impossible(pg["gaps"])                                  # A8: a net that cannot meet its budget even in free space refuses the placement
+    if imp:
+        fatal = fatal + imp
+        nxt.append("FAIL: " + "; ".join(f"net-bound {g['detail']}" for g in imp[:8]) + (f" (+{len(imp) - 8} more)" if len(imp) > 8 else ""))
+    if crit_gaps:
+        nxt.append(("FAIL: " if fatal else "WARN: ") + "; ".join(
+            f"{x['class']} {'/'.join(x['nets'])} ghost-unrouted ({x.get('cause', '?')}, blockers {','.join(x.get('blockers', [])[:6]) or '-'})"
+            for x in crit_gaps))
     LV.candidate("placetour", "result", out, None, _lv(best["key"]), hon["criteria"], cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
     if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
         _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d, apply=False)
@@ -739,7 +821,43 @@ def stage(c, n, board):
         ex.close()
     if removed_refs:
         nxt.append("re-escape moved parts: fanout --parts " + ",".join(sorted(removed_refs)))
-    return {"verdict": "pass" if best["routed"] else "warn", "line": line, "board": out, "next": nxt}
+    verdict = "fail" if fatal else "warn" if crit_gaps or not best["routed"] else "pass"
+    if crit_gaps:
+        line += f"; {'FAIL' if fatal else 'WARN'}: " + ", ".join("/".join(x["nets"]) for x in crit_gaps) + " ghost-unrouted"
+    return {"verdict": verdict, "line": line, "board": out, "next": nxt}
+
+
+def _close_ghost(a, cons, spec, best, d, P, acfg, input_board, spath, ds_dir=None):
+    """PLAN-PLACE-GAPS phase 2: close(JudgeEval) on the ghost-open gaps (rungs unblock / seal / endpoint). Never raises; the board of
+    `best` changes only when a candidate passed tier-1, the class-first judge, the never-worse terms and the KiCad DRC.
+    -> (best, result | None)."""
+    from . import placegaps as PG
+    try:
+        _progress(spath, "running", "ghost-open ladder")
+        ctx = PG.Ctx(stage="placetour", board=best["board"], cons=cons, spec=spec, ds_dir=ds_dir, blame=best["blame"])
+        ev = PG.JudgeEval(ctx, acfg, best["board"], best["blame"], best["key"], os.path.join(d, "close"), P, input_board=input_board,
+                          confirm=_confirm(a, best["board"], d, P))
+        res = PG.close(ctx, ["ghost-open"], ev, stage="placetour", budget_min=P["ladder_budget_min"])
+        if res["accepted"]:
+            best = {"board": ev.board_path, "blame": ev.blame, "key": tuple(ev.key), "routed": getattr(ev, "routed", None) or best["routed"]}
+            EV.emit("parts", stage="placetour", i=99, refs=sorted({r for x in res["accepted"] for r in x["refs"]}), why="ghost ladder")
+        return best, res
+    except Exception as e:                                                      # noqa: BLE001 - the ladder never fails the stage
+        print(f"placetour: ghost ladder not run ({type(e).__name__}: {e})")
+        return best, None
+
+
+def _confirm(a, board, outdir, P):
+    """-> fn(nets) -> the nets still open when routed alone (KRT --quick 2 on the stage output, only those nets), or None."""
+    def run(nets):
+        from . import gaps as G
+        d = LA._mk(os.path.join(outdir, "confirm"))
+        info = {}
+        routed = LA.lean_krt(a, board, d, P["judge_min"], only=set(nets), info=info)
+        if routed is None or not info.get("complete"):
+            raise RuntimeError("router gave no board" if routed is None else "router hit its cap: not a finished answer")   # -> cause "unconfirmed"
+        return set(nets) & G._krt_open(routed, getattr(a, "constraints", None))
+    return run
 
 
 def _moved(moves):

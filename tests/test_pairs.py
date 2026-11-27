@@ -382,15 +382,16 @@ def test_pads_far_apart_merge_into_a_coupled_run(tmp_path):
     assert coupled_share(B, "D_P", "D_N", W + GAP) > 0.5
 
 
+# a lone pad on a pair of a high-speed family stays a pair and a question (non-HS pairs with lone pads are coupled-preferred, W29)
 def test_unpaired_pad_is_a_question_not_a_silent_failure(tmp_path):
-    body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 20, 40, "D_P", "D_N") + PB.fp("R9", 60, 60, [PB.pad("1", 0, 0, "D_P", 0.6, 0.6)])
+    body = duo("U1", 20, 20, "USB_P", "USB_N") + duo("J1", 20, 40, "USB_P", "USB_N") + PB.fp("R9", 60, 60, [PB.pad("1", 0, 0, "USB_P", 0.6, 0.6)])
     rep, B, _ = lay(tmp_path, body)
     r = rep["pairs"][0]
     assert r["unpaired"] == ["R9.1"] and r["status"] != "complete"
     S = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {})
-    assert [q["id"] for q in S.open] == ["pair-pads:D_N"] and "R9.1" in S.open[0]["found"]
+    assert [q["id"] for q in S.open] == ["pair-pads:USB_N"] and "R9.1" in S.open[0]["found"]
     assert {o["choice"] for o in S.open[0]["options"]} == {"single-ended", "netlist"}
-    S2 = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {"answers": {"pair-pads:D_N": "single-ended"}})
+    S2 = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {"answers": {"pair-pads:USB_N": "single-ended"}})
     assert not S2.open and rep["pairs"][0]["answer"] == "single-ended"
 
 

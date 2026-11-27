@@ -25,6 +25,7 @@ TRACE = os.environ.get("FANOUT_TRACE")
 V2 = pcbnew.VECTOR2I
 BREAKOUT_UUID = "b4e0a7c1"                              # breakout.py marks the tracks it lays with this uuid prefix
 NM = 1e6
+MASK_MARGIN = 0.05                                      # mm: copper this close to a solder-mask opening is bridged (= escapeplan.MASK_MARGIN)
 
 
 def nm(v):
@@ -187,6 +188,7 @@ class Model:
                 lay = {self.cu[i] for i, l in enumerate(b.GetEnabledLayers().CuStack()) if z.IsOnLayer(l)}
                 self.keepouts.append({"name": z.GetZoneName(), "tracks": z.GetDoNotAllowTracks(), "vias": z.GetDoNotAllowVias(),
                                       "layers": lay, "poly": z.Outline(), "bb": z.GetBoundingBox()})
+        self._mask_openings(zs)
         ps = pcbnew.SHAPE_POLY_SET()
         b.GetBoardPolygonOutlines(ps, True)
         self.outline = ps
@@ -197,6 +199,51 @@ class Model:
                 self.edge_chains.append(ps.Hole(i, h))
         bb = ps.BBox()
         self.bbox = (mmv(bb.GetLeft()), mmv(bb.GetTop()), mmv(bb.GetRight()), mmv(bb.GetBottom()))
+
+    def _mask_openings(self, zs):
+        """board-level filled shapes on F.Mask / B.Mask are solder-mask openings: copper of any net but the one whose zone covers the opening
+        (on that side's outer layer) is exposed there, so it joins the keep-outs (tracks on that layer, vias of every layer). Same model as
+        routediag.mask_openings."""
+        b = self.b
+        for s in b.Drawings():
+            ml = b.GetLayerName(s.GetLayer())
+            if ml not in ("F.Mask", "B.Mask") or not self.cu or not s.IsAnyFill():
+                continue
+            ps = pcbnew.SHAPE_POLY_SET()
+            if s.GetShape() == pcbnew.SHAPE_T_POLY:
+                ps = s.GetPolyShape()
+            elif s.GetShape() == pcbnew.SHAPE_T_RECT:
+                x0, y0, x1, y1 = s.GetStart().x, s.GetStart().y, s.GetEnd().x, s.GetEnd().y
+                ps.NewOutline()
+                for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+                    ps.Append(x, y)
+            elif s.GetShape() == pcbnew.SHAPE_T_CIRCLE:
+                c, rr = s.GetCenter(), s.GetRadius()
+                ps.NewOutline()
+                for k in range(24):
+                    ps.Append(int(c.x + rr * math.cos(k * math.pi / 12)), int(c.y + rr * math.sin(k * math.pi / 12)))
+            if ps.OutlineCount() == 0:
+                continue
+            lay = self.cu[0] if ml == "F.Mask" else self.cu[-1]
+            pts = [ps.CVertex(i) for i in range(ps.FullPointCount())]
+            cover = {}
+            for z in zs:
+                if z.GetIsRuleArea() or not z.GetNetname() or not z.IsOnLayer(self.lid[lay]):
+                    continue
+                k = sum(1 for p in pts if z.Outline().Contains(p))
+                if k * 2 >= len(pts):
+                    cover[z.GetNetname()] = max(cover.get(z.GetNetname(), 0), k)
+            owner = max(sorted(cover), key=lambda n: cover[n]) if cover else ""
+            self.keepouts.append({"name": f"{ml} opening", "tracks": True, "vias": True, "layers": {lay}, "poly": ps, "bb": ps.BBox(),
+                                  "owner": owner, "margin": MASK_MARGIN})
+        for w in self.job.get("forbid") or ():       # B7: the [thermal.*] mask windows stripped before routing stay forbidden to foreign copper
+            ps = pcbnew.SHAPE_POLY_SET()
+            ps.NewOutline()
+            for x, y in w["pts"]:
+                ps.Append(nm(x), nm(y))
+            lay = self.cu[0] if w["side"] == "F" else self.cu[-1]
+            self.keepouts.append({"name": w["name"], "tracks": True, "vias": True, "layers": {lay}, "poly": ps, "bb": ps.BBox(),
+                                  "owner": w["owner"], "margin": MASK_MARGIN})
 
     def add_track(self, t):
         net = t.GetNetname()
@@ -302,9 +349,12 @@ class Model:
             if (via and not k["vias"]) or (not via and (not k["tracks"] or layer not in k["layers"])):
                 continue
             kb = k["bb"]
-            if mmv(kb.GetLeft()) > bb[2] or mmv(kb.GetRight()) < bb[0] or mmv(kb.GetTop()) > bb[3] or mmv(kb.GetBottom()) < bb[1]:
+            m = k.get("margin", 0.0)
+            if mmv(kb.GetLeft()) - m > bb[2] or mmv(kb.GetRight()) + m < bb[0] or mmv(kb.GetTop()) - m > bb[3] or mmv(kb.GetBottom()) + m < bb[1]:
                 continue
-            if k["poly"].Collide(sh, 0):
+            if k.get("owner") and k["owner"] == net:
+                continue
+            if k["poly"].Collide(sh, nm(k.get("margin", 0.0))):
                 return ("keepout " + k["name"], "keepout", -1)
         for p in pts:
             if not self.inside(p):

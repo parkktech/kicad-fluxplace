@@ -124,10 +124,16 @@ def _text_opens(B):
         return None
 
 
+def _plain(o):
+    """numpy scalars (bool_, integer, floating) and other non-JSON values as plain Python: a snapshot is never dropped."""
+    item = getattr(o, "item", None)
+    return item() if callable(item) else str(o)
+
+
 def _write(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, separators=(",", ":"))
+        json.dump(obj, fh, separators=(",", ":"), default=_plain)
     os.replace(tmp, path)
 
 

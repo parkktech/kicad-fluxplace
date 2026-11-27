@@ -41,8 +41,10 @@ def _is_support(ref, part):
 
 
 def pad_gap(a, b):
-    """Distance between the edges of two pads (their extents, rectangles); 0 when they touch or overlap."""
-    return math.hypot(max(0.0, abs(a["x"] - b["x"]) - a["ex"] - b["ex"]), max(0.0, abs(a["y"] - b["y"]) - a["ey"] - b["ey"]))
+    """Distance between the edges of two pads (their extents, rectangles); 0 when they touch or overlap. Octilinear (the copper an
+    octilinear router needs, budget.pad_bound): the one metric of every placement bound, so a support limit and a net budget agree."""
+    from .budget import pad_bound
+    return pad_bound(a, b)
 
 
 def support_dist(s, sp, pin, halo=0.0):
@@ -458,6 +460,8 @@ def cap_uf(value):
     return float(m.group(1)) * {"p": 1e-6, "n": 1e-3, "u": 1.0, "µ": 1.0, "m": 1e3, "": 1.0}[m.group(2).lower()]
 
 
+BACK_PREFER_FRAC = 0.5     # a front seat farther than this share of the support's limit is compared with the back seat under the pin
+BACK_GAIN_MM = 0.5         # the back seat must be this much nearer to be taken over a legal front seat
 HALO_MM = 0.6           # legalise.ESC_MIN: the mandatory escape halo of a fine-pitch IC
 _BOOT = re.compile(r"BOOT|BST|CBOOT", re.I)
 _VIN = re.compile(r"^(VIN|VBAT|VSUP|PVIN|VI)\d*$|VIN|VBATT", re.I)
@@ -548,6 +552,26 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
     return out, links
 
 
+def graded_supports(cl, waive=(), near=()):
+    """[{ref, ic, pad, dist, limit, kind, cls, how}]: the support parts the budget rows grade (the one rule, intent.support_rows and
+    placegaps both read it): confidently owned, or guessed by `spread` (bulk storage is not a per-pin bypass: not graded); not
+    waived and not placed by a `near` item (graded there). kind = decap | other (fluxmap._kind)."""
+    from . import fluxmap as FM
+    out = []
+    for c in cl:
+        for s in c["supports"]:
+            if s["ref"] in waive or s["ref"] in near or (not s["sure"] and s["how"] != "spread"):
+                continue
+            out.append({"ref": s["ref"], "ic": c["ic"], "pad": s["pad"], "dist": s["dist"], "limit": s["limit"], "cls": s["cls"], "how": s["how"],
+                        "kind": "decap" if FM._kind(s["ref"], s["cls"]) == "decap" else "other"})
+    return out
+
+
+def far_supports(cl, waive=(), near=()):
+    """The graded supports beyond their limit (plan section 4 detector): graded_supports with dist > limit."""
+    return [f for f in graded_supports(cl, waive, near) if f["dist"] > f["limit"] + 1e-6]
+
+
 def far_parts(cl):
     """Confidently-owned support parts beyond their limit (guessed ownership,
     `how == "spread"`, is never graded)."""
@@ -602,7 +626,7 @@ def _outward(part, pin):
 
 
 def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isolate=False, legal=None,
-         strict=False, left=None, flips=None, refused=None):
+         strict=False, left=None, flips=None, refused=None, back=None):
     """Re-seat the movable support parts of cluster `cl` around its (fixed) IC.
     Returns {ref: (x, y, angle)}. Rigid: each part keeps its footprint; only its
     origin and rotation change. Candidate positions are tried in order of
@@ -617,7 +641,11 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
     as (ref, reason). With `flips` (a set) a surface-mount part with no legal seat on its side is tried on the other side (P5b S1,
     GM.flip on the model, in place: the part stays flipped when it seats there and its ref is added to `flips`; the caller must write
     the flip, flip.flip_file); without it a part never changes side. `refused` (a dict) gets {ref: the check that refused most
-    candidates}: "side closed: <keep-out>", "own escape lane", "occupied by <refs>", "board edge"."""
+    candidates}: "side closed: <keep-out>", "own escape lane", "occupied by <refs>", "board edge".
+    `back` (backside.guard: callable ref -> bool, given only when `[placement] sides` lets free parts go to the back): the other side is tried
+    only for a part it clears, and ALSO for a part that has a front seat when that seat is farther than BACK_PREFER_FRAC of its limit: the back
+    seat directly under the owner's pin is taken when it is BACK_GAIN_MM nearer (standard practice for decaps, shorter loop).
+    Without `back` the behaviour is the legacy one above (no guard, only the no-seat fallback)."""
     parts = B["parts"]
     ic = cl["ic"]
     icp = parts[ic]
@@ -693,26 +721,46 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                             continue
                     pick, best = (cx, cy, ang, court, cost), cost
             return pick, (no.most_common(1)[0][0] if no else "no candidate within the limit")
-        pick, why_not = search()
-        if pick is None and flips is not None and not part["tht"]:
-            GM.flip(part)                                        # the other side, same origin; undone when no seat is there either
+        dense = (back is not None and getattr(back, "dense", False) and flips is not None and not part["tht"] and part["side"] == "F.Cu" and not swp
+                 and back(ref))
+        pick = None
+        if dense:                                              # density-driven fill: the back first, any seat within the limit (directly under the owner's pin when it is free)
+            GM.flip(part)
+            if legal is not None:
+                legal.refresh(ref)
+            pick, why_not = search()
+            if pick:
+                flips.symmetric_difference_update({ref})
+            else:
+                GM.flip(part)
+                if legal is not None:
+                    legal.refresh(ref)
+                if getattr(back, "only_back", False):          # the back-only pass leaves a part with no back seat exactly where it is
+                    continue
+        if not pick:
+            pick, why_not = search()
+        want = (not dense) and (pick is None or (back is not None and getattr(back, "prefer", True) and not swp and part["side"] == "F.Cu" and pick[4] > BACK_PREFER_FRAC * s["limit"]))
+        if want and flips is not None and not part["tht"] and (back is None or back(ref)):
+            GM.flip(part)                                        # the other side, same origin; undone when no better seat is there either
             if legal is not None:
                 legal.refresh(ref)
             pick2, why2 = search()
-            if pick2:
+            if pick2 and (pick is None or pick2[4] + BACK_GAIN_MM < pick[4]):
                 pick = pick2
                 flips.symmetric_difference_update({ref})         # flipped back to its input side = no flip to write
             else:
                 GM.flip(part)
                 if legal is not None:
                     legal.refresh(ref)
-                why_not = f"{why_not}; other side: {why2}"
+                if pick is None:
+                    why_not = f"{why_not}; other side: {why2}"
         if pick:
             cx, cy, ang, court, cost = pick
             moves[ref] = (round(cx, 4), round(cy, 4), ang)
             occ.add(ref, court, part["side"])
-            if legal is not None:
-                legal.hash.add(ref, court, "x")
+            if legal is not None:                               # the seat stands on the model now: the next part of this call sees its pads and courtyard
+                GM.place(part, cx, cy, ang)
+                legal.refresh(ref)
             if log:
                 log(f"  {ref} -> ({cx:.2f}, {cy:.2f}) {ang:g} deg  "
                     f"{s['dist']:.1f} -> {cost:.1f} mm (pin {ic}.{s['pad']})")
@@ -757,7 +805,7 @@ def _off_template(B, c, s):
 
 
 def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None,
-           legal=None, strict=False, left=None, flips=None, refused=None):
+           legal=None, strict=False, left=None, flips=None, refused=None, back=None):
     """Seat the far support parts of every cluster around their ICs (ICs never
     move). Mutates the board model B as it goes so later clusters see earlier
     moves. Parts already within their limit stay put unless `everything`;
@@ -772,7 +820,7 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
         if log:
             log(f"{c['ic']}: re-seating {len(sup)} part(s)")
         m = seat(B, dict({"ic": c["ic"], "supports": sup}, **({"layout": c["layout"]} if c.get("layout") else {})), bounds=bounds, log=log, isolate=isolate,
-                 legal=legal, strict=strict, left=left, flips=flips, refused=refused)
+                 legal=legal, strict=strict, left=left, flips=flips, refused=refused, back=back)
         for ref, (x, y, a) in m.items():
             GM.place(B["parts"][ref], x, y, a)
             if legal is not None:

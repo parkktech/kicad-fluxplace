@@ -8,7 +8,7 @@ because each tool checked the board against ITSELF (schematic vs copper,
 netclass vs track) and none checked it against the SPEC, the DATASHEET or the
 ENVIRONMENT. This module does that:
 
-  UNROUTED / STALE_FILL  an open connection (FAIL each; pcbnew after a fresh fill, cross-checked with kicad-cli) / zone fills
+  UNROUTED / UNROUTED_SUMMARY / STALE_FILL  an open connection (FAIL each; the total row is UNROUTED_SUMMARY; pcbnew after a fresh fill, cross-checked with kicad-cli) / zone fills
                          in the saved file that no longer match the copper (opengate.py)
   NET_STRAIGHT_COPPER    a spec-protected net has a component on it
   PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH
@@ -25,6 +25,7 @@ ENVIRONMENT. This module does that:
   TEMP_RATING            part rated narrower than the product environment
   MODEL_MISSING          electrical footprint without a 3D model
   MODEL_FILE_MISSING     3D model path that resolves to no file
+  MODEL_OUTSIDE_LIB      3D model file outside the project's lib/3dmodels (a project that has one)
   MODEL_STANDIN          model file named as a stand-in / placeholder
   SPEC_SIZE_MISMATCH / SPEC_LAYER_MISMATCH / SPEC_COMPONENT_MISMATCH /
   SPEC_FOOTPRINT_MISMATCH
@@ -578,12 +579,36 @@ def check_pair_geometry(facts, cons):
 _RF_TOKENS = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
 
 
-def is_rf(net):
-    """A net is RF when a whole underscore-token says so: RF_GNSS, RF_INT_SW,
-    ANT1_RF. ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely
-    contain the letters (stackup.looks_rf matched those — measured on V1.4)."""
-    toks = set(re.split(r"[_\-.]", net.upper()))
-    return bool(toks & _RF_TOKENS)
+_RF_PORT = re.compile(r"^RF(?:C|\d{1,2})$")           # RFC, RF1 .. RF99: the ports of an RF switch / splitter (RFU, RFID are not)
+_RF_PIN_TOKENS = _RF_TOKENS | {"RFIO", "ANT", "ANT1", "ANT2"}
+# a token that makes a name a control, strap or supply line whatever else it says: RF_EN, RFC_CTRL, SW_RF1_SEL, RF_3V3, VCC_RF, RF_GND
+_NOT_RF = {"EN", "ENA", "ENABLE", "SEL", "SELECT", "CTRL", "CTL", "DET", "DETECT", "GND", "AGND", "DGND", "VCC", "VDD", "VSS", "VBAT", "VIN",
+           "VOUT", "PWR", "POWER", "SUPPLY", "BIAS"}
+_VOLT = re.compile(r"^\d+V\d*$|^V\d+(?:V\d+)?$")
+
+
+def _tokens(name):
+    return [t for t in re.split(r"[_\-./\s]+", str(name).upper()) if t]
+
+
+def _is_control(toks):
+    return any(t in _NOT_RF or _VOLT.match(t) for t in toks)
+
+
+def is_rf(net, pins=()):
+    """A net is RF when a whole token of its name says so: RF_GNSS, RF_INT_SW, ANT1_RF, BT_SW_RFC (RF-port tokens RFC / RF1..RF99),
+    a /RF/ sheet path. ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely contain the letters (stackup.looks_rf matched
+    those, measured on V1.4), and a control, strap or supply token (EN SEL CTRL DET GND, a rail voltage, VCC, VDD ...) makes the
+    net not RF: RF_EN, RFC_CTRL, SW_RF1_SEL, RF_3V3, VCC_RF, RF_GND. Context (optional): `pins` = the pin names on the net; the
+    same token rule applied to a pin name (RF, RFC, RFIO, RF_IN, GNSS_ANT) makes the net RF whatever its own name."""
+    toks = _tokens(net)
+    if not _is_control(toks) and any(t in _RF_TOKENS or _RF_PORT.match(t) for t in toks):
+        return True
+    for p in pins or ():
+        pt = _tokens(p)
+        if pt and not _is_control(pt) and any(t in _RF_PIN_TOKENS or _RF_PORT.match(t) for t in pt):
+            return True
+    return False
 
 
 def check_rf(facts, cons):
@@ -980,16 +1005,47 @@ def landpattern_geometry(pad_geom):
     return {"pitch": pitch, "rows": rows, "pad": pad, "pins": len({str(g[0]) for g in pads})}
 
 
+_NUM_TOK = re.compile(r"(?<![\d.])(\d*\.\d+)(?!\d)")
+
+
+def _text_numbers(text):
+    """Decimal numbers printed on a page, as (value, decimals): 0.50, 0.5,
+    (0.5), .5, 0,5 (decimal comma) all read the same."""
+    t = re.sub(r"(?<![\d,.])(0),(\d{1,3})(?![\d,])", r"\1.\2", text or "")
+    t = re.sub(r"(?<![\d,.])(\d),(\d{1,2})(?![\d,])", r"\1.\2", t)
+    out = []
+    for m in _NUM_TOK.finditer(t):
+        tok = m.group(1)
+        out.append((float(tok), len(tok.split(".")[1])))
+    return out
+
+
 def _num_in_text(text, value_mm):
-    """True if value_mm appears on the page in mm (0.99, .99) or inches
-    (0.039, .039), to two decimals either way."""
-    forms = set()
-    for v in (value_mm, value_mm / 25.4):
-        for fmt in ("%.2f", "%.3f"):
-            t = fmt % v
-            forms.add(t)
-            forms.add(t.lstrip("0"))
-    return any(re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text) for f in forms if f)
+    """True if value_mm is printed on the page in mm or inches, in any common
+    form (0.5, 0.50, (0.5), .5, 0,5), to the printed precision (two decimals,
+    or as many as printed up to four)."""
+    vals = (value_mm, value_mm / 25.4)
+    for tok, dec in _text_numbers(text):
+        nd = 2 if dec <= 2 else min(dec, 4)
+        if any(abs(round(v, nd) - tok) < 1e-9 for v in vals):
+            return True
+    return False
+
+
+def _derived_pitch(text, pitch, pad):
+    """Pitch not printed itself but pad width + gap (printed) sum to it:
+    -> "1.45 + 2.55" or None. One of the two numbers must be a cited pad
+    dimension and both must be printed on the page."""
+    if not pad:
+        return None
+    nums = sorted({round(t, 3) for t, _ in _text_numbers(text)})
+    for w in sorted({round(float(x), 3) for x in pad}):
+        if not any(abs(w - n) < 0.006 for n in nums):
+            continue
+        for g in nums:
+            if g > 0 and abs(w + g - pitch) < 0.006:
+                return "%g + %g" % (w, g)
+    return None
 
 
 def project_drawn(project_libs, ds_dir=None):
@@ -1077,12 +1133,38 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
         # a drawing whose only text is the title block (Amphenol 10164227:
         # part-number structure and a print date, every dimension is line
         # art) is unreadable for this purpose, not a page that lacks the number
-        if len(re.findall(r"\d+\.\d+", text)) < 5:
+        pitch = float(lp["pitch"]) if lp.get("pitch") is not None else None
+        readable = len(re.findall(r"\d+\.\d+", text)) >= 5
+        how = None
+        if readable and (pitch is None or _num_in_text(text, pitch)):
+            continue
+        if readable:
+            how = _derived_pitch(text, pitch, lp.get("pad"))
+            if how:
+                out.append(_f(INFO, "LANDPATTERN_PITCH_DERIVED",
+                              f"{ref}: pitch {pitch} mm is not printed on {src}; derived: {how}",
+                              refs=[ref]))
+                continue
+        ocr = PD.ocr_text(path, pages or [1])
+        if ocr and len(re.findall(r"\d+\.\d+", ocr)) >= 5 and pitch is not None:
+            if _num_in_text(ocr, pitch):
+                out.append(_f(INFO, "LANDPATTERN_PITCH_OCR",
+                              f"{ref}: pitch {pitch} mm read from {src} by ocr", refs=[ref]))
+                continue
+            how = _derived_pitch(ocr, pitch, lp.get("pad"))
+            if how:
+                out.append(_f(INFO, "LANDPATTERN_PITCH_DERIVED",
+                              f"{ref}: pitch {pitch} mm is not printed on {src}; derived (ocr): {how}",
+                              refs=[ref]))
+                continue
+            readable = True
+        if not readable:
+            why = "" if ocr else " (ocr unavailable: tesseract not installed or failed)"
             out.append(_f(WARN, "LANDPATTERN_PAGE_UNREADABLE",
                           f"{ref}: {src} is a text-less drawing — the cited pitch "
                           f"{lp.get('pitch')} mm was read by eye; verify it once more "
-                          f"before ordering", refs=[ref]))
-        elif lp.get("pitch") is not None and not _num_in_text(text, float(lp["pitch"])):
+                          f"before ordering{why}", refs=[ref]))
+        else:
             out.append(_f(FAIL, "LANDPATTERN_NOT_ON_PAGE",
                           f"{ref}: pitch {lp['pitch']} mm is not printed on {src}",
                           refs=[ref]))
@@ -1177,6 +1259,12 @@ def check_models(facts, board_path=None):
                 out.append(_f(FAIL, "MODEL_FILE_MISSING",
                               f"{ref} 3D model {m} does not resolve to a file"
                               + (f" (same name exists as {alt[0]})" if alt else ""),
+                              refs=[ref]))
+                continue
+            if bp and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
+                out.append(_f(FAIL, "MODEL_OUTSIDE_LIB",
+                              f"{ref} 3D model {m} resolves outside the project model library "
+                              f"(copy the vendor STEP into the project lib/3dmodels and bind it there)",
                               refs=[ref]))
                 continue
             # a file that EXISTS is not the same as a file that RENDERS —
@@ -2158,7 +2246,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_power(facts, cons)
     from . import power as PWR
     out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
-            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons))]
+            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons), board=bp)]
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
@@ -2177,6 +2265,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += HO.check_hole_spacing(facts, cons)
     out += SW.check_switch_loops(facts, cons, spec)
     out += RP.check_return_path(facts, cons)
+    from . import happy as HP                   # B15: kicad-happy EMC pre-compliance (opt-in by a [happy] table; warn-only unless promoted)
+    out += HP.check_emc(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     from . import fpcheck as FC

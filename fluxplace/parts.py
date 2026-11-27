@@ -164,9 +164,14 @@ def chip_from_mpn(mpn):
 
 
 # ------------------------------------------------------------------ datasheets
-def resolve_dir(path, anchors=()):
-    """A relative datasheet dir: as given, else beside/above each anchor file."""
-    if not path or os.path.isabs(path) or os.path.isdir(path):
+def resolve_dir(path, anchors=(), strict=False):
+    """A relative datasheet dir: beside/above each anchor file first (constraints dir, board dir, project root: the project's own,
+    whatever the cwd), then as given from the cwd. `strict`: SystemExit when it resolves nowhere (the owner set it, so it must exist)."""
+    if not path:
+        return path
+    if os.path.isabs(path):
+        if strict and not os.path.isdir(path):
+            raise SystemExit(f"[docs] datasheets = {path!r} is not a directory")
         return path
     for a in anchors:
         d = os.path.dirname(os.path.abspath(a)) if a else None
@@ -174,6 +179,10 @@ def resolve_dir(path, anchors=()):
             if os.path.isdir(os.path.join(d, path)):
                 return os.path.join(d, path)
             d = os.path.dirname(d)
+    if os.path.isdir(path):
+        return os.path.abspath(path)
+    if strict:
+        raise SystemExit(f"[docs] datasheets = {path!r} not found beside or above {', '.join(str(a) for a in anchors if a) or 'any anchor'}, nor from {os.getcwd()}")
     return path
 
 
@@ -468,6 +477,8 @@ def evaluate(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, api=True, c
              extra_mpns=(), qty=None):
     """Look up (unless offline), then run().  `data`/`stock` inject results (tests)."""
     st = settings(cons)
+    from . import redact as _RD
+    _RD.configure(cons)
     mm = mpn_map or (facts or {}).get("mpn_map") or {}
     mpns = {c.get("mpn") or mm.get(c.get("ref")) for c in spec.get("components", []) if not c.get("dnp")}
     mpns |= {mpn_in_value(c.get("value", "")) for c in spec.get("components", [])

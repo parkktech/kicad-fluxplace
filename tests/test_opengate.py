@@ -16,7 +16,7 @@ def test_connections_mst_uses_closest_pads():
 def test_findings_and_per_net_waiver():
     m = {"fresh": 1, "saved": 1, "cli_fresh": 1, "stale": [], "connections": OG.connections({"+3V3": [[_p("A", 0)], [_p("B", 3)]]})}
     f = OG.findings(m)
-    assert [x["code"] for x in f] == ["UNROUTED", "UNROUTED"] and f[0]["msg"].startswith("+3V3:")
+    assert [x["code"] for x in f] == ["UNROUTED", "UNROUTED_SUMMARY"] and f[0]["msg"].startswith("+3V3:")
     assert "1 open connection(s), kicad-cli after a refill" in f[-1]["msg"]          # the total is kicad-cli's
     assert OG.waived(f[0], [r"UNROUTED:^\+3V3$"]) and not OG.waived(f[0], [r"UNROUTED:^GND$"])
 

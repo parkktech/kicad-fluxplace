@@ -23,7 +23,7 @@ import sys
 
 from . import questions as QS
 
-PASS, FAIL, OPEN, UNCHECKED, WAIVED = "PASS", "FAIL", "OPEN", "UNCHECKED", "WAIVED"
+PASS, FAIL, OPEN, UNCHECKED, WAIVED, WARN = "PASS", "FAIL", "OPEN", "UNCHECKED", "WAIVED", "WARN"
 
 
 def notready_path(board):
@@ -202,7 +202,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     detail["gate"] = g
     if g["ok"]:
         lines.append(_line("parts gate", PASS, PG.summary_line(g)[len("parts gate: "):]))
-    elif allow_undocumented and not g["geometry"]:      # footprint geometry is never bypassed (fpcheck)
+    elif allow_undocumented and not g["geometry"] and not g["models"]:      # footprint geometry and 3D models are never bypassed
         lines.append(_line("parts gate", WAIVED, PG.bypass_note(g)))
         for l in lines:
             if l["name"] == "parts" and l["status"] == FAIL:      # the same documentation failures, already waived loudly above
@@ -232,20 +232,25 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         B = RD.load(board)
         cls = NC.classify(B, cons, spec)
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
-                               ("floors", "design-rule floors", QS.check_floors)):
+                               ("floors", "design-rule floors", QS.check_floors),
+                               ("sides", "placement sides", QS.check_placement_sides),
+                               ("crowding", "crowding", QS.check_crowding)):
             n0 = len(sess.open)
-            fn(sess, B, cons, cls=cls)
+            fn(sess, B, cons, cls=cls, spec=spec)
             new = sess.open[n0:]
             ids = ", ".join(q["id"] for q in new[:4]) + (f" (+{len(new) - 4})" if len(new) > 4 else "")
             lines.append(_line(label, OPEN if new else PASS,
                                f"{len(new)} undecided: {ids}" if new else
                                {"rails": f"every rail of >= {_minpads(cons)} pads has a plane/pour or an answer",
                                 "fixed": "anchors and mounting hardware are locked or declared",
-                                "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
+                                "floors": "floors declared ([fab]/[route] or the project's rules)",
+                                "sides": "[placement] sides decided",
+                                "crowding": "no side over the crowding limits, or answered"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))
         lines.append(budget_line(spec, cons, B, rows, planes, detail))
+        lines.append(density_line(spec, cons, B))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -253,11 +258,47 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    lines += spice_lines(board, cons, detail)
     from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
-    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED) for x in lines) else "refused",
-                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED), "value": x["status"],
+    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED, WARN) for x in lines) else "refused",
+                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED, WARN), "value": x["status"],
                            "limit": PASS, "text": x["detail"]} for x in lines])
     return lines, detail
+
+
+def spice_lines(board, cons, detail):
+    """B15: kicad-happy SPICE subcircuit checks (crystal load, RC/LC filters, dividers, op-amp gain). Warn-only: WARN never blocks; a run that
+    could not happen is UNCHECKED, never PASS; a code promoted by `[happy] fail` is a FAIL line."""
+    from . import happy as HP
+    if HP.settings(cons) is None:
+        return []
+    r = HP.run_spice(board, cons)
+    if r["status"] != HP.OK:
+        return [_line("spice", UNCHECKED, f"SPICE subcircuits NOT CHECKED: {r['reason']}")]
+    fs = HP.as_findings(r["findings"], cons)
+    detail["spice"] = fs
+    if not fs:
+        return [_line("spice", PASS, "SPICE subcircuits simulated: no warnings")]
+    nf = sum(f["level"] == FAIL for f in fs)
+    return [_line("spice", FAIL if nf else WARN, f"{len(fs)} SPICE finding(s) ({', '.join(sorted({f['code'] for f in fs}))}), {nf} promoted to FAIL; listed in .ready.json",
+                  [f"{f['code']} {f['msg']}" for f in fs[:6]] if nf else [])]
+
+
+def density_line(spec, cons, B):
+    """courtyard crowding per side (density.crowding_report): FAIL only when a side is over `[placement] density_fail` (0.65), WARN text
+    from `density_warn` (0.50) or hot cells; nothing about routing is claimed here"""
+    from . import density as DN
+    try:
+        r = DN.crowding_report(B, cons, spec, with_size=False)
+    except Exception as e:                                      # noqa: BLE001 - a measurement failure is UNCHECKED, never a verdict
+        return _line("density", UNCHECKED, f"not measured ({type(e).__name__}: {e})")
+    lim = r["usage"]["limits"]
+    over = [s for s in DN.SIDES if r["usage"]["sides"][s]["util"] >= lim["fail"]]
+    worn = [s for s in DN.SIDES if r["verdicts"][s]["verdict"] != "ok"]
+    txt = r["line"][len("density: "):]
+    if over:
+        return _line("density", FAIL, f"FAIL {txt}", [f"density: side {', '.join(over)} over {lim['fail'] * 100:.0f} % courtyard utilisation"])
+    return _line("density", PASS, ("WARN " if worn else "") + txt)
 
 
 def _fixed_inputs(spec, cons, B):
@@ -482,9 +523,21 @@ def cmd_ready(a):
     spec, cons, facts, mm, ds = PC.load(a)
     board = getattr(a, "board", None)
     sess = PC._session(a, cons, "ready")
+    model_res = None
+    if board and os.path.exists(board) and facts:
+        from . import modelstart as MS
+        model_res = MS.run(board, facts, mm, cons, offline=getattr(a, "no_api", False), log=print)   # bind / fetch / name what the owner must download
+        if model_res["bound"] or model_res["fetched"]:
+            spec, cons, facts, mm, ds = PC.load(a)                     # the board changed: facts again
     cache = os.path.dirname(os.path.abspath(a.spec))
     pres = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess)
     lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres, allow_undocumented=getattr(a, "allow_undocumented", False))
+    if model_res is not None:
+        from . import modelstart as MS
+        bad = model_res["owner"] or model_res["pending"]
+        lines.insert(next((i + 1 for i, l in enumerate(lines) if l["name"] == "parts gate"), len(lines)),
+                     _line("3D models", FAIL if bad else PASS, model_res["line"], MS.detail_lines(model_res)[:50]))
+        detail["models"] = model_res
     if board and os.path.exists(board):
         lines.append(sync_netclasses(board, cons))
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
@@ -504,7 +557,7 @@ def cmd_ready(a):
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
                        "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
-                       "pairs_unclassified": detail.get("pairs_unclassified", [])}, fh, indent=1)
+                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", [])}, fh, indent=1)
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)
@@ -513,6 +566,9 @@ def cmd_ready(a):
                 json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
+    from . import placegaps as PG                  # detect-only (PLAN-PLACE-GAPS phase 0): the parts gaps; changes no result, no board
+    PG.detect_stage("ready", board or a.spec, cons, spec, os.path.dirname(stem) or ".", base=os.path.basename(stem) + ".placegaps", ds_dir=ds,
+                    parts_gate=detail.get("gate"), printer=None if getattr(a, "json", False) or getattr(a, "quiet", False) else print)
     if getattr(a, "json", False):
         print(json.dumps({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", [])}, indent=1))
     elif getattr(a, "quiet", False):
@@ -527,7 +583,7 @@ def cmd_ready(a):
         raise SystemExit(1)
     other = bool(nfail or nopen)
     if (other and a.allow_incomplete) or (not other and detail["gate"]["parts"] and getattr(a, "allow_undocumented", False)
-                                          and not detail["gate"]["geometry"]):
+                                          and not detail["gate"]["geometry"] and not detail["gate"]["models"]):
         if board:
             try:
                 with open(notready_path(board), "w") as fh:

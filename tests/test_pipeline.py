@@ -294,7 +294,7 @@ def test_h1_packets_gate_is_reused_only_for_the_input_it_was_written_for(tmp_pat
     gd = tmp_path / "gate"; gd.mkdir()
     best = gd / "best.kicad_pcb"; best.write_text("best")
     _fake_gate(monkeypatch, "packets", gd, best)
-    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={"ai": {"answer": "required"}}, board_in=str(a))
     g = PL._gate_check(c, 1, "pairs", str(best), ["pair-open"], src=str(a))
     assert g["verdict"] == "packets"
     assert PL._gate_reusable(str(gd), str(a))                 # the stop.json carries the input's fingerprint
@@ -334,15 +334,31 @@ def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_pa
 def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_path, monkeypatch, capsys):
     from fluxplace import gaps as GP
     board = _board(tmp_path)
-    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["short"]})
     monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran")))
-    left = [{"id": "g1", "kind": "pair-open", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
+    left = [{"id": "g1", "kind": "short", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
     monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 1}, "best": str(board)})
     seen = []
     monkeypatch.setattr(PL, "FUNCS", {name: (lambda c, n, b: seen.append(n) or {"verdict": "pass", "board": b}) for name in PL.STAGES})
     rc = PL.run(_args(tmp_path, board, from_stage="route-ready", to_stage="route-ready"))
     out = capsys.readouterr().out
-    assert rc == 5 and not seen and "gap g1 pair-open" in out
+    assert rc == 5 and not seen and "gap g1 short" in out
+
+
+def test_a5_from_critroute_without_state_starts_the_stage(tmp_path, monkeypatch, capsys):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    # pair-skew is owned by `tune`, which runs before critroute: --from critroute skips it, so the finding must not stop the flow
+    left = [{"id": "p1", "kind": "pair-skew", "class": "hs-pair", "nets": ["MIC_P", "MIC_N"], "at": [1.0, 2.0]}]
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 0}, "best": str(board)})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran on --from")))
+    seen = []
+    monkeypatch.setattr(PL, "FUNCS", {name: (lambda name: lambda c, n, b: seen.append(name) or {"verdict": "pass", "board": b})(name)
+                                      for name in PL.STAGES})
+    rc = PL.run(_args(tmp_path, board, from_stage="critroute", to_stage="critroute", flow="constructive"))
+    out = capsys.readouterr().out
+    assert rc == 0 and seen == ["critroute"], out
+    assert "deferred" in out
 
 
 def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypatch):
@@ -383,3 +399,15 @@ def test_trace_finish_sits_directly_before_silk():
     assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("trace-finish") - 1] == "close"
     assert PL.ALL_STAGES.count("trace-finish") == 1
     assert "trace-finish" in PL.FUNCS
+
+
+def test_route_widths_failure_fails_the_stage_not_a_default_width_route(tmp_path, monkeypatch):
+    from fluxplace import power as PWR
+    b = _board(tmp_path)
+    PL.run(_args(tmp_path, b, to_stage="anchor-check"))
+    monkeypatch.setenv("FLUXPLACE_STAGE_INPROC", "1")       # B4: the patch must reach the stage, so run it in-process
+    monkeypatch.setattr(PWR, "route_widths", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no width table")))
+    a2 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
+    assert PL.run(a2) == 1
+    r = PL.load_state(a2.workdir)["stages"]["route"]
+    assert r["verdict"] == "fail" and "rail width table failed" in r["line"]

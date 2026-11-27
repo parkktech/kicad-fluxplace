@@ -232,7 +232,7 @@ def test_floorplan_command_resolves_pins_first(tmp_path, capsys, monkeypatch):
     from fluxplace import floorplan2 as FP2
     path = load(tmp_path, D1_BODY)
     cf = tmp_path / "c.toml"
-    cf.write_text('[placement]\nfixed = ["J1"]\n[lock.at]\nJ2 = [33, 3.5, "F"]\n')
+    cf.write_text('[placement]\nfixed = ["J1"]\n[placement.budget]\nsignal = 500\n[lock.at]\nJ2 = [33, 3.5, "F"]\n')
     seen = {}
 
     def once(b, cons, spec, grow, args, text_in, wd, tag, log=print):
@@ -243,6 +243,7 @@ def test_floorplan_command_resolves_pins_first(tmp_path, capsys, monkeypatch):
         return res, None, RD.load(b)
     monkeypatch.setattr(FP2, "floorplan_once", once)
     monkeypatch.setattr(FP2, "edge_order", lambda B, cons: ["L", "R", "T", "B"])
+    monkeypatch.setattr(FP2, "measured", lambda p, c, s: {"cross": 0, "wl": 1.0})      # as the stub's own source/annealed: the never-worse gate sees no change
     monkeypatch.setattr(FP2, "span_summary", lambda s: "-")
     monkeypatch.setattr(FP2, "plan_summary", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skipped")))
     out = str(tmp_path / "o.kicad_pcb")

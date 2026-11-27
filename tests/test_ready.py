@@ -141,7 +141,12 @@ def test_unreferenced_class_has_no_geometry(tmp_path, capsys):
 
 
 def _board(tmp_path):
-    return G.board(tmp_path, G.ic("U1", 20, 20, ["A", "B", "C", "D"], pitch=1.27) + G.two("R1", 40, 30, "D", "A"))
+    """Every footprint carries a 3D model that resolves (the model gate is never bypassed by --allow-undocumented)."""
+    import re
+    (tmp_path / "m.step").write_text("x")
+    body = G.ic("U1", 20, 20, ["A", "B", "C", "D"], pitch=1.27) + G.two("R1", 40, 30, "D", "A")
+    body = re.sub(r'\(property "Reference" "(\w+)"\)', r'(model "${KIPRJMOD}/m.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0))) \g<0>', body)
+    return G.board(tmp_path, body)
 
 
 def test_not_ready_board_is_stamped_and_fab_deliver_refuse(tmp_path, capsys):
