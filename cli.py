@@ -211,6 +211,8 @@ def cmd_deliver(a):
         for k, v in DV.finish(vctx, a, findings, slots, facts, kicad_cli=a.kicad_cli,
                               log=lambda m: print(m, flush=True)).items():
             print(f"    version delivery {k}: {v}", flush=True)
+        if not vctx.get("ready"):
+            raise SystemExit("deliver: NOT-READY - packaging rules failed (docs/PACKAGING-RULES.md); see NOT-READY in the folder")
 
 
 def cmd_pcbway(a):
@@ -3267,6 +3269,9 @@ def build_parser():
     pd.add_argument("--changes", help="text file: what changed since the previous version "
                     "(README-FIRST and the last assembly section)")
     pd.add_argument("--kicad-cli", default="kicad-cli")
+    pd.add_argument("--pack-waive", action="append", default=[],
+                    help="recorded reason for a packaging-rule problem: 'P6:REGEX: reason', repeatable "
+                         "(also [packaging] waive in the constraints)")
     _add_review_args(pd, gate=True)
     pd.set_defaults(fn=cmd_deliver)
 

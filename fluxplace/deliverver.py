@@ -270,11 +270,25 @@ def claims(md, bom_rows, footprints=()):
 
 # ------------------------------------------------------------------ readme
 _RULE_RX = re.compile(r"^([A-Z][^\n]{3,})\n-{3,}\n", re.M)
-_REGENERATED = ("WHAT CHANGED", "VERIFICATION STATE", "CONTENTS")
+_REGENERATED = ("WHAT CHANGED", "VERIFICATION STATE", "CONTENTS", "KNOWN OPEN", "PACKAGING STATUS")
+
+
+def known_open_status(prev_readme, changes):
+    """Every prior KNOWN OPEN item with a status line: CLOSED when a --changes
+    line names it and says closed/fixed/resolved, else STILL OPEN."""
+    from .packrules import known_open
+    out = []
+    for item in known_open(prev_readme):
+        toks = re.findall(r"\b[A-Z]{1,3}\d+[A-Z]?\b|\b[\w-]{7,}\b", item)[:4]
+        hit = next((ln for ln in changes.splitlines()
+                    if any(t in ln for t in toks) and re.search(r"clos|fix|resolv|done|clear", ln, re.I)), None)
+        out.append("  - %s\n      STATUS: %s" % (item, ("CLOSED per --changes: " + hit.strip()) if hit
+                                                    else "STILL OPEN (not recorded closed in --changes)"))
+    return "\n".join(out)
 
 
 def readme_first(label, prev_label, title, board_line, changes, verification,
-                 contents, prev_readme=""):
+                 contents, prev_readme="", status="", packaging=""):
     """README-FIRST: version line, WHAT CHANGED since <prev>, VERIFICATION and
     CONTENTS regenerated; every other titled section of the previous README
     (rules, known-open items, schematic warnings) carried verbatim."""
@@ -285,6 +299,10 @@ def readme_first(label, prev_label, title, board_line, changes, verification,
     sec("WHAT CHANGED SINCE %s" % (prev_label or "THE PREVIOUS VERSION").upper(),
         changes.strip() or "(no --changes file given: nothing recorded)")
     sec("VERIFICATION STATE", verification)
+    if packaging:
+        sec("PACKAGING STATUS (docs/PACKAGING-RULES.md)", packaging)
+    if status:
+        sec("KNOWN OPEN (status since the previous version)", status)
     ms = list(_RULE_RX.finditer(prev_readme or ""))
     for i, m in enumerate(ms):
         if m.group(1).startswith(_REGENERATED):
@@ -580,9 +598,33 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
     bl = "%s: %s" % (lab, (facts.get("size_mm") and "%.1f x %.1f mm, %s layers" % (
         facts["size_mm"] + (facts.get("layers"),))) or stem)
     prev_readme = _rename_inputs(prev_readme, lab)
-    txt = readme_first(lab, prev_lab, title, bl, ctx["changes"], res, contents, prev_readme)
-    open(os.path.join(out, "README-FIRST.txt"), "w", encoding="utf-8").write(txt)
+    kstat = known_open_status(prev_readme, ctx["changes"])
+    write = lambda pk: open(os.path.join(out, "README-FIRST.txt"), "w", encoding="utf-8").write(
+        readme_first(lab, prev_lab, title, bl, ctx["changes"], res, contents, prev_readme, kstat, pk))
+    write("")
     notes["claims"] = "; ".join(ctx.get("claims") or []) or "none"
+    # packaging gate (docs/PACKAGING-RULES.md)
+    from . import packrules as PR, constraints as C, pcbway as PW
+    cons = C.load(a.constraints) if a.constraints else {}
+    pboard = os.path.join(out, stem + ".kicad_pcb")
+    fps = ctx["fps"]
+    pbom = prev.get("bom") if not a.prev_bom else a.prev_bom
+    pb = next(iter(sorted(glob.glob(os.path.join(a.prev_delivery or "", "*.kicad_pcb")))), None) if a.prev_delivery else None
+    pctx = dict(out=out, board=pboard, cons=cons, findings=findings, kicad_cli=kicad_cli,
+                prev_board=pb, prev_bom=pbom, prev_label=prev_lab, bom_rows=ctx["bom_rows"],
+                dnp=sorted({r for row in ctx["bom_rows"] if is_dnp(row) for r in row["Refs"]}
+                           | {p["ref"] for p in fps if p["dnp"]}, key=_refkey),
+                board_refs={p["ref"] for p in fps}, claims=ctx.get("claims") or [],
+                removed=[m for _, m in (ctx["rep"] or {}).get("removed", []) if m],
+                missing_datasheets=miss, prev_known_open=PR.known_open(prev_readme))
+    waive = list((cons.get("packaging") or {}).get("waive", [])) + list(a.pack_waive or [])
+    res_p = PR.check(pctx, waive)
+    for ln in PR.lines(res_p):
+        log("    " + ln)
+    PR.mark(out, res_p)
+    write(PR.readme_block(res_p))
+    notes["packaging"] = "READY" if PR.ready(res_p) else "NOT-READY"
+    ctx["ready"] = PR.ready(res_p)
     return notes
 
 
