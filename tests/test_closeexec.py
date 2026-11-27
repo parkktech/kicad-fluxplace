@@ -185,13 +185,25 @@ def test_first_pass_gives_every_group_its_cheap_attempt_before_any_second_attemp
     assert {r for _, r in order[3:]} == {"dear"} and len(order) == 6
 
 
-def test_after_the_first_pass_rate_orders_rungs_within_the_priority_order():
-    units = [_unit("open-free", "A", ["r1", "r2", "r3"], (13, 4)), _unit("power-width", "P", ["r1", "r2"], (1, 2))]
+def test_opens_get_their_cheap_attempt_before_any_power_width_attempt():
+    units = [_unit("power-width", "P", ["powerwiden"], (0, 1, 2)), _unit("open-free", "A", ["cheap", "dear"], (-1, 13, 4)),
+             _unit("open-free", "B", ["cheap", "dear"], (-1, 13, 4)), _unit("open-pour", "C", ["cheap"], (-1, 12, 4))]
+    done, order = set(), []
+    while (t := CX.next_task(units, done, {})) is not None:
+        done.add((t[0]["key"], t[1]))
+        order.append(t[0]["key"])
+    assert order.index("P") > max(order.index(k) for k in "ABC")      # every open group is tried before the power-width unit
+
+
+def test_a_rung_that_spent_its_share_and_closed_nothing_goes_last_and_rate_orders_the_rest():
+    units = [_unit("open-free", "A", ["r1", "r2", "r3"], (-1, 13, 4)), _unit("power-width", "P", ["r1", "r2"], (0, 1, 2))]
     done = {("A", "r1"), ("P", "r1")}
-    stats = {("open-free", "r3"): (60.0, 3), ("open-free", "r2"): (600.0, 0)}
-    assert CX.next_task(units, done, stats) == (units[1], "r2")         # electrical priority first: power before open
-    done.add(("P", "r2"))
-    assert CX.next_task(units, done, stats) == (units[0], "r3")         # then the measured rate (3 closed in 1 min vs 0 in 10)
+    stats = {("open-free", "r3"): (60.0, 3), ("open-free", "r2"): (600.0, 0), ("power-width", "r2"): (720.0, 0)}
+    assert CX.next_task(units, done, stats) == (units[0], "r3")        # opens first, the measured rate within them
+    done.add(("A", "r3"))
+    stats2 = {("power-width", "r2"): (720.0, 0)}                       # powerwiden: 12 min, nothing closed: behind a rung not yet tried
+    units2 = [_unit("power-width", "P", ["r1", "r2"], (-1, 1, 2)), _unit("open-free", "A", ["r1", "r2"], (-1, 13, 4))]
+    assert CX.next_task(units2, {("P", "r1"), ("A", "r1")}, stats2) == (units2[1], "r2")
 
 
 def _three_open_gaps(opens_fixed=()):
