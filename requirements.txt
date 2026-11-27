@@ -16,8 +16,8 @@
 
 numpy>=1.24
 Pillow>=10.0
-python-docx>=1.1
-openpyxl>=3.1
+python-docx==1.1.2
+openpyxl==3.1.5
 
 # NOT pip-installable, and deliberately absent:
 #   pcbnew   ships with KiCad 10 (not on PyPI)

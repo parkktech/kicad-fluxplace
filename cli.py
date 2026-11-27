@@ -139,7 +139,7 @@ def cmd_deliver(a):
     fab's engineer, plus loose readable docs for whoever places the order."""
     from fluxplace import fab as F, fabdoc, questions as QS
     QS.refuse_assumed(a.board, "deliver")
-    _review_gate(a, stage="deliver")
+    findings = _review_gate(a, stage="deliver")
     _open_gate(a)
     from fluxplace import constraints as C, gerbercheck as GC
     gerber = GC.run_stage(a.fab_dir, a.board, cons=C.load(a.constraints),
@@ -177,6 +177,9 @@ def cmd_deliver(a):
     slots = pcbway.slot_names(base)
     extras = []
     boms = list(a.bom or [])
+    from fluxplace import deliverver as DV
+    vctx, boms = DV.start(a, boms, pcbway.board_facts(a.board) if a.board else {},
+                          log=lambda m: print(m, flush=True))
     facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=boms,
                            sourcing=a.sourcing_json, quantity=a.quantity,
                            name=a.name)
@@ -194,7 +197,8 @@ def cmd_deliver(a):
     if a.assembly_notes and os.path.exists(a.assembly_notes):
         notes = open(a.assembly_notes, encoding="utf-8").read()
     pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"],
-                 docx=not a.no_docx, title=a.title, assembly_extra=notes)
+                 docx=not a.no_docx, title=a.title, assembly_extra=notes,
+                 assembly_post=DV.assembly_post(vctx, a, log=lambda m: print(m, flush=True)) if vctx else None)
     # spreadsheet twins of the two CSV uploads — an upload widget that refuses
     # one CSV will take the .xlsx, and mid-order is the wrong time to find out
     for slot in ("slot_bom", "slot_centroid"):
@@ -203,6 +207,10 @@ def cmd_deliver(a):
             alt = pcbway.to_xlsx(src, os.path.splitext(src)[0] + ".xlsx")
             if alt:
                 print(f"    alt format -> {os.path.basename(alt)}")
+    if vctx:
+        for k, v in DV.finish(vctx, a, findings, slots, facts, kicad_cli=a.kicad_cli,
+                              log=lambda m: print(m, flush=True)).items():
+            print(f"    version delivery {k}: {v}", flush=True)
 
 
 def cmd_pcbway(a):
@@ -3251,6 +3259,14 @@ def build_parser():
     pd.add_argument("--assembly-notes", help="markdown file appended verbatim "
                                              "to the assembly-instructions doc "
                                              "(upload slot 4)")
+    pd.add_argument("--prev-delivery", help="the previous version's delivery folder: "
+                    "its BOM format, Manufacturer/Notes, hand-written assembly "
+                    "sections, README rules, datasheets and libs are carried forward")
+    pd.add_argument("--prev-bom", help="previous BOM csv (overrides the one in --prev-delivery)")
+    pd.add_argument("--prev-assembly", help="previous assembly-instructions .md (overrides --prev-delivery)")
+    pd.add_argument("--changes", help="text file: what changed since the previous version "
+                    "(README-FIRST and the last assembly section)")
+    pd.add_argument("--kicad-cli", default="kicad-cli")
     _add_review_args(pd, gate=True)
     pd.set_defaults(fn=cmd_deliver)
 
