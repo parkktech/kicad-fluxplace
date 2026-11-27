@@ -146,7 +146,17 @@ def foot_conflict(fa, fb, clr):
 
 
 def bundles(ctx, pr, ti, rule, others, p):
-    """legal exit bundles of terminal `ti` of pair `pr` -> [bundle], cheapest first.  `others` = [pair terminal centres] (the heading)."""
+    """legal exit bundles of terminal `ti` of pair `pr` -> [bundle], cheapest first.  `others` = [pair terminal centres] (the heading).
+    A dense break-out (fine-pitch part, fan-out vias already placed) has no clear straight leg of the full reach: the reach is shortened
+    (1/2, then 1/3) before the terminal is called blocked."""
+    for k in (1.0, 0.5, 1 / 3):
+        out = _bundles_at(ctx, pr, ti, rule, others, p if k == 1.0 else dict(p, reach=p["reach"] * k))
+        if out:
+            return out
+    return []
+
+
+def _bundles_at(ctx, pr, ti, rule, others, p):
     from . import channel as CH
     info = ctx["info"][pr][0]
     t = info[ti]
@@ -463,9 +473,12 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     except Exception:                            # noqa: BLE001 - no channel family: no length term
                         ctx0["budget"][pr] = {}
                 doms[(pr, ti)] = bundles(ctx0, pr, ti, rule, others, p)
-            if any(not d for d in doms.values()):
-                nh["why"].append("a terminal has no legal bundle")
-                break
+            blocked = sorted("/".join(pr) + f"@{ti}" for (pr, ti), d in doms.items() if not d)
+            if blocked:                                       # a terminal with no legal bundle keeps its generic exit; the others are still planned
+                nh["why"].append("no legal bundle (generic exit): " + ", ".join(blocked))
+                doms = {k: d for k, d in doms.items() if d}
+                if not doms:
+                    break
             boxes = [part_box(B, c) for c in hood]
             vset = sorted(verification_set(info, rules, key, live, targets, boxes, p["verify_reach"], watch), key=lambda q: pos.get(q, 1e9))
             base = ghost(vset, {}, {})

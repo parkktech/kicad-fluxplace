@@ -225,3 +225,34 @@ def test_failed_probe_records_victims_and_crosses_orders(monkeypatch, tmp_path):
     rep = res["report"]
     assert "V_N/V_P" in rep["watch"] and any(c["order"] == "targets-reversed" for c in rep["cross"])
     assert {r["candidate"] for r in rep["cross"]} <= {0, 1} and all(set(r["scores"]) >= {"A_N/A_P", "B_N/B_P", "V_N/V_P"} for r in rep["cross"])
+
+
+def test_bundles_shorten_the_reach_before_a_terminal_is_blocked(monkeypatch):
+    """W16 J10/U12: a dense break-out has no clear 3 mm leg; a shorter leg is a legal bundle (was: 'a terminal has no legal bundle')"""
+    seen = []
+
+    def at(ctx, pr, ti, rule, others, p):
+        seen.append(p["reach"])
+        return [{"cost": 1.0}] if p["reach"] <= 1.5 else []
+    monkeypatch.setattr(PE, "_bundles_at", at)
+    assert PE.bundles({}, ("A_N", "A_P"), 0, {}, [], {"reach": 3.0}) == [{"cost": 1.0}]
+    assert seen == [3.0, 1.5]
+    monkeypatch.setattr(PE, "_bundles_at", lambda *a: [])
+    assert PE.bundles({}, ("A_N", "A_P"), 0, {}, [], {"reach": 3.0}) == []
+
+
+def test_a_blocked_terminal_does_not_abandon_the_neighbourhood(monkeypatch, tmp_path):
+    """one terminal with no bundle keeps its generic exit; the other terminal is still planned jointly"""
+    p0, p1, info, rules, key = fake_world(monkeypatch)
+    doms = two_vars()
+    monkeypatch.setattr(PE, "bundles", lambda ctx, pr, ti, rule, others, p: [] if pr == p1 else list(doms[(pr, ti)]))
+    calls = []
+
+    def ghost(prs, esc, rsv):
+        calls.append(dict(esc))
+        ok = bool(esc)
+        return {q: {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}} for q in prs}
+    res = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], {"pairlay": {"escape_cache_dir": str(tmp_path)}}, {}, lambda net: 1.0, order=[p0, p1])
+    nh = res["report"]["neighbourhoods"][0]
+    assert nh["verdict"] == "chosen", nh
+    assert {k[0] for k in res["choice"]} == {p0} and any("generic exit" in w for w in nh["why"])
