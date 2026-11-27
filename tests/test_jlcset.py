@@ -1,6 +1,7 @@
 """jlcset: JLCPCB BOM/CPL/gerber-zip set (offline; live LCSC lookup stubbed)."""
 import csv
 import os
+import pytest
 import sys
 import zipfile
 
@@ -42,8 +43,16 @@ def _board(tmp_path):
     return str(p), str(pos)
 
 
+def _rules():
+    """Rules from the pinned DB if it is fetchable/cached, else skip (the suite stays offline-safe)."""
+    r, warn = J.rotation_rules()
+    if warn:
+        pytest.skip(warn)
+    return r
+
+
 def test_rotation_correction_top_bottom_and_last_match_wins():
-    rules = J.rotation_rules()
+    rules = _rules()
     assert J.correct("R_0603_1608Metric", "top", 1, 1, 30, rules) == (1, 1, 30)
     assert J.correct("SOT-23", "top", 1, 1, 0, rules)[2] == 270        # "^SOT-23" = -90
     assert J.correct("SOT-23-5", "top", 1, 1, 0, rules)[2] == 270
@@ -69,7 +78,7 @@ def test_emit_bom_cpl_dnp_and_consigned(tmp_path):
         calls.append(sorted(mpns))
         return {"Q-MPN": {"grade": "CN_LOW", "row": {"lcsc": "C81464", "stock": 40}}}
 
-    s = J.emit(board, str(out), pos, cons, None, check, log=lambda *_: None)
+    s = J.emit(board, str(out), pos, cons, None, check, log=lambda *_: None, rotations=([], None))
     jd = out / "jlcpcb"
     assert calls == [["Q-MPN"]]                       # explicit, consigned and DNP parts are never looked up
     bom = list(csv.reader(open(jd / "BOM-JLCPCB.csv")))
@@ -78,9 +87,10 @@ def test_emit_bom_cpl_dnp_and_consigned(tmp_path):
     assert ["MMBT", "Q1,Q2", "SOT-23", "C81464"] in bom
     flat = ",".join(r[1] for r in bom[1:])
     assert "R3" not in flat and "MH1" not in flat      # DNP and exclude_from_bom
-    cpl = {r[0]: r for r in list(csv.reader(open(jd / "CPL-JLCPCB.csv")))[1:]}
+    cpl_rows = list(csv.reader(open(jd / "CPL-JLCPCB.csv")))
+    assert cpl_rows[0] == ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"]
+    cpl = {r[0]: r for r in cpl_rows[1:]}
     assert set(cpl) == {"R1", "R2", "Q1", "Q2", "J1"}   # orphan X9 and MH1 dropped: CPL refs == BOM refs
-    assert list(csv.reader(open(jd / "CPL-JLCPCB.csv")))[0] == ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"]
     assert cpl["Q2"][3] == "Bottom" and cpl["Q1"][3] == "Top" and cpl["R1"][1] == "1.0000mm"
     assert s["consigned"] == ["J1"] and s["thin"] == ["Q1", "Q2"] and s["cpl_missing"] == []
     txt = (jd / "CONSIGNED.txt").read_text()
@@ -107,3 +117,24 @@ def test_deliver_ships_jlcpcb_set_loose(tmp_path):
     r = fab.deliver(str(fd), str(tmp_path / "d"), "G", centroid_name="c.csv", log=lambda *_: None)
     assert (tmp_path / "d" / "jlcpcb" / "BOM-JLCPCB.csv").is_file()
     assert "jlcpcb" not in " ".join(zipfile.ZipFile(r["zip"]).namelist())
+
+
+def test_rotation_table_sha_refusal_and_offline_warning(tmp_path):
+    r, w = J.rotation_rules(str(tmp_path), fetch=lambda u: b"tampered")
+    assert r == [] and "sha256" in w and not list(tmp_path.iterdir())
+
+    def boom(u):
+        raise OSError("offline")
+    r, w = J.rotation_rules(str(tmp_path), fetch=boom)
+    assert r == [] and "offline" in w
+    assert J.correct("SOT-23", "top", 1, 2, 30, []) == (1, 2, 30)
+
+
+def test_offline_cpl_warns_with_refs(tmp_path):
+    board, pos = _board(tmp_path)
+    out = tmp_path / "o"
+    (out / "gerbers").mkdir(parents=True)
+    (out / "drill").mkdir()
+    logs = []
+    s = J.emit(board, str(out), pos, {}, None, None, log=logs.append, rotations=([], "offline"))
+    assert s["uncorrected"] == ["J1", "Q1", "Q2"] and any("JLC_ROTATION_UNCORRECTED" in l and "Q1" in l for l in logs)
