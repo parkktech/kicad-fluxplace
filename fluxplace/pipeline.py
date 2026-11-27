@@ -1940,6 +1940,60 @@ def _scope_add(c, nets):
     sc["nets"] = sorted(set(sc["nets"]) | set(nets))
 
 
+def _decide_packets(c, work, name, qs):
+    """Owner packets (packets.question rows) through the AI decider.  The stage already ran with accept-open; a decided
+    "change" cannot be applied by the flow (it edits board size / stackup / a fixed constraint), so it is logged as a
+    proposal and the run goes on.  -> the questions still open ([] whenever the decider is on)."""
+    from . import decider as DC_
+    for q in qs:
+        d = DC_.decide(q, [q["found"]], c.cons, work)
+        c.answers[q["id"]] = "accept-open"
+        print(f"pipeline: {name}: DECIDED {q['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})"
+              + (" - proposal only, the flow continues accept-open: " + d["rationale"][:160] if d["choice"] != "accept-open" else ""), flush=True)
+    return []
+
+
+def _pinswap_entry(c, work, board, st):
+    """[pinswap] at pipeline entry: a sealed group pad is settled (answers, else the AI decider, else left open for the stages'
+    own question) and each decided move re-nets the pads into `0-pinswap/`; the route entry's re-net strip handles old copper."""
+    from . import boardwrite as BW_, pinswap as PS_, questions as QS_, routediag as RD_
+    S = QS_.Session(board, c.cons, c.answers, False, "pinswap")
+    S.log_dir = work                                                      # the decision log stays in the run folder
+    try:
+        PS_.ask(S, RD_.load(board), c.cons, c.spec)
+    except Exception as e:                                                # noqa: BLE001 - the stages ask the question themselves
+        print(f"pipeline: pinswap check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+        return board
+    for d in S.decided:
+        print(f"pipeline: DECIDED {d['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})", flush=True)
+    c.answers.update(S.used)
+    mv = PS_.moves(S.used)
+    out = os.path.join(work, "0-pinswap", "board.kicad_pcb")
+    nets = PS_.apply_board(board, out, mv)
+    if not nets:
+        return board
+    _sidecar(board, out)
+    v = BW_.commit(board, out, out, release=nets, reason="pinswap", log=print)
+    if not v["written"]:
+        print(f"pipeline: pinswap re-net refused: {v['why']}", flush=True)
+        return board
+    st["pinswap"] = mv
+    if c.spec is not None and c.spec_path:                               # the spec follows the board; the schematic gets a change list
+        from . import partsgate as PG_
+        rows = PS_.change_list(c.spec, mv)
+        _c, spec2 = S.apply(c.cons, c.spec)
+        shutil.copy(c.spec_path, c.spec_path + ".bak-pinswap")
+        PG_._write_json(c.spec_path, spec2)
+        c.spec = spec2
+        with open(os.path.join(work, "0-pinswap", "schematic-changes.json"), "w") as fh:
+            json.dump({"spec": os.path.abspath(c.spec_path), "moves": rows}, fh, indent=1)
+        print("pipeline: pinswap: spec updated (" + ", ".join(f"{r['ref']}.{r['from_pin']}->{r['to_pin']} {r['net']}" for r in rows)
+              + "); schematic change list 0-pinswap/schematic-changes.json", flush=True)
+    _scope_add(c, nets)
+    st["board"] = out
+    return out
+
+
 def _renet_entry(c, work, board, st, near=()):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
@@ -2169,6 +2223,8 @@ def _run(a):
             return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    if (c.cons or {}).get("pinswap") and os.path.isfile(board):
+        board = _pinswap_entry(c, work, board, st)
     if STAGES_[i0] in RENET_FROM and os.path.isfile(board):
         board = _renet_entry(c, work, board, st)
     led = _Ledger(work, STAGES_, i0)
@@ -2249,6 +2305,9 @@ def _run(a):
             with open(led.path, "a") as fh:
                 fh.write(f"{name}: {note}: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
             print(f"pipeline: {name}: {note} (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+            from . import decider as DC_
+            if ua.get("questions") and DC_.enabled(c.cons):                # w94: the AI decider settles owner packets; never suspends
+                ua["questions"] = _decide_packets(c, work, name, ua["questions"])
             if ua.get("questions") and res["verdict"] != "questions":       # B12: an owner decision suspends the flow (exit 3), resumable
                 res["verdict"] = "questions"
                 res["next"] = [f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]]

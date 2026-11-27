@@ -234,7 +234,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
                                ("floors", "design-rule floors", QS.check_floors),
                                ("sides", "placement sides", QS.check_placement_sides),
-                               ("crowding", "crowding", QS.check_crowding)):
+                               ("crowding", "crowding", QS.check_crowding), ("pinswap", "pin choice", QS.check_pinswap)):
             n0 = len(sess.open)
             fn(sess, B, cons, cls=cls, spec=spec)
             new = sess.open[n0:]
@@ -245,7 +245,8 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)",
                                 "sides": "[placement] sides decided",
-                                "crowding": "no side over the crowding limits, or answered"}[key]))
+                                "crowding": "no side over the crowding limits, or answered",
+                                "pinswap": "no sealed [pinswap] pad with an escapable alternative, or decided"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))
