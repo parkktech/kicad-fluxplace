@@ -24,7 +24,8 @@ Trust: the model is told to copy numbers as printed; `verify` keeps a fact only 
 that page (pin names: the name is on the page), else the fact moves to `rejected` with the reason. Downstream (elec.load_facts,
 partdocs.spec_check) reads only text-verified facts, and a hand-entered parts-fact always wins over a dossier one. A fact read from a
 page picture (`img`) or a distributor is page-range checked only: it makes the part knowable, never feeds a check.
-The model call is `claude -p` (haiku by default; FLUXPLACE_DOSSIER_MODEL); FLUXPLACE_AI=0 or no `claude` CLI = offline: the dossier
+The model call is decider.call_model (`claude -p`; haiku by default, FLUXPLACE_DOSSIER_MODEL); FLUXPLACE_AI=0, FLUXPLACE_AI_OFFLINE or
+no `claude` CLI = offline: the dossier
 is reported missing (not cached, retried next run). Nothing here names a board, a reference or an MPN.
 """
 import concurrent.futures as CF
@@ -283,20 +284,18 @@ def _model(model=None):
 
 
 def online():
-    return os.environ.get("FLUXPLACE_AI", "1") not in ("0", "off", "no") and shutil.which("claude") is not None
+    return (os.environ.get("FLUXPLACE_AI", "1") not in ("0", "off", "no") and not os.environ.get("FLUXPLACE_AI_OFFLINE")
+            and shutil.which("claude") is not None)
 
 
 def call_model(prompt, model=None, timeout=900, tools="", cwd=None):
-    """-> (reply text, cost USD). The local `claude -p` CLI, no project settings, run outside any project; tools="" (text) or "Read"
-    (page pictures in `cwd`)."""
-    cmd = ["claude", "-p", "--model", _model(model), "--output-format", "json",
-           "--tools", tools, "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
-           "--system-prompt", "You extract datasheet facts into JSON. Output JSON only."]
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cwd or cache_dir())
-    env = json.loads(r.stdout or "{}")
-    if r.returncode or env.get("is_error"):
-        raise RuntimeError((env.get("result") or r.stderr or "claude -p failed").strip()[:300])
-    return env.get("result") or "", float(env.get("total_cost_usd") or 0.0)
+    """-> (reply text, cost USD) through decider.call_model (one model path for the flow); raises RuntimeError when there is no answer."""
+    from . import decider as DC
+    info = {}
+    out, why = DC.call_model(prompt, None, _model(model), tools=tools, cwd=cwd or cache_dir(), timeout=timeout, info=info)
+    if out is None:
+        raise RuntimeError(why or "no model answer")
+    return out, info.get("cost_usd", 0.0)
 
 
 def _json_of(text):
@@ -324,7 +323,7 @@ def _first_pass(mpn, pdf, pg, td, ask, model):
     return _json_of(reply), vision, sel, cost
 
 
-def siblings(pdf, mpn, limit=3):
+def siblings(pdf, mpn, limit=5):
     """Other documents of the same part / family in the datasheets folder (app note, user guide, drawing): file stems sharing the first
     five characters of the MPN or of the datasheet's own stem."""
     folder, own = os.path.dirname(pdf), os.path.basename(pdf)
@@ -336,7 +335,8 @@ def siblings(pdf, mpn, limit=3):
         return []
     out = [os.path.join(folder, n) for n in names if n.lower().endswith(".pdf") and n != own
            and re.sub(r"[^A-Z0-9]", "", n.upper())[:5] in keys]
-    return out[:limit]
+    mine = re.sub(r"[^A-Za-z0-9._-]", "_", mpn) + "__"                 # the part's own fetched documents (fetch_docs) first
+    return sorted(out, key=lambda f: not os.path.basename(f).startswith(mine))[:limit]
 
 
 _GAP_WORDS = {"pins": r"pin|terminal|pad|polarity|cathode|marking", "abs_max": r"absolute|maximum rating|rated|rating|drive level",
@@ -424,20 +424,21 @@ def _dist_row(mpn):
     return row
 
 
-def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributor=None):
+def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributor=None, retry=False):
     """The dossier of one part: cached when the datasheet is unchanged, else read by the model, verified and escalated through the
     sources until every REQUIRED section is found (else `knowable` false, `missing` named).
     ask(prompt) -> (text, cost) replaces the model and distributor(mpn) -> row the distributor (tests). -> (dossier | None, status, cost)."""
     hit = None if refresh else load(mpn, sha, d, any_version=True)
-    if hit and hit.get("version") == VERSION:
-        return hit, "cached", 0.0
+    if hit and hit.get("version") == VERSION and (hit.get("knowable") or not retry):
+        return hit, "cached", 0.0                           # retry: an unknowable part's escalation runs again (new documents)
     if ask is None and not online():
         return None, "offline (FLUXPLACE_AI=0 or no claude CLI)", 0.0
     pg = pages(pdf)
     t0, cost = time.time(), 0.0
     with tempfile.TemporaryDirectory(dir=cache_dir(d)) as td:
         try:
-            if hit:                                          # a v1 dossier: its text pass stands, only the escalation runs
+            if hit:                                          # an older or unknowable dossier: its text pass stands, the escalation runs
+                hit = dict(hit, sources=[])
                 dos, vision, sel = hit, hit.get("evidence") == "vision", hit.get("pages_read") or []
                 if vision:
                     pg = [""] * (hit.get("n_pages") or 1)
@@ -472,8 +473,11 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributo
     return dos, "UNKNOWABLE" if miss else "made", cost
 
 
-def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False, log=print):
-    """Dossiers for every MPN whose datasheet is in the manifest, `jobs` at a time. -> {mpn: (dossier|None, status, cost)}."""
+def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False, log=print, fetch=None):
+    """Dossiers for every MPN whose datasheet is in the manifest, `jobs` at a time; an unknowable part gets its manufacturer's other
+    documents fetched (fetch_docs; fetch=None: when online, a dict: fetch_docs arguments for tests, False: never) and is read again.
+    -> {mpn: (dossier|None, status, cost)}."""
+    fetch = online() if fetch is None else fetch
     from . import partdocs as PD
     man = PD.load_manifest(ds_dir)
     todo = []
@@ -482,9 +486,22 @@ def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False,
         f = os.path.join(ds_dir, ent["file"]) if isinstance(ent, dict) and ent.get("file") else None
         if f and os.path.isfile(f):
             todo.append((m, f, ent.get("sha256") or PD._sha(f)))
+    res = _run(todo, jobs, ask, model, d, refresh, log)
+    if fetch:
+        again = []
+        for m, f, s in todo:                             # an unknowable part: the manufacturer's other documents, then the escalation again
+            dos = res[m][0]
+            if dos and not dos.get("knowable") and fetch_docs(m, ds_dir, dos["missing"], log=log, **(fetch if isinstance(fetch, dict) else {})):
+                again.append((m, f, s))
+        for m, r in _run(again, jobs, ask, model, d, False, log, retry=True).items():
+            res[m] = (r[0], r[1], res[m][2] + r[2])
+    return res
+
+
+def _run(todo, jobs, ask, model, d, refresh, log, retry=False):
     res = {}
     with CF.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-        futs = {ex.submit(build, m, f, s, ask, model, d, refresh): m for m, f, s in todo}
+        futs = {ex.submit(build, m, f, s, ask, model, d, refresh, None, retry): m for m, f, s in todo}
         for fu in CF.as_completed(futs):
             m = futs[fu]
             res[m] = fu.result()
@@ -633,10 +650,118 @@ def propose_replacement(mpn, fp=None, required=1, temp=(None, None), searcher=No
     return sorted(out, key=lambda r: (not r["knowable"], not r["drop_in"], len(r["differs"])))
 
 
-def record_replacement(mpn, sha, rows, d=None):
-    """Store the proposal list in the part's cached dossier (the parts gate prints it)."""
+def record_replacement(mpn, sha, rows, choice=None, d=None):
+    """Store the proposal list (and the choice) in the part's cached dossier (the parts gate prints it)."""
     from . import sourcing as S
     dos = load(mpn, sha, d)
     if dos:
         dos["replacement"] = rows
+        if choice is not None:
+            dos["replacement_choice"] = choice
         S.write_json(_path(mpn, sha, d), dos, indent=1)
+
+
+# ------------------------------------------------------------------ an unknowable part: the manufacturer's other documents
+_DOC_TYPES = ("Datasheets", "Product Drawings", "Other Related Documents", "Design Resources", "Manuals", "Application Notes",
+              "Featured Product", "User Guides", "Technical Reference")
+WEB = """Find the manufacturer's official PDF documents for the electronic part {mpn}{mfr} that state: {need}
+(product specification, hardware integration manual, user guide, application note, customer drawing). Use web search; prefer the
+manufacturer's own site. Return ONE JSON object, no prose: {{"urls": ["https://...pdf", ...]}} with at most 4 direct PDF links."""
+
+
+def _dk_media(mpn):
+    """[(media type, title, url)] of the part's DigiKey media links (by MPN, else by its DigiKey number from a keyword search)."""
+    import urllib.parse
+    import urllib.request
+    from . import partsearch as PS, sourcing as S
+    c = PS.credentials()
+    if "DIGIKEY_CLIENT_ID" not in c:
+        return []
+    tok = S._dk_token(c)
+
+    def get(key):
+        req = urllib.request.Request(f"https://api.digikey.com/products/v4/search/{urllib.parse.quote(key, safe='')}/media",
+                                     headers={"X-DIGIKEY-Client-Id": c["DIGIKEY_CLIENT_ID"], "Authorization": "Bearer " + tok})
+        return [(m.get("MediaType") or "", m.get("Title") or "", m.get("Url") or "")
+                for m in json.load(urllib.request.urlopen(req, timeout=30)).get("MediaLinks") or []]
+    try:
+        return get(mpn)
+    except Exception:                                       # noqa: BLE001 - not found by MPN: its DigiKey number
+        pass
+    try:
+        rows = PS._dk_keyword(S._search_term(mpn), c, tok, 5)
+        for p in (rows or {}).get("Products", []):
+            if S._same_part(p.get("ManufacturerProductNumber", ""), mpn)[0]:
+                for v in p.get("ProductVariations") or []:
+                    if v.get("DigiKeyProductNumber"):
+                        return get(v["DigiKeyProductNumber"])
+    except Exception:                                       # noqa: BLE001
+        pass
+    return []
+
+
+def doc_urls(mpn, need, mfr="", media=None, web=None):
+    """Candidate URLs of the part's other documents: DigiKey media links (datasheets, drawings, manuals, related documents), then a
+    model web search for the manufacturer's site. -> [(url, why)]."""
+    out = [(u, f"digikey {t}: {ti}") for t, ti, u in (media or _dk_media)(mpn)
+           if u and t in _DOC_TYPES and (u.lower().split("?")[0].endswith(".pdf") or "/docus/" in u or "/prints/" in u)]
+    if web is not None or online():
+        try:
+            reply, _ = (web or (lambda pr: call_model(pr, timeout=300, tools="WebSearch,WebFetch")))(
+                WEB.format(mpn=mpn, mfr=f" ({mfr})" if mfr else "", need=", ".join(need)))
+            out += [(u, "web search") for u in _json_of(reply).get("urls") or [] if isinstance(u, str) and u.startswith("http")]
+        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+            pass
+    return list(dict(out).items())
+
+
+def fetch_docs(mpn, ds_dir, need, mfr="", media=None, web=None, download=None, log=lambda m: None, limit=6):
+    """Download the part's other documents into the datasheets folder as `<MPN>__<name>.pdf` (dossier.siblings reads them). A file
+    whose bytes are already in the folder is not kept twice. -> [new file paths]."""
+    from . import partdocs as PD
+    have = {PD._sha(os.path.join(ds_dir, f)) for f in os.listdir(ds_dir) if f.lower().endswith(".pdf")}
+    new = []
+    for url, why in doc_urls(mpn, need, mfr, media, web)[:limit]:
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(url.split("?")[0]))[:60] or "doc"
+        dest = os.path.join(ds_dir, f"{PD._safe_name(mpn)}__{stem if stem.lower().endswith('.pdf') else stem + '.pdf'}")
+        ok, detail = (download or PD._download)(url, dest + ".part")
+        if ok and PD._sha(dest + ".part") not in have:
+            os.replace(dest + ".part", dest)
+            have.add(PD._sha(dest))
+            new.append(dest)
+        elif os.path.exists(dest + ".part"):
+            os.remove(dest + ".part")
+        log(f"    doc {url[:90]} ({why}): {'kept' if dest in new else detail if not ok else 'already in the folder'}")
+    return new
+
+
+def choose(mpn, dos, rows, log_dir=None, cons=None):
+    """The replacement of an unknowable part: the first knowable drop-in when there is one, else decider.ask among the knowable
+    candidates (each with what differs) or keeping the part blocked. -> {"choice", "by", "rationale"}."""
+    ok = [r for r in rows if r.get("knowable")]
+    first = next((r for r in ok if r.get("drop_in")), None)
+    if first:
+        return {"choice": first["mpn"], "by": "rule", "rationale": "knowable verified drop-in"}
+    if not ok:
+        return {"choice": None, "by": "rule", "rationale": "no knowable candidate"}
+    from . import decider as DC
+    opts = {r["mpn"]: "replace " + mpn + "; differs: " + ("; ".join(r.get("differs") or []) or "nothing listed, not a verified drop-in")
+            for r in ok}
+    opts["keep-blocked"] = f"{mpn} stays PART_UNKNOWABLE; placement does not start until a person or a later document closes it"
+    ev = [f"{mpn} cannot be fully known: no source gives {', '.join(dos.get('missing') or [])}"] + \
+         [f"{r['mpn']}: knowable (its own dossier), stock {r.get('stock')}, mfr {r.get('mfr')}" for r in ok]
+    row = DC.ask(f"replace:{mpn}", "parts", f"{mpn} is unknowable; choose a knowable replacement", opts, "keep-blocked",
+                 "the replacement goes into the spec as an MPN change (D-row)", ev, cons, log_dir)
+    return {"choice": None if row["choice"] == "keep-blocked" else row["choice"], "by": row["by"], "rationale": row.get("rationale", "")}
+
+
+def replace_unknowable(dres, log_dir=None, log=print):
+    """Every unknowable part of a build_all result: candidates (propose_replacement), the choice (choose), both stored in its dossier.
+    -> {mpn: choice dict}."""
+    out = {}
+    for m in sorted(k for k, (dos, _, _) in dres.items() if dos and not dos.get("knowable")):
+        dos = dres[m][0]
+        rows = dos.get("replacement") if dos.get("replacement") is not None else propose_replacement(m, log=log)
+        out[m] = choose(m, dos, rows, log_dir)
+        record_replacement(m, dos["sha256"], rows, out[m])
+    return out

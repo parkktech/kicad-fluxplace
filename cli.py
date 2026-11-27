@@ -2050,19 +2050,19 @@ def cmd_datasheets(a):
     miss = sorted(k for k, v in res.items() if not v)
     print(f"datasheets: {have}/{len(res)} on disk in {a.out}")
     from fluxplace import dossier as DO                  # w95: read every part before placement (cached per MPN + datasheet hash)
-    t0, dres = _time.time(), DO.build_all(a.out, [k for k, v in res.items() if v], jobs=int(os.environ.get("FLUXPLACE_DOSSIER_JOBS", 4)),
-                                         log=lambda m: print(m, flush=True))
+    docs = [k for k in PD2.load_manifest(a.out) if k.lower().endswith(".pdf")]   # a module datasheet a pinmap cites (no MPN of its own)
+    t0, dres = _time.time(), DO.build_all(a.out, [k for k, v in res.items() if v] + docs,
+                                         jobs=int(os.environ.get("FLUXPLACE_DOSSIER_JOBS", 4)), log=lambda m: print(m, flush=True))
     ok = [d for d, _, _ in dres.values() if d]
-    bad = sorted(d["mpn"] for d in ok if not d["knowable"])
-    if bad and DO.online():                              # an unknowable part is replaced, never used: propose a knowable one
-        for m in bad:
-            DO.record_replacement(m, dres[m][0]["sha256"], DO.propose_replacement(m, log=lambda x: print(x, flush=True)))
-    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {len(ok) - len(bad)} fully knowable, "
+    picks = DO.replace_unknowable({k: v for k, v in dres.items() if k not in docs}, a.out, log=lambda x: print(x, flush=True)) \
+        if DO.online() else {}
+    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {sum(1 for d in ok if d['knowable'])} fully knowable, "
           f"${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) in {DO.cache_dir()}")
-    for m in bad:
-        d = DO.load(m, dres[m][0]["sha256"]) or dres[m][0]
-        rep = next((r["mpn"] for r in d.get("replacement") or [] if r["knowable"]), None)
-        print(f"  UNKNOWABLE {m}: missing {', '.join(d['missing'])}; replacement {rep or 'none found'}")
+    for d in ok:
+        if not d["knowable"]:
+            pick = picks.get(d["mpn"]) or {}
+            print(f"  UNKNOWABLE {d['mpn']}: missing {', '.join(d['missing'])}; replacement {pick.get('choice') or 'none'} "
+                  f"({pick.get('by', 'not searched')}: {pick.get('rationale', '')[:80]})")
     if miss:
         print("  need a browser (drop the PDF in and run --adopt MPN=file.pdf): "
               + ", ".join(miss))

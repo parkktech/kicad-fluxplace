@@ -221,3 +221,63 @@ def test_a_pin_table_shorter_than_the_package_is_a_gap():
     assert DO.gaps(d) == ["pins"]
     DO.merge(d, {"pins": [{"num": [str(k)]} for k in range(1, 5)]})
     assert DO.gaps(d) == []
+
+
+def test_unknowable_part_fetches_its_other_documents_and_is_read_again(tmp_path, monkeypatch):
+    ds, calls, ask = _escalate_setup(tmp_path, monkeypatch, {})
+    os.remove(os.path.join(ds, "TPS0000-appnote.pdf"))
+    spec_pages = ["Product specification\nVIN absolute maximum 22 V\nOperating temperature -40 to 125 C\nVIH 1.4 V"]
+    monkeypatch.setattr(DO, "pages", lambda pdf: spec_pages if "__" in pdf else PAGES)
+
+    def download(url, dest):
+        open(dest, "wb").write(b"%PDF spec " + url.encode())
+        return True, "ok"
+    later = {"abs_max": [{"param": "VIN", "max": 22, "unit": "V", "p": 1, "doc": "TPS0000__spec.pdf"}],
+             "temp_range": {"min": -40, "max": 125, "p": 1, "doc": "TPS0000__spec.pdf"},
+             "io_levels": [{"domain": "VIN", "vih_min": 1.4, "unit": "V", "p": 1, "doc": "TPS0000__spec.pdf"}],
+             "na": {"interfaces": "analog only"}}
+    state = {"docs": False}
+
+    def ask2(prompt):
+        if "=== DOC TPS0000__spec.pdf" in prompt:
+            state["docs"] = True
+            return json.dumps(later), 0.01
+        return ask(prompt)
+    res = DO.build_all(ds, ["TPS0000"], ask=ask2, log=lambda m: None,
+                       fetch={"media": lambda m: [("Datasheets", "spec", "https://x.example/spec.pdf"),
+                                                  ("Product Photos", "img", "https://x.example/p.jpg")],
+                              "web": lambda p: ('{"urls": []}', 0.0), "download": download})
+    d, st, _ = res["TPS0000"]
+    assert state["docs"] and st == "made" and d["knowable"] and d["abs_max"][0]["doc"] == "TPS0000__spec.pdf"
+    assert sorted(f for f in os.listdir(ds) if "__" in f) == ["TPS0000__spec.pdf"]
+
+
+def test_choose_takes_a_drop_in_else_asks_the_decider(tmp_path, monkeypatch):
+    from fluxplace import decider as DC
+    dos = {"missing": ["decoupling"]}
+    rows = [{"mpn": "A", "knowable": True, "drop_in": False, "differs": ["qualification: no AEC-Q"]},
+            {"mpn": "B", "knowable": False, "drop_in": True, "differs": []}]
+    assert DO.choose("X", dos, rows + [{"mpn": "C", "knowable": True, "drop_in": True}])["choice"] == "C"
+    monkeypatch.setattr(DC, "call_model", lambda *a, **k: ('{"choice": "A", "rationale": "only knowable", "evidence": ["A: knowable"]}', ""))
+    got = DO.choose("X", dos, rows, log_dir=str(tmp_path))
+    assert got["choice"] == "A" and got["by"] == "ai"
+    monkeypatch.setattr(DC, "call_model", lambda *a, **k: (None, "offline"))
+    assert DO.choose("Y", dos, rows, log_dir=str(tmp_path))["choice"] is None          # no model: the part stays blocked
+
+
+def test_decider_call_model_passes_tools_cwd_and_reports_cost(tmp_path, monkeypatch):
+    from fluxplace import decider as DC
+    seen = {}
+
+    class R:
+        returncode, stdout = 0, '{"result": "{}", "total_cost_usd": 0.02}'
+
+    def run(cmd, **k):
+        seen.update(cmd=cmd, cwd=k.get("cwd"))
+        return R()
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    monkeypatch.setattr(DC.shutil, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(DC.subprocess, "run", run)
+    info = {}
+    assert DC.call_model("q", None, "haiku", tools="Read", cwd=str(tmp_path), info=info) == ("{}", "")
+    assert seen["cmd"][seen["cmd"].index("--tools") + 1] == "Read" and seen["cwd"] == str(tmp_path) and info["cost_usd"] == 0.02

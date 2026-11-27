@@ -344,7 +344,8 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
                 out.append(_f(lvl, "PART_DATASHEET_MISSING", f"{ref} {mpn}: no datasheet file on disk", refs=[ref]))
             dos = _dossier(mpn, man)
             if dos and not dos.get("knowable", True):
-                rep = next((r for r in dos.get("replacement") or [] if r.get("knowable")), None)
+                pick = (dos.get("replacement_choice") or {}).get("choice")
+                rep = next((r for r in dos.get("replacement") or [] if r.get("knowable") and (r["mpn"] == pick or pick is None)), None)
                 out.append(_f(FAIL, "PART_UNKNOWABLE", f"{ref} {mpn}: no source gives {', '.join(dos['missing'])} (datasheet, page pictures, "
                               f"the family's other documents, distributor) - a part that cannot be fully known is not used; "
                               + (f"proposed replacement {rep['mpn']} ({'drop-in' if rep['drop_in'] else 'differs: ' + '; '.join(rep['differs'][:2])})"
