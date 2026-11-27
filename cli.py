@@ -879,11 +879,17 @@ def cmd_preflight(a):
             if diffs:
                 import collections
                 bynet = collections.Counter(t for _, _, _, t in diffs)
+                named = ", ".join(f"{r}.{p} on {c or 'NO NET'} (schematic {t})" for r, p, c, t in sorted(diffs)[:8])
                 findings.append(("FAIL", "PAD_NET_MISMATCH",
-                                 f"{len(diffs)} pad(s) disagree with the schematic "
-                                 f"netlist (top: {bynet.most_common(3)}) — routers "
+                                 f"{len(diffs)} declared-but-unwired pad(s) disagree with the schematic "
+                                 f"netlist (top: {bynet.most_common(3)}): {named} — routers "
                                  f"and DRC are working an incomplete net set; run "
                                  f"sync-nets"))
+            und = IO.pad_undeclared(board, xml)
+            if und:
+                findings.append(("FAIL", "PAD_NET_UNDECLARED",
+                                 f"{len(und)} wired-but-undeclared pad(s) carry a net the schematic does not give them: "
+                                 + ", ".join(f"{r}.{p} on {n}" for r, p, n in sorted(und)[:8])))
         else:
             findings.append(("WARN", "NETLIST_EXPORT_FAILED", err))
     if a.components:

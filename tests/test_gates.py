@@ -179,3 +179,36 @@ def test_krt_extra_and_summary(tmp_path):
                        ' "pad_pairs_open": {"count": 4}}')
     assert "113 routed / 4 failed" in s and "open pad pairs 4" in s
     assert AD.krt_summary("") == ""
+
+
+def test_declared_unwired_and_wired_undeclared_name_ref_pin_and_net():
+    f = facts({"U13": part({"4": "IMU_INT1"}), "J10": part({"24": "OTHER", "25": "IMU_INT1"})})
+    out = {x["code"]: x for x in R.check_spec_nets(f, SPEC)}
+    assert "J10.24 (OTHER)" in out["SPEC_DECLARED_UNWIRED"]["msg"] and out["SPEC_DECLARED_UNWIRED"]["level"] == R.FAIL
+    assert "J10.25" in out["SPEC_WIRED_UNDECLARED"]["msg"]
+    f = facts({"U13": part({"4": "IMU_INT1"}), "J10": part({"24": ""})})
+    assert "J10.24 (NO NET)" in [x for x in R.check_spec_nets(f, SPEC) if x["code"] == "SPEC_DECLARED_UNWIRED"][0]["msg"]
+
+
+def test_schematic_netlist_declared_unwired_and_undeclared(tmp_path):
+    from fluxplace import kicad_io as IO
+
+    class Pad:
+        def __init__(s, n, net): s.n, s.net = n, net
+        def GetPadName(s): return s.n
+        def GetNetname(s): return s.net
+
+    class FP:
+        def __init__(s, ref, pads): s.ref, s.pads = ref, pads
+        def GetReference(s): return s.ref
+        def Pads(s): return s.pads
+
+    class B:
+        def GetFootprints(s):
+            return [FP("J10", [Pad("24", ""), Pad("25", "STRAY"), Pad("26", "OK")]), FP("SYM", [Pad("1", "N")])]
+
+    x = tmp_path / "n.xml"
+    x.write_text('<export><nets><net name="IMU_INT1"><node ref="J10" pin="24"/></net><net name="OK"><node ref="J10" pin="26"/></net>'
+                 '<net name="Q"><node ref="SYM" pin="A"/></net></nets></export>')
+    assert IO.pad_net_parity(B(), str(x)) == [("J10", "24", "", "IMU_INT1")]
+    assert IO.pad_undeclared(B(), str(x)) == [("J10", "25", "STRAY")]

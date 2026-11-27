@@ -1720,6 +1720,33 @@ def _spec_pads(comp, pin, pads):
     return [c for c in cand if c in pads]
 
 
+def _spec_wiring(parts, net_pads, nets, comps):
+    """Declared-but-unwired: a pad the spec puts on net N whose board net is not N. Wired-but-undeclared: a pad on board
+    net N that spec net N does not list (only nets the spec declares; a part the board lacks is SPEC_COMPONENT_MISMATCH)."""
+    def listed(items):
+        return ", ".join(items[:8]) + (f" (+{len(items) - 8})" if len(items) > 8 else "")
+
+    out = []
+    for name, pins in sorted(nets.items()):
+        declared, complete = set(), True
+        for ref, pin in pins:
+            p = parts.get(ref)
+            got = _spec_pads(comps.get(ref), str(pin), p["pads"]) if p else []
+            complete &= bool(got)               # an unresolved pin is SPEC_PIN_UNRESOLVED's; the net is not fully known
+            declared.update((ref, pad) for pad in got)
+        bad = sorted(f"{r}.{pd} ({parts[r]['pads'][pd] or 'NO NET'})" for r, pd in declared if parts[r]["pads"][pd] != name)
+        if bad:
+            out.append(_f(FAIL, "SPEC_DECLARED_UNWIRED", f"{name}: spec pins not on this net on the board: {listed(bad)}",
+                          refs=sorted({b.split(".")[0] for b in bad})))
+        if not complete:
+            continue
+        extra = sorted(f"{r}.{pd}" for r, pd in map(tuple, net_pads.get(name, ())) if (r, pd) not in declared and r in comps)
+        if extra:
+            out.append(_f(FAIL, "SPEC_WIRED_UNDECLARED", f"{name}: board pads on this net that the spec does not list: {listed(extra)}",
+                          refs=sorted({e.split(".")[0] for e in extra})))
+    return out
+
+
 def check_spec_nets(facts, spec):
     """DRC proves the copper matches the board's OWN netlist. It cannot see a
     pad that was never put on its net: a one-pad net has no ratsnest edge
@@ -1763,6 +1790,7 @@ def check_spec_nets(facts, spec):
                           f"{name}: the spec ties these pads together, the board "
                           f"has them on different nets — {desc}",
                           refs=sorted({x.split('.')[0] for v in groups.values() for x in v})))
+    out += _spec_wiring(parts, facts.get("net_pads") or {}, nets, comps)
     if unresolved:
         out.append(_f(WARN, "SPEC_PIN_UNRESOLVED",
                       f"{len(unresolved)} spec pin(s) match no pad and no pinmap "
