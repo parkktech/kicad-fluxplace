@@ -23,7 +23,6 @@ failure is soft: a part with no data is reported as UNCHECKED, never silently
 passed and never a hard abort over an API hiccup.
 """
 import json
-import os
 import re
 import time
 import urllib.error

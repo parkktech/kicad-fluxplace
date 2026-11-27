@@ -121,20 +121,24 @@ def check(mpns, need=100, cache_path=None, refresh=False, log=print, budget=None
     if budget is None:
         budget = float(S._redact_setting("lookup_budget_s"))
     t0, out, fatal, done = time.time(), {}, None, 0
+
+    def err(why):
+        return {"grade": "ERR", "row": None, "why": why}
+
     for mpn in sorted(set(m for m in mpns if m)):
         hit = cache.get(mpn)
         age = time.time() - (hit or {}).get("_t", 0)
         if hit and hit.get("_neg") and age < NEG_TTL:
-            out[mpn] = {"grade": "ERR", "row": None, "why": hit.get("why") or "cached failure"}
+            out[mpn] = err(hit.get("why") or "cached failure")
             continue
         if hit and not hit.get("_neg") and age < CACHE_TTL:
             out[mpn] = {"grade": grade(hit.get("row"), need), "row": hit.get("row")}
             continue
         if fatal:
-            out[mpn] = {"grade": "ERR", "row": None, "why": fatal}
+            out[mpn] = err(fatal)
             continue
         if budget and time.time() - t0 > budget:
-            out[mpn] = {"grade": "ERR", "row": None, "why": "lookup budget spent"}   # not cached: the next run starts here
+            out[mpn] = err("lookup budget spent")   # not cached: the next run starts here
             continue
         done += 1
         if done % 10 == 0 and cache_path:
@@ -144,12 +148,13 @@ def check(mpns, need=100, cache_path=None, refresh=False, log=print, budget=None
         except ImportError as e:
             fatal = _why(e)
             log(f"    ! LCSC lookups stopped: {fatal}")
-            out[mpn] = {"grade": "ERR", "row": None, "why": fatal}
+            out[mpn] = err(fatal)
             continue
         except Exception as e:
             log(f"    ! LCSC {mpn}: {e}")
-            cache[mpn] = {"_t": time.time(), "_neg": True, "why": _why(e), "row": None}
-            out[mpn] = {"grade": "ERR", "row": None, "why": _why(e)}
+            why = _why(e)
+            cache[mpn] = {"_t": time.time(), "_neg": True, "why": why, "row": None}
+            out[mpn] = err(why)
             continue
         cache[mpn] = {"_t": time.time(), "row": row}
         out[mpn] = {"grade": grade(row, need), "row": row}
