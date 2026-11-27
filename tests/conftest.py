@@ -16,6 +16,13 @@ def _events_isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _shared_cache_isolated(monkeypatch, tmp_path):
+    """The shared per-user lookup cache (~/.cache/fluxplace) is a tmp dir in tests."""
+    monkeypatch.setenv("FLUXPLACE_CACHE_HOME", str(tmp_path / "_shared_cache"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _pair_rows_cache_reset():
     """gaps._PAIR_ROWS is keyed by copper content: a test that mocks a failing measure must not see a row cached by another test."""
     from fluxplace import gaps
