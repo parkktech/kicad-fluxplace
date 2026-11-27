@@ -32,7 +32,9 @@ import subprocess
 import sys
 import datetime
 import fnmatch
+import tempfile
 
+from fluxplace import drcguard as DG
 from fluxplace import progress as PG
 
 REG_DEFAULT = os.path.join("docs", "resume", "boards.json")
@@ -137,8 +139,20 @@ def copper_fingerprint(path):
     return hashlib.sha1(json.dumps(sorted(repr(r) for r in rows)).encode()).hexdigest()
 
 
-def measure(board):
-    """Error-level DRC of a temp copy (zones refilled): unconnected, shorts, errors, ... (progress.measure)."""
+def measure(board, base_pro=None):
+    """Error-level DRC of a temp copy (zones refilled): unconnected, shorts, errors, ... (progress.measure).
+    base_pro: the version's project (start.kicad_pro). When the board's own .kicad_pro has different DRC rules (the router rewrites
+    them) the board is measured under base_pro, so accept judges every board by the same rules."""
+    own = os.path.splitext(os.path.abspath(board))[0] + ".kicad_pro"
+    if base_pro and os.path.isfile(base_pro) and os.path.isfile(own):
+        drift = DG.rules_drift(own, base_pro)
+        if drift:
+            print("rules drift: %s differs from %s in %d DRC setting(s) (%s); measuring under the project rules"
+                  % (os.path.basename(own), os.path.basename(base_pro), len(drift), ", ".join(drift[:4])))
+            with tempfile.TemporaryDirectory(prefix="fxver-") as td:
+                shutil.copy(board, os.path.join(td, "b.kicad_pcb"))
+                shutil.copy(base_pro, os.path.join(td, "b.kicad_pro"))
+                return PG.measure(os.path.join(td, "b.kicad_pcb"))
     return PG.measure(board)
 
 
@@ -264,6 +278,21 @@ def cmd_step(a):
     print("NOW: step in progress = " + a.text)
 
 
+def placement_refusal(cfg, board):
+    """'' or the refusal text: readychecks.gate_refusal on the registry's [config] constraints (+ spec) paths (relative to the repo root).
+    No constraints configured: the check cannot run and says so (never a silent pass)."""
+    cpath = cfg.get("constraints")
+    if not cpath:
+        print("placement classes: NOT CHECKED (registry config has no 'constraints' path)")
+        return ""
+    from . import constraints as C, readychecks as KO
+    spec = None
+    if cfg.get("spec"):
+        with open(os.path.join(ROOT, cfg["spec"])) as fh:
+            spec = json.load(fh)
+    return KO.gate_refusal(board, C.load(os.path.join(ROOT, cpath)), spec)
+
+
 def cmd_accept(a):
     r = load()
     cfg = config(r)
@@ -276,7 +305,7 @@ def cmd_accept(a):
             copper_fingerprint(b) == copper_fingerprint(os.path.join(ROOT, cur)):
         print("no change: %s has the same copper as CURRENT (%s)" % (rel(b), cur))
         sys.exit(4)
-    m = measure(b)
+    m = measure(b, os.path.join(ROOT, v, "start.kicad_pro"))
     islands = m.pop("islands", None)
     prev = e["history"][-1]["metrics"] if e.get("history") else None
     if prev and not a.allow_worse:
@@ -284,6 +313,10 @@ def cmd_accept(a):
         if worse:
             sys.exit("refused: %s rose (%s -> %s). Use reject, or --allow-worse with a note saying why."
                      % (",".join(worse), fmt(prev), fmt(m)))
+    if a.allow_worse:                                      # readychecks T2: --allow-worse never carries a placement-class FAIL
+        why = placement_refusal(cfg, b)
+        if why:
+            sys.exit("refused: %s (--allow-worse does not bypass it)" % why)
     try:
         PG.checkpoint(b, workdir=os.path.join(ROOT, v), note=a.note, metrics=dict(m),
                       measure_fn=lambda _b: dict(m, islands=islands), allow_new_shorts=a.allow_worse)

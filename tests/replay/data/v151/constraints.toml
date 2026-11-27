@@ -1,0 +1,114 @@
+# UTV Comms Bridge — engineering constraints for the fluxplace review gate.
+# Every block here is a rule an outside reviewer applied to V1.4 by hand
+# (Review Document.pdf, 2026-09-03). The gate now applies them on every
+# fab/deliver run. See docs/DECISIONS.md D70.
+
+[env]   # 2026-09-04 (user): mostly inside vehicle cabs, UTVs used 30..100 F ambient;
+        # Arizona heat is the dominant risk. Floor relaxed -40 -> -20 C (30 F with
+        # margin); ceiling stays +85 C for a sun-soaked cab and enclosure rise.
+temp_min_c = -20
+temp_max_c = 85
+vibration = "high"
+moisture = "outdoor"
+transient = "auto-12v"
+location = "exposed-vehicle"
+
+# The board is assembled in China (user directive 2026-09-03): every MPN is
+# graded on JLCPCB/LCSC live stock as well as DigiKey/Mouser. CN_ABSENT and
+# CN_NONE fail the gate; consigned parts are waived by name with the reason.
+[sourcing]
+china = true
+cn_need = 100
+[sourcing.cn_alias]         # our MPN -> what LCSC catalogues it under
+"G6K-2F-Y DC5" = "G6K-2F-Y-5V"
+"HX5084FNLT" = "HX5084FNL"
+"BAT60AE6327HTSA1" = "BAT60AE6327"
+"0436500215" = "43650-0215"      # LCSC lists the Molex header under the hyphenated form (C293740)
+
+# Documentation is a build requirement (D70q): every MPN's datasheet lives in
+# docs/datasheets with datasheets.json; every pinmap cites its page.
+[docs]
+datasheets = "docs/datasheets"
+strict = true
+project_libs = ["hardware/lib/footprints/utv-comms.pretty"]   # footprints drawn here need a landpattern citation (D70x)
+
+# Rule 1: Pin 1 (PTT) is straight copper J1 -> J2. No component ever touches it.
+[nets.PTT_THRU]
+straight_copper = ["J1A:1", "J2A:1"]
+
+# RF: GNSS feed, antenna switch and both antenna paths at 50 ohm, graded on
+# the layer the copper is on. One layer transition allowed per net.
+[rf]
+target_z = 50
+tolerance_pct = 10
+max_vias = 1
+neck_max_mm = 2.5           # a +-0.6 mm neck that straddles a segment joint reads as ~2.4 mm
+
+# Gigabit Ethernet: P and N within 1 mm (IEEE allows more; EMI does not)
+[pairs.ETH_]
+impedance_diff = 100
+skew_mm = 1.0
+
+[si]
+default_skew_mm = 1.0
+
+# +5V bulk: the spec's ride-through claim is checked against C12+C13.
+# D70: the requirement is restated as brown-out smoothing + PWRFAIL warning,
+# not "tens of ms" — that would need ~80,000 uF at 1 A.
+[power."+5V"]
+max_current_ma = 4000
+pour = true
+holdup_ms = 0.5
+nominal_v = 5.0
+min_v = 4.75
+load_a = 1.0
+
+# Input TVS D1 (SMDJ24A, Vc 38.9 V @ Ipp) ahead of Q1 (40 V P-FET).
+[protection]
+tvs_ref = "D1"
+downstream_max_v = 40
+clamp_v = 38.9
+min_margin_pct = 15
+
+[pairs.USB_]                # USB 2.0 HS: a few mm is fine, tens is not
+impedance_diff = 90
+skew_mm = 3.0
+
+# Waivers are DECISIONS, recorded here so the gate stays honest (D70):
+#  - J1A/J2A/J6/J9 JST GH/SH headers are rated -25..+85 C. The box is a sealed
+#    enclosure on the vehicle; a -25 C connector floor is accepted for V1.5 and
+#    the -40 C harness-connector question is an open item for the enclosure
+#    review (candidates: Molex Pico-Lock -40..+105). Re-open before production.
+[review]
+#  - L1 XAL7070-153MEC is sold by Coilcraft direct (D37): neither distributor
+#    nor Nexar describes it, so the part-data and datasheet checks cannot run.
+#    Coilcraft's own sheet is the reference; the 3D/land come from Coilcraft.
+#  - L1 XAL7070-153MEC (Coilcraft-direct, D37): only Nexar describes it, and the
+#    evaluation plan's 10-lookups/day was spent proving that. Re-run
+#    `fluxplace datasheets` + `review --refresh` tomorrow to fetch its sheet
+#    and drop these two waivers.
+#  - China stock (D70v): these parts have no or thin LCSC stock and no
+#    like-for-like LCSC-stocked equivalent without a footprint or spec change.
+#    PCBWay turnkey buys them from DigiKey/Mouser (stock in brackets); for a
+#    JLCPCB build they are consigned. ANT1 Taoglas patch (DK 1.6k), BT1/BT2
+#    Seiko MS621FE (DK 29k), L1 Coilcraft XAL7070 (direct), J12 Amphenol RJHSE-5380
+#    (DK 9.7k), C12/C13 Panasonic EEU-FR1C152 (DK), R12/R13 Yageo AC0603FR-135K1L
+#    (DK; no 135k at LCSC), T3 HX5084FNL (LCSC 61, DK 1.8k/8.7k).
+# D70x (2026-09-04): T3 -> HX5084NLT (LCSC 1563), J12 hyphen fix, R12/R13 -> AC0603FR-075K1L,
+# C12/C13 back in stock: those waivers are gone.
+# Temperature waivers ACCEPTED by the user 2026-09-04 ("the temperature ranges are fine"):
+#  - K1 G6K-2F-Y: Omron's sheet says -40..+70 C (DigiKey said +85).
+#  - BT1/BT2 MS621FE: Seiko's sheet says -20..+60 C.
+#  - J1A/J2A/J6/J9 JST GH/SH (-25 C) clear the -20 C floor now; waiver dropped.
+# Still USER DECISIONS pending:
+#  - L1: consign (D70z). BT1/BT2: PCBWay sources (D70aa). ANT1: DNP on cab units, external puck via J4.
+waive = ["TEMP_RATING:^K1 ", "TEMP_RATING:^BT[12] ",
+         "PART_DATA_UNAVAILABLE:L1", "DATASHEET_MISSING:^L1 ",
+         "CN_ABSENT:^(ANT1|BT1 BT2|L1) ", "CN_NONE:^(ANT1|BT1 BT2) "]
+
+[project]
+version = "1.5.1"
+
+[silk.title]
+text = "Parkktech.com v{version}"
+side = "F"

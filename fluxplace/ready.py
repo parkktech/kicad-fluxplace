@@ -231,10 +231,11 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         from . import routediag as RD, netclass as NC
         B = RD.load(board)
         cls = NC.classify(B, cons, spec)
+        detail["_cls"] = cls
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
                                ("floors", "design-rule floors", QS.check_floors),
                                ("sides", "placement sides", QS.check_placement_sides),
-                               ("crowding", "crowding", QS.check_crowding)):
+                               ("crowding", "crowding", QS.check_crowding), ("pinswap", "pin choice", QS.check_pinswap)):
             n0 = len(sess.open)
             fn(sess, B, cons, cls=cls, spec=spec)
             new = sess.open[n0:]
@@ -245,12 +246,17 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)",
                                 "sides": "[placement] sides decided",
-                                "crowding": "no side over the crowding limits, or answered"}[key]))
+                                "crowding": "no side over the crowding limits, or answered",
+                                "pinswap": "no sealed [pinswap] pad with an escapable alternative, or decided"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))
         lines.append(budget_line(spec, cons, B, rows, planes, detail))
         lines.append(density_line(spec, cons, B))
+        from . import readychecks as KO
+        pl, pf = KO.placement_line(B, cons, spec)
+        lines.append(pl)
+        detail["placement_classes"] = pf
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -258,6 +264,10 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    from . import readychecks as KO
+    sl, sd = KO.stage_lines(cons, npairs=sum(1 for i in detail.pop("_cls", {}).values() if i["class"] == "pair") // 2)
+    lines += sl
+    detail.update(sd)
     lines += spice_lines(board, cons, detail)
     from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
     LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED, WARN) for x in lines) else "refused",
@@ -298,7 +308,7 @@ def density_line(spec, cons, B):
     txt = r["line"][len("density: "):]
     if over:
         return _line("density", FAIL, f"FAIL {txt}", [f"density: side {', '.join(over)} over {lim['fail'] * 100:.0f} % courtyard utilisation"])
-    return _line("density", PASS, ("WARN " if worn else "") + txt)
+    return _line("density", WARN if worn else PASS, txt)
 
 
 def _fixed_inputs(spec, cons, B):
@@ -435,13 +445,21 @@ def budget_line(spec, cons, B, rows, planes, detail):
     note = "".join("; " + t for t in (BG.summary(tab), f"{len(under)} rail class(es) narrower than the plan ({', '.join(under)})" if under else "") if t)
     kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
     items = BG.open_items(tab)
-    if not items:
-        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
+    hard = [r for r in tab if r["verdict"] == "fail" and r["hard"]]
+    soft = [r for r in tab if r["verdict"] == "fail" and not r["hard"]]
     by = {}
     for code, text in items:
         by.setdefault(code, []).append(text)
-    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}",
-                      [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]), open_items=len(items))
+    blockers = [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]
+    if hard:                                                   # a hard fail row is FAIL whatever else is open
+        names = ", ".join(r["name"] for r in hard[:6]) + (f" (+{len(hard) - 6})" if len(hard) > 6 else "")
+        return dict(_line("budgets", FAIL, f"{len(hard)} hard row(s) fail ({names}); {len(tab)} row(s): {kinds}{note}",
+                          [f"{r['kind']} {r['name']} {r['metric']}: {r.get('detail', '')}"[:200] for r in hard[:10]] + blockers), open_items=len(items))
+    if items:
+        return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}", blockers), open_items=len(items))
+    if soft:                                                   # soft fail rows are listed, never PASS
+        return _line("budgets", OPEN, f"{len(soft)} soft row(s) fail, none hard; {len(tab)} row(s): {kinds}{note}")
+    return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
 
 
 def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
@@ -488,6 +506,13 @@ def sync_netclasses(board, cons, log=lambda *a, **k: None, write=False):
         if write and managed:
             C.inject_netclasses(pro, cons, log=log, board=board)
         after = C.netclass_mismatch(pro, cons, board) if (write and managed) else before
+        if not write:                      # a class only missing is what the pipeline writes into its stage copy: not a conflict
+            miss = {x[len("managed missing "):] for x in before if x.startswith("managed missing ")}
+            pend = [x for x in before if x.startswith("managed missing ") or
+                    (x.startswith("managed pattern ") and x[len("managed pattern "):].split("=", 1)[0] in miss)]
+            after = [x for x in before if x not in pend]
+            if pend and not after:
+                return _line("netclasses", PASS, f"INFO: {len(miss)} managed class(es) not in the project yet; the pipeline writes them to its stage copy ({', '.join(sorted(miss)[:3])})")
     except (OSError, ValueError) as e:
         return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: project file not readable or writable ({e})", [f"NETCLASS_MISMATCH {e}"])
     if after:
@@ -540,6 +565,9 @@ def cmd_ready(a):
         detail["models"] = model_res
     if board and os.path.exists(board):
         lines.append(sync_netclasses(board, cons))
+    from . import kickoff as KO                    # T4: inputs checklist (absolute manifest, .kicad_pro, derived_from, doctor)
+    ko_lines, ko_man = KO.inputs_lines(board, a.spec, getattr(a, "constraints", None), cons, ds, (facts or {}).get("mpn_map_path"))
+    lines += ko_lines
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
     nopen = len(sess.open) + sum(l.get("open_items", 0) for l in lines)      # OPEN lines with no question behind them count too
@@ -557,7 +585,9 @@ def cmd_ready(a):
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
                        "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
-                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", [])}, fh, indent=1)
+                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", []),
+                       "placement_classes": detail.get("placement_classes", []), "stages": detail.get("stages", []),
+                       "pair_budget": detail.get("pair_budget")}, fh, indent=1)
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)
@@ -566,6 +596,10 @@ def cmd_ready(a):
                 json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
+    if path and not (nfail or nopen):              # T5: the kickoff stamp, only when ready passes
+        KO.write_stamp(KO.stamp_path(stem), ko_man, KO.shas(ko_man, facts), lines)
+    if path:
+        KO.annotate_ready_json(stem + ".ready.json", ko_man)
     from . import placegaps as PG                  # detect-only (PLAN-PLACE-GAPS phase 0): the parts gaps; changes no result, no board
     PG.detect_stage("ready", board or a.spec, cons, spec, os.path.dirname(stem) or ".", base=os.path.basename(stem) + ".placegaps", ds_dir=ds,
                     parts_gate=detail.get("gate"), printer=None if getattr(a, "json", False) or getattr(a, "quiet", False) else print)

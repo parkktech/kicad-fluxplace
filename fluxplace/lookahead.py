@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 
+from . import codefreeze
 from . import routediag as RD
 from . import events as EV
 from . import snapshot as SN
@@ -333,9 +334,6 @@ def strip(board_in, board_out):
     return board_out
 
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
 def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None, lean=True, threads=8):
     """Route a copy of `board` unlocked, throw-away. lean (default, L9): the router alone on the signal nets (lean_krt /
     lean_freerouting); lean=False: the pipeline route stage (the verify ghost, which must route like the real flow).
@@ -639,7 +637,7 @@ def _pipeline_ghost(a, board, outdir, budget_min, router="krt-whole", passes=Non
     copy = os.path.join(outdir, "in.kicad_pcb")
     shutil.copy(board, copy)
     PL._sidecar(board, copy)
-    cmd = [PY, os.path.join(REPO, "cli.py"), "pipeline", copy, "--workdir", os.path.join(outdir, "run")]
+    cmd = [PY, os.path.join(codefreeze.root(), "cli.py"), "pipeline", copy, "--workdir", os.path.join(outdir, "run")]
     cons_path = getattr(a, "constraints", None)
     if cons_path and os.path.exists(cons_path):   # a ghost is a sketch: stage gates off (Fable fix: the pairs gate stopped every ghost, exit 5)
         text = open(cons_path).read()
@@ -907,7 +905,7 @@ def _spawn(job, timeout, entry="lookahead:_worker"):
     import subprocess
     from fluxplace import procs as _procs
     mod, fn = entry.split(":")
-    code = (f"import sys; sys.path.insert(0, {REPO!r}); "
+    code = (f"import sys; sys.path.insert(0, {codefreeze.root()!r}); "
             f"from fluxplace import {mod} as M; M.{fn}({job['jobfile']!r})")
     try:
         _procs.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)

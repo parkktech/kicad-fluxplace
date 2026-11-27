@@ -134,3 +134,9 @@ Give each subagent only its brief and `W`; do not forward earlier stages' transc
 A stage (or `pipeline`) that exits 3 has questions in `<board>.questions.json` and wrote nothing. Relay them to the user and wait;
 re-run with `--answer ID=CHOICE` only with the user's answers. Never answer them yourself; never `--assume-defaults` for a
 deliverable (`fab`/`deliver` refuse assumed boards). `docs/commands/questions.md`.
+
+## Frozen code (w93)
+A run copies `cli.py` + `fluxplace/` + `plugins/` to `<workdir>/.code/` at start (`codefreeze.freeze`, ~0.02 s, ~6 MB) and every
+import, rung job, stage interpreter and nested run reads that copy (`FLUXPLACE_CODE`, `codefreeze.root()`), so a pull / merge /
+branch switch mid-run changes nothing. sha + dirty flag: first output line and `state.json` `code`. A resume in the same workdir reuses
+the copy; to take new code, `rm -rf <workdir>/.code`. The copy goes away with the workdir.

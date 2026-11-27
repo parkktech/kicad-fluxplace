@@ -23,6 +23,7 @@ import sys
 import time
 
 from . import routeconn as RC
+from . import kickoff as KO_
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "trace-finish", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
@@ -225,7 +226,7 @@ class Ctx:
     def __init__(self, a, work, board_in, state):
         self.a, self.work, self.board_in, self.state = a, work, board_in, state
         from . import constraints as C
-        self.cons_path, self.spec_path = a.constraints, a.spec
+        self.cons_path, self.spec_path = (os.path.abspath(x) if x else x for x in (a.constraints, a.spec))   # w84: close's rung children run in the work dir: a relative path is gone there
         from . import questions as QS
         self.answers = dict((state or {}).get("answers") or {})
         self.answers.update(QS.parse_answers(getattr(a, "answer", None)))
@@ -294,6 +295,14 @@ def st_ready(c, n, board):
         out["line"] += f" (netclass write skipped: {type(e).__name__})"
     if und:
         out["undocumented"] = und.strip()
+    try:                                    # T5: the stamp ready wrote beside the board travels with the run
+        from . import kickoff as KO
+        from . import reportdir as RD_
+        sp = KO.stamp_path(RD_.redirect(c.a, os.path.splitext(board)[0]))
+        if os.path.isfile(sp):
+            shutil.copy2(sp, os.path.join(c.work, "kickoff.json"))
+    except OSError:
+        pass
     return out
 
 
@@ -1210,6 +1219,22 @@ def _placement_collision_gate(c, n, name, res):
                 next=col["lines"][:4] + [col["txt"], "fix the placement or waive (COLLISION:REGEX)"])
 
 
+def _placement_class_report(c, n, name, res):
+    """readychecks T2: after every placement stage the placement classes (preroute FAILs + collision gate) are counted into the stage line.
+    Report only: the collision gate above and the stage gates decide; a check that cannot run says so."""
+    board = res.get("board")
+    if name not in PLACEMENT_STAGES or res.get("verdict") not in ("pass", "warn") or not board or not os.path.isfile(board):
+        return res
+    from . import routediag as RD, readychecks as KO
+    try:
+        fs = KO.placement_findings(RD.load(board), c.cons, c.spec)
+    except Exception as e:                               # noqa: BLE001 - reported, never silent
+        return dict(res, line=f"{res.get('line', '')}; placement classes NOT CHECKED ({type(e).__name__})".lstrip("; "))
+    by = KO.summarise(fs)
+    txt = ", ".join(f"{k} {len(v)}" for k, v in sorted(by.items())) if fs else "0 FAIL"
+    return dict(res, line=f"{res.get('line', '')}; placement classes: {txt}".lstrip("; "))
+
+
 def _incremental_floorplan(c, board, out):
     """A routed board whose only unlocked parts are new and off the outline (incplace.detect): seat those parts in free space and
     touch nothing else; the stages that would re-place or re-lay copper are skipped for the rest of the run. -> result or None."""
@@ -1940,6 +1965,60 @@ def _scope_add(c, nets):
     sc["nets"] = sorted(set(sc["nets"]) | set(nets))
 
 
+def _decide_packets(c, work, name, qs):
+    """Owner packets (packets.question rows) through the AI decider.  The stage already ran with accept-open; a decided
+    "change" cannot be applied by the flow (it edits board size / stackup / a fixed constraint), so it is logged as a
+    proposal and the run goes on.  -> the questions still open ([] whenever the decider is on)."""
+    from . import decider as DC_
+    for q in qs:
+        d = DC_.decide(q, [q["found"]], c.cons, work)
+        c.answers[q["id"]] = "accept-open"
+        print(f"pipeline: {name}: DECIDED {q['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})"
+              + (" - proposal only, the flow continues accept-open: " + d["rationale"][:160] if d["choice"] != "accept-open" else ""), flush=True)
+    return []
+
+
+def _pinswap_entry(c, work, board, st):
+    """[pinswap] at pipeline entry: a sealed group pad is settled (answers, else the AI decider, else left open for the stages'
+    own question) and each decided move re-nets the pads into `0-pinswap/`; the route entry's re-net strip handles old copper."""
+    from . import boardwrite as BW_, pinswap as PS_, questions as QS_, routediag as RD_
+    S = QS_.Session(board, c.cons, c.answers, False, "pinswap")
+    S.log_dir = work                                                      # the decision log stays in the run folder
+    try:
+        PS_.ask(S, RD_.load(board), c.cons, c.spec)
+    except Exception as e:                                                # noqa: BLE001 - the stages ask the question themselves
+        print(f"pipeline: pinswap check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+        return board
+    for d in S.decided:
+        print(f"pipeline: DECIDED {d['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})", flush=True)
+    c.answers.update(S.used)
+    mv = PS_.moves(S.used)
+    out = os.path.join(work, "0-pinswap", "board.kicad_pcb")
+    nets = PS_.apply_board(board, out, mv)
+    if not nets:
+        return board
+    _sidecar(board, out)
+    v = BW_.commit(board, out, out, release=nets, reason="pinswap", log=print)
+    if not v["written"]:
+        print(f"pipeline: pinswap re-net refused: {v['why']}", flush=True)
+        return board
+    st["pinswap"] = mv
+    if c.spec is not None and c.spec_path:                               # the spec follows the board; the schematic gets a change list
+        from . import partsgate as PG_
+        rows = PS_.change_list(c.spec, mv)
+        _c, spec2 = S.apply(c.cons, c.spec)
+        shutil.copy(c.spec_path, c.spec_path + ".bak-pinswap")
+        PG_._write_json(c.spec_path, spec2)
+        c.spec = spec2
+        with open(os.path.join(work, "0-pinswap", "schematic-changes.json"), "w") as fh:
+            json.dump({"spec": os.path.abspath(c.spec_path), "moves": rows}, fh, indent=1)
+        print("pipeline: pinswap: spec updated (" + ", ".join(f"{r['ref']}.{r['from_pin']}->{r['to_pin']} {r['net']}" for r in rows)
+              + "); schematic change list 0-pinswap/schematic-changes.json", flush=True)
+    _scope_add(c, nets)
+    st["board"] = out
+    return out
+
+
 def _renet_entry(c, work, board, st, near=()):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
@@ -1973,6 +2052,38 @@ def _renet_entry(c, work, board, st, near=()):
     return out
 
 
+def _classify_update(a, stages):
+    """A BOARD that already carries routed copper and no explicit --from is an update (new schematic/BOM on a shipped board): classify it
+    against its own copper and pads and pick the entry stage.  New parts off the outline -> incremental floorplan (the re-net and swap
+    strips run inside it); pads whose net changed -> route (the re-net entry, scoped to those nets); nothing electrical changed and no
+    opens -> silk.  -> {"from", "line", ...} or None (no copper, nested run, unreadable board, open connections: today's whole flow)."""
+    if not getattr(a, "board", None) or os.environ.get("FLUXPLACE_NESTED") or not os.path.isfile(a.board):
+        return None
+    from . import renet as RN_, routediag as RD_, constraints as C_
+    try:
+        B = RD_.load(a.board)
+        cl = RN_.classify(B, (C_.load(a.constraints) or {}) if a.constraints else {})
+    except Exception as e:                                                # noqa: BLE001 - detection is advisory
+        print(f"pipeline: update classification skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+        return None
+    if not cl:
+        return None
+    if cl["new"]:
+        start = "floorplan"
+    elif cl["renet_nets"]:
+        start = "route"
+    elif _open_count(a.board, B) == 0:
+        start = "silk"
+    else:
+        print("update: routed board with open connections, not classified: whole flow", flush=True)
+        return None
+    if start not in stages:
+        return None
+    scope = "no placement/route stages" if start == "silk" else f"scope {len(cl['scope'])} nets"
+    line = f"update: re-net {len(cl['renet_nets'])} nets, {len(cl['new'])} new parts, swaps found at the seat -> from {start}, {scope}"
+    return {**cl, "from": start, "line": line}
+
+
 def _exec_stage(c, n, name, board, later=()):
     """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
     commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
@@ -2000,6 +2111,7 @@ def _exec_stage(c, n, name, board, later=()):
     res.setdefault("verdict", "pass")
     res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
     res = _placement_collision_gate(c, n, name, res)       # w83: a placement stage ends without a collision FAIL (legalised or failed, named)
+    res = _placement_class_report(c, n, name, res)         # readychecks T2: the placement classes, counted into the stage line
     if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
         g = _gate_check(c, n, name, res.get("board") or board, gk, src=board, later=later)
         res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
@@ -2015,6 +2127,11 @@ def run(a):
     if getattr(a, "board", None):
         _link_lib(work, a.board)
     saved = {k: os.environ.get(k) for k in _EV_ENV}
+    from . import codefreeze as CF
+    pre_pythonpath, pre_path, pre_frozen = os.environ.get("PYTHONPATH"), list(sys.path), os.environ.get(CF.ENV)
+    if not getattr(a, "status", False):
+        a.code = CF.freeze(work)                      # every child and lazy import of this run reads <work>/.code, not the checkout
+        print(f"pipeline: code {a.code['sha'][:12]}{' +dirty' if a.code['dirty'] else ''} frozen at {a.code['dir']}", flush=True)
     t0 = time.time()
     _ev_call(_ev_begin, a, work)
     rc = 1
@@ -2023,6 +2140,8 @@ def run(a):
         return rc
     finally:
         _ev_call(_ev_end, work, rc, t0, os.path.abspath(a.board) if getattr(a, "board", None) else None)
+        if pre_frozen is None and getattr(a, "code", None):
+            CF.release(pre_pythonpath, pre_path)
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -2048,6 +2167,10 @@ def _run(a):
                 STAGES_.insert(STAGES_.index("fanout"), "relieve")
             else:
                 STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")
+    upd = None if a.from_stage else _classify_update(a, STAGES_)
+    if upd:
+        a.from_stage = upd["from"]
+        print(upd["line"], flush=True)
     first = a.from_stage or STAGES_[0]
     last = a.to_stage or STAGES_[-1]
     i0, i1 = STAGES_.index(first), STAGES_.index(last)
@@ -2106,9 +2229,13 @@ def _run(a):
         st["board"] = board
     if "ready" in STAGES_[i0:]:
         st.pop("undocumented", None)               # the gate runs again; its bypass is re-recorded only if used again
+    if upd:
+        st["update"] = {k: upd[k] for k in ("from", "line", "new", "renet_nets", "scope")}
     sc = st.get("route_scope")
     if sc and a.board and os.path.abspath(a.board) != sc.get("input"):
         st.pop("route_scope")                       # a scope belongs to the run that made it: another BOARD argument is a normal whole-board run
+    if getattr(a, "code", None):
+        st["code"] = a.code
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
@@ -2131,6 +2258,8 @@ def _run(a):
             return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    if (c.cons or {}).get("pinswap") and os.path.isfile(board):
+        board = _pinswap_entry(c, work, board, st)
     if STAGES_[i0] in RENET_FROM and os.path.isfile(board):
         board = _renet_entry(c, work, board, st)
     led = _Ledger(work, STAGES_, i0)
@@ -2181,6 +2310,19 @@ def _run(a):
         os.environ["FLUXPLACE_STAGE"] = name
         _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
+        if name in KO_.GATED:                                  # T5: an input changed since ready passed -> ready's checklists run again first
+            ko = KO_.reopen(c, board, work)
+            if ko and ko["choice"] == "reopen":
+                rr = st_ready(c, 0, board)
+                print(f"pipeline: kickoff re-run: {rr['verdict']} - {_clip(rr.get('line', ''), 120)}", flush=True)
+                if rr["verdict"] == "blocked" and KO_.stock_only(__import__("fluxplace.reportdir", fromlist=["x"]).redirect(c.a, os.path.splitext(board)[0]) + ".ready.json"):
+                    rr = dict(rr, verdict="warn", line="WARN stock not checked (offline): " + rr.get("line", ""))
+                    print(f"pipeline: {rr['line'][:140]}", flush=True)
+                if rr["verdict"] not in ("pass", "warn"):
+                    st["stages"]["ready"] = {"verdict": rr["verdict"], "line": rr.get("line", ""), "dir": f"{i}-ready", "board": board}
+                    save_state(work, st)
+                    print(f"pipeline: kickoff checklists FAIL after an input change ({ko['changed'][0][0]}...); {name} not started (exit 1)")
+                    return 1
         led.before(prev)
         res = _exec_stage(c, i + 1, name, board, STAGES_[i + 1:])
         led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
@@ -2211,6 +2353,9 @@ def _run(a):
             with open(led.path, "a") as fh:
                 fh.write(f"{name}: {note}: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
             print(f"pipeline: {name}: {note} (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+            from . import decider as DC_
+            if ua.get("questions") and DC_.enabled(c.cons):                # w94: the AI decider settles owner packets; never suspends
+                ua["questions"] = _decide_packets(c, work, name, ua["questions"])
             if ua.get("questions") and res["verdict"] != "questions":       # B12: an owner decision suspends the flow (exit 3), resumable
                 res["verdict"] = "questions"
                 res["next"] = [f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]]

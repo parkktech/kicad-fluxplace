@@ -165,3 +165,67 @@ def line(r):
     a = " ".join(r.get("argv", []))[:90]
     s = (r.get("summary") or "").splitlines()
     return f"{r.get('ts', '?')[:19]} rc={r.get('rc')} {r.get('dur_s', 0):>6}s  {a}" + (f"  | {s[0][:60]}" if s else "")
+
+
+# ---- run records (one line per close run): a DATA log outside every code tree ----
+
+def runs_log_path():
+    """FLUXPLACE_RUNS_LOG, else $XDG_DATA_HOME|~/.local/share /fluxplace/runs.jsonl. Never inside a checkout or a frozen .code copy."""
+    p = os.environ.get("FLUXPLACE_RUNS_LOG")
+    if p:
+        return p
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "fluxplace", "runs.jsonl")
+
+
+def history_path():
+    """The committed pre-w97 history (read-only: never appended)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "corpus", "runs.jsonl")
+
+
+def _rkey(r):
+    return (r.get("run"), r.get("ts"), r.get("stage"), r.get("tool")) if r.get("run") or r.get("ts") else json.dumps(r, sort_keys=True)
+
+
+def _iter_jsonl(path):
+    """Yield the dict records of a jsonl file; unreadable file or bad lines are skipped."""
+    try:
+        fh = open(path)
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                yield r
+
+
+def read_runs(path=None):
+    """Union, de-duplicated, oldest first: the committed history + the data log (or `path` when given: just that file)."""
+    srcs = [path] if path and os.path.abspath(path) != os.path.abspath(runs_log_path()) else [history_path(), runs_log_path()]
+    out, seen = [], set()
+    for src in srcs:
+        for r in _iter_jsonl(src):
+            if _rkey(r) not in seen:
+                seen.add(_rkey(r))
+                out.append(r)
+    return out
+
+
+def import_runs(src, dst=None):
+    """Append the records of `src` (read-only) missing from `dst` (default data log). -> number added."""
+    dst = dst or runs_log_path()
+    have = {_rkey(r) for r in read_runs(dst)} if os.path.exists(dst) else set()
+    add = []
+    for r in _iter_jsonl(src):
+        if _rkey(r) not in have:
+            have.add(_rkey(r))
+            add.append(r)
+    if add:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "a") as fh:
+            fh.writelines(json.dumps(r, separators=(",", ":")) + "\n" for r in add)
+    return len(add)

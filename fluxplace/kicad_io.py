@@ -513,6 +513,31 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
             "created_nets": created}
 
 
+def _netlist_truth(netlist_xml):
+    """{(ref, pin): net name} from a kicadxml netlist."""
+    import xml.etree.ElementTree as ET
+    return {(node.get('ref'), node.get('pin')): net.get('name')
+            for net in ET.parse(netlist_xml).getroot().iter('net') for node in net.iter('node')}
+
+
+def pad_undeclared(board, netlist_xml):
+    """Wired-but-undeclared: [(ref, pin, board_net)] for board pads on a real net whose (ref, pin) the schematic netlist does
+    not carry at all. Only parts whose every schematic pin matches a pad name are judged (others: SCH_PIN_NO_PAD owns them)."""
+    truth = _netlist_truth(netlist_xml)
+    out = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        pins = {pin for r, pin in truth if r == ref}
+        names = {pad.GetPadName() for pad in fp.Pads()}
+        if not pins or not pins <= names:       # not in the schematic, or symbolic pin names that never match pad numbers (SCH_PIN_NO_PAD)
+            continue
+        for pad in fp.Pads():
+            net = pad.GetNetname()
+            if net and not net.startswith("unconnected-") and (ref, pad.GetPadName()) not in truth:
+                out.append((ref, pad.GetPadName(), net))
+    return out
+
+
 def pad_net_parity(board, netlist_xml):
     """Board pads whose net disagrees with the schematic netlist:
     [(ref, pin, board_net, sch_net)]. Pads absent from the netlist are not
@@ -520,20 +545,20 @@ def pad_net_parity(board, netlist_xml):
     need: the CM5 carrier reached routing with its ENTIRE +3V3 rail absent
     from the PCB netlist — every router routed 'everything' and DRC passed,
     all against an incomplete net set."""
-    import xml.etree.ElementTree as ET
-    truth = {}
-    for net in ET.parse(netlist_xml).getroot().iter('net'):
-        name = net.get('name')
-        for node in net.iter('node'):
-            truth[(node.get('ref'), node.get('pin'))] = name
+    truth = _netlist_truth(netlist_xml)
     diffs = []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
+        named = {}                              # pad name -> nets of its copies (twin pads: one pin, joined inside the part)
+        for pad in fp.Pads():
+            named.setdefault(pad.GetPadName(), set()).add(pad.GetNetname())
         for pad in fp.Pads():
             t = truth.get((ref, pad.GetPadName()))
             cur = pad.GetNetname()
             if t is None or cur == t:
                 continue
+            if not cur and t in named[pad.GetPadName()]:
+                continue                        # unnetted twin of a pin whose other copy carries the net: not a defect
             if (t.startswith("unconnected-") and
                     cur.startswith("unconnected-")):
                 continue                    # same meaning, per-instance names

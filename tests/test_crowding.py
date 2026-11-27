@@ -61,7 +61,7 @@ def test_ready_line_fails_only_above_density_fail(tmp_path):
     ok = RDY.density_line(None, {}, _B(tmp_path, _small(5)))
     assert ok["status"] == "PASS" and not ok["detail"].startswith("WARN")
     warn = RDY.density_line(None, {}, _B(tmp_path, _big(4), name="w.kicad_pcb"))           # 50 %
-    assert warn["status"] == "PASS" and warn["detail"].startswith("WARN")
+    assert warn["status"] == "WARN"                                                        # k1 T1: a warn is WARN, never PASS
     bad = RDY.density_line(None, {}, _B(tmp_path, _big(6), name="f.kicad_pcb"))            # 75 %
     assert bad["status"] == "FAIL" and "over 65 %" in bad["blockers"][0]
 

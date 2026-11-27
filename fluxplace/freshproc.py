@@ -27,7 +27,8 @@ def in_fresh_process(module, func, *args, timeout=None, **kwargs):
     with tempfile.TemporaryDirectory(prefix="fxfresh-") as td:
         a, r = os.path.join(td, "a.json"), os.path.join(td, "r.json")
         json.dump({"module": module, "func": func, "args": list(args), "kwargs": kwargs}, open(a, "w"), default=str)
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        from fluxplace import codefreeze
+        root = codefreeze.root()
         p = _procs.run([sys.executable, "-c", _FRESH, root, a, r], capture_output=True, text=True, timeout=timeout)
         if not os.path.isfile(r):
             raise RuntimeError(f"{module}.{func}: child exited {p.returncode} without a result: {(p.stderr or p.stdout)[-300:]}")
@@ -82,7 +83,8 @@ def run_stage(name, c, n, board, funcs):
         jp, rp = os.path.join(td, "job.json"), os.path.join(td, "res.json")
         json.dump({"name": name, "n": n, "board": board, "work": c.work, "board_in": c.board_in, "state": c.state,
                    "args": vars(c.a), "fn": _importable(funcs[name]), "snap_seq": sn.seq if sn is not None else None, "result": rp}, open(jp, "w"), default=str)
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        from fluxplace import codefreeze
+        root = codefreeze.root()
         sys.stdout.flush()
         sys.stderr.flush()
         try:

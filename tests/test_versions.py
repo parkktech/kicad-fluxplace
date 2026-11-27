@@ -3,6 +3,7 @@ import json, os, shutil, subprocess, sys
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fluxplace import versions as VS
+REAL_MEASURE = VS.measure
 
 REAL = "/var/kicad/utv-comms-bridge/docs/resume/boards.json"
 
@@ -17,7 +18,7 @@ def fake(monkeypatch):
     """basename -> metric overrides; every other board measures 2 opens, 0 shorts, 5 errors."""
     table = {}
 
-    def measure(board):
+    def measure(board, base_pro=None):
         m = {"unconnected": 2, "shorts": 0, "errors": 5, "track_opens": 0, "zone_islands": 0}
         m.update(table.get(os.path.basename(board), {}))
         return dict(m)
@@ -401,3 +402,31 @@ def test_scratch_config_skips_matching_folder_warning(tmp_path, fake, capsys):
     out = capsys.readouterr().out
     assert "stage9/b.kicad_pcb" in out
     assert "stage4/set/a.kicad_pcb" not in out
+
+
+def _pro(path, rules=None, classes=None):
+    import json
+    json.dump({"board": {"design_settings": {"rules": rules or {}, "rule_severities": {}}},
+               "net_settings": {"classes": classes or []}}, open(path, "w"))
+    return str(path)
+
+
+def test_rules_drift_ignores_class_order_and_names_the_changed_key(tmp_path):
+    from fluxplace import drcguard as DG
+    a = _pro(tmp_path / "a.kicad_pro", {"min_clearance": 0.1}, [{"name": "X", "clearance": 0.1}, {"name": "Y", "clearance": 0.2}])
+    b = _pro(tmp_path / "b.kicad_pro", {"min_clearance": 0.1}, [{"name": "Y", "clearance": 0.2}, {"name": "X", "clearance": 0.1}])
+    c = _pro(tmp_path / "c.kicad_pro", {"min_clearance": 0.2}, [{"name": "X", "clearance": 0.1}, {"name": "Y", "clearance": 0.3}])
+    assert DG.rules_drift(a, b) == []
+    assert DG.rules_drift(a, c) == ["class Y/clearance", "rules/min_clearance"]
+
+
+def test_measure_uses_the_project_rules_when_the_board_project_drifted(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(VS.PG, "measure", lambda b: seen.append(open(b[:-len(".kicad_pcb")] + ".kicad_pro").read()) or {})
+    (tmp_path / "r.kicad_pcb").write_text("x")
+    _pro(tmp_path / "r.kicad_pro", {"min_clearance": 0.2})
+    base = _pro(tmp_path / "start.kicad_pro", {"min_clearance": 0.1})
+    REAL_MEASURE(str(tmp_path / "r.kicad_pcb"), base)
+    assert '"min_clearance": 0.1' in seen[0]
+    REAL_MEASURE(str(tmp_path / "r.kicad_pcb"))
+    assert '"min_clearance": 0.2' in seen[1]

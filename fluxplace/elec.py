@@ -319,9 +319,14 @@ def check_contact_current(spec, cons, facts, mpn_map, nets, by_ref, noeval):
                 continue
             n = len(pins)
             cap = n * float(ca) * float(p.get("contact_derate", 1.0))
-            if cap < need - 1e-9:
+            cont = p.get("continuous_ma")                      # contacts carry the continuous current; bursts come from local bulk caps
+            cont = float(cont) / 1000.0 if cont is not None else need
+            if cap < cont - 1e-9:
                 out.append(_f("FAIL", "CONTACT_CURRENT", f"{c['ref']} ({mpn}) carries {net}: {n} contact(s) x {float(ca):g} A = {cap:g} A "
-                              f"< {need:g} A the rail's max_current/load", refs=[c["ref"]]))
+                              f"< {cont:g} A the rail's {'continuous_ma' if cont != need else 'max_current/load'}", refs=[c["ref"]]))
+            elif cap < need - 1e-9 and not p.get("burst_cite"):
+                out.append(_f("WARN", "CONTACT_CURRENT", f"{c['ref']} ({mpn}) carries {net}: {n} contact(s) = {cap:g} A >= continuous {cont:g} A "
+                              f"but < burst {need:g} A (max_current); set burst_cite = \"<bulk-cap / datasheet cite>\" once the local bulk caps cover it", refs=[c["ref"]]))
     return out
 
 

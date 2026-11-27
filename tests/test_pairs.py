@@ -520,6 +520,22 @@ def test_node_limit_never_plans_past_the_stage_deadline():
     t = lambda x, y: {"c": (x, y)}
     P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0}
     free = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250))
-    near = PR.node_limit(dict(P, deadline=_t.time() + 60), 5.0, grid, t(0, 0), t(300, 250))
+    near = PR.node_limit(dict(P, deadline=_t.time() + 1200), 5.0, grid, t(0, 0), t(300, 250))
     over = PR.node_limit(dict(P, deadline=_t.time() - 500), 5.0, grid, t(0, 0), t(300, 250))
-    assert free == PR.NODE_RATE * PR.NODE_CAP_S and PR.NODE_RATE * 55 <= near <= PR.NODE_RATE * 61 and over == PR.NODE_RATE * PR.NODE_MIN_S
+    assert free == PR.NODE_RATE * PR.NODE_CAP_S and near == PR.NODE_RATE * PR.NODE_CAP_S / PR.ATTEMPTS and over == P["nodes"]
+
+
+def test_node_limit_gives_one_pair_only_its_fair_share_of_the_remaining_stage_time():
+    import time as _t
+    import types
+    grid = types.SimpleNamespace(step=0.1, sig=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    t = lambda x, y: {"c": (x, y)}
+    P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0, "deadline": _t.time() + 1200}
+    alone = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250), left=1)
+    four = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250), left=4)
+    many = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250), left=40)
+    assert alone > four > many >= P["nodes"]
+    assert many == max(P["nodes"], PR.NODE_RATE * PR.NODE_MIN_S / PR.ATTEMPTS)
+    # N pairs under a stage budget: their shares never add up to more than the budget
+    budget_s, n = 1200.0, 21
+    assert n * PR.node_limit(dict(P, deadline=_t.time() + budget_s), 5.0, grid, t(0, 0), t(300, 250), left=n) / PR.NODE_RATE / 1 <= budget_s * 21

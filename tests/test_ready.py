@@ -81,7 +81,7 @@ def _cons(tmp, extra=""):
                  "".join('[[stackup.layers]]\nname = "%s"\ntype = "%s"\nthickness = %s\n%s' %
                          (l["name"] or "", l["type"], l["thickness"], "epsilon_r = %s\n" % l["epsilon_r"] if "epsilon_r" in l else "")
                          for l in LAYERS) +
-                 '[pairs.USB_]\nimpedance_diff = 90\n[rf]\ntarget_z = 50\n' + extra)
+                 '[pairs.USB_]\nimpedance_diff = 90\n[rf]\ntarget_z = 50\n[finish]\nenabled = true\n[lookahead]\nenabled = false\n[placetour]\nenabled = false\n' + extra)
     return str(c)
 
 
@@ -205,7 +205,7 @@ def test_ready_reports_and_never_writes_the_project(tmp_path):
     b, pro, cons = _pair_project(tmp_path)
     before = open(pro, "rb").read()
     line = RY.sync_netclasses(b, cons)
-    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"] and "managed" in line["detail"]
+    assert line["status"] == "PASS" and "INFO" in line["detail"] and "stage copy" in line["detail"]   # classes only missing: written by the pipeline
     assert open(pro, "rb").read() == before
 
 
