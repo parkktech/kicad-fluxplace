@@ -245,9 +245,11 @@ def test_ready_budgets_line_open_items(tmp_path):
                 separation=[{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 5.0}])
     detail = {}
     line = RDY.budget_line(None, cons, B, None, None, detail)
-    assert line["name"] == "budgets" and line["status"] == RDY.OPEN and line["open_items"] == 2
-    assert line["blockers"][0].startswith("BUDGET_NO_SOURCE 1: separation s distance")
-    assert line["blockers"][1].startswith("KEEPOUT_FLIGHT 1: USB_D_N/USB_D_P x rule-area 38,10")
+    # k1 T1: the board's hard support row fails, so the line is FAIL (never OPEN/PASS with a hard fail); open items still listed
+    assert line["name"] == "budgets" and line["status"] == RDY.FAIL and line["open_items"] == 2
+    codes = [b for b in line["blockers"] if b.split(" ")[0].isupper()]
+    assert codes[0].startswith("BUDGET_NO_SOURCE 1: separation s distance")
+    assert codes[1].startswith("KEEPOUT_FLIGHT 1: USB_D_N/USB_D_P x rule-area 38,10")
     assert {r["kind"] for r in detail["budgets"]["rows"]} == {"pair", "keepout", "keepout-flight", "separation", "swap"}
     cons["separation"][0]["source"] = "ds p.4"
     clean = RDY.budget_line(None, cons, usb_board(tmp_path, name="c.kicad_pcb"), None, None, {})
