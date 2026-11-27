@@ -59,6 +59,10 @@ def prompt(q, evidence, rule_):
     return "\n".join(L)
 
 
+def _models(cons):
+    return [str(x) for x in _ai(cons).get("models") or MODELS]
+
+
 def _cmd(cons):
     c = _ai(cons).get("decide_cmd") or os.environ.get("FLUXPLACE_AI_CMD") or DEFAULT_CMD
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
@@ -82,9 +86,24 @@ def call_model(text, cons, model):
         return None, f"model exit {r.returncode}"
     try:
         env = json.loads(r.stdout)
-        return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
     except ValueError:
         return r.stdout, ""
+    return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
+
+
+def _first_obj(s, ok):
+    """the first JSON object in `s` that `ok` accepts, else None."""
+    s = s or ""
+    i = s.find("{")
+    while i >= 0:
+        try:
+            d, _ = json.JSONDecoder().raw_decode(s[i:])
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and ok(d):
+            return d
+        i = s.find("{", i + 1)
+    return None
 
 
 def parse(out, options):
@@ -130,16 +149,17 @@ def decide(q, evidence=(), cons=None, log_dir=None):
         row = dict(hit, by="cache", cached=True)
     else:
         text, got, why = prompt(q, evidence, rule_), None, ""
-        for m in [str(x) for x in _ai(cons).get("models") or MODELS]:
+        for m in _models(cons):
             out, why = call_model(text, cons, m)
             if out is None:
                 break                                            # no model at all (offline, missing CLI, timeout): no retry
             p = parse(out, options)
-            if p:
-                got = dict(p, model=m)
-                if p["evidence"]:
-                    break
-            why = why or "no valid choice in the model answer"
+            if not p:
+                why = "no valid choice in the model answer"
+                continue
+            got = dict(p, model=m)
+            if p["evidence"]:
+                break
         if got:
             row = dict(got, by="ai", reasoned=True, cached=False)
         else:
@@ -149,21 +169,6 @@ def decide(q, evidence=(), cons=None, log_dir=None):
     if log_dir:
         _write(log_dir, row)
     return row
-
-
-def _first_obj(s, ok):
-    """the first JSON object in `s` that `ok` accepts, else None."""
-    s = s or ""
-    i = s.find("{")
-    while i >= 0:
-        try:
-            d, _ = json.JSONDecoder().raw_decode(s[i:])
-        except ValueError:
-            d = None
-        if isinstance(d, dict) and ok(d):
-            return d
-        i = s.find("{", i + 1)
-    return None
 
 
 def act(packet, cons=None, log_dir=None, key=""):
@@ -182,7 +187,7 @@ def act(packet, cons=None, log_dir=None, key=""):
                 "nets, layers and coordinates from the packet. If nothing safe exists, answer give_up with the reason.\n"
                 "Answer with ONLY the JSON action envelope.\nPacket:\n" + body[:12000])
         env, model, cached = None, None, False
-        for m in [str(x) for x in _ai(cons).get("models") or MODELS]:
+        for m in _models(cons):
             out, _why = call_model(text, cons, m)
             if out is None:
                 break
