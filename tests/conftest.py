@@ -70,3 +70,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.nodeid.startswith(SERIAL_NODEID_PREFIXES):
             item.add_marker(pytest.mark.xdist_group("serial"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "replay: slow-tier real-board replay (tests/replay); skipped unless GATE_REPLAY=1")
