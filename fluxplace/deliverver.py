@@ -630,7 +630,7 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
             notes["5-3D %s" % name] = "not produced"
     # README-FIRST
     prev_readme = open(prev["readme"], encoding="utf-8").read() if prev.get("readme") else ""
-    res = _verify_line(findings, a.fab_dir)
+    res = _verify_line(findings, a.fab_dir, getattr(a, "baseline", None))
     if findings is None:
         notes["review"] = "gate skipped (--no-review): no review json written"
     contents = "\n".join(sorted(set(
@@ -688,14 +688,22 @@ def _ancestors(board):
         d = os.path.dirname(d)
 
 
-def _verify_line(findings, fab_dir):
+def _verify_line(findings, fab_dir, baseline=None):
     lines = []
     if findings is None:
         lines.append("REVIEW  skipped (--no-review): no review json in this delivery")
     else:
-        c = Counter(f.get("level") or f.get("severity") for f in findings)
-        lines.append("REVIEW  fluxplace review: %d FAIL, %d WARN, %d INFO (review/REVIEW-*.json)"
-                     % (c.get("FAIL", 0), c.get("WARN", 0), c.get("INFO", 0)))
+        lv = lambda f: f.get("level") or f.get("severity")
+        old = [f for f in findings if f.get("baseline") == "inherited"]
+        if baseline and any(f.get("baseline") for f in findings):
+            new = Counter(lv(f) for f in findings if f.get("baseline") != "inherited")
+            inh = Counter(lv(f) for f in old)
+            lines.append("REVIEW  %d new FAIL vs %s; %d inherited FAIL, %d inherited WARN (review/REVIEW-*.json)"
+                         % (new.get("FAIL", 0), os.path.basename(baseline), inh.get("FAIL", 0), inh.get("WARN", 0)))
+        else:
+            c = Counter(lv(f) for f in findings)
+            lines.append("REVIEW  fluxplace review: %d FAIL, %d WARN, %d INFO (review/REVIEW-*.json)"
+                         % (c.get("FAIL", 0), c.get("WARN", 0), c.get("INFO", 0)))
     drc = os.path.join(fab_dir, "drc.json")
     if os.path.isfile(drc):
         try:

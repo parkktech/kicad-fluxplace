@@ -166,3 +166,11 @@ def test_no_bom_builds_board_bom_with_dnp(tmp_path):
     assert DV.is_dnp(by[("R38",)]) and by[("U1",)]["MPN"] == "U-1"
     p = DV.write_bom(rows, str(tmp_path / "o.csv"))
     assert {r["Refs"][0] for r in DV.read_bom(p)} == {"C1", "R38", "U1"}
+
+
+def test_verify_line_with_baseline_counts_new_and_inherited():
+    f = [{"level": "FAIL", "baseline": "inherited"}, {"level": "WARN", "baseline": "inherited"},
+         {"level": "WARN", "baseline": "new"}]
+    line = DV._verify_line(f, "/nonexistent", baseline="/x/W15.kicad_pcb")[0]
+    assert "0 new FAIL vs W15.kicad_pcb; 1 inherited FAIL, 1 inherited WARN" in line
+    assert "FAIL," in DV._verify_line(f, "/nonexistent")[0] and "new FAIL" not in DV._verify_line(f, "/nonexistent")[0]
