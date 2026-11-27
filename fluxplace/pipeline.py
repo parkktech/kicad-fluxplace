@@ -1217,7 +1217,7 @@ def st_review(c, n, board):
                 codes[f["code"]] = codes.get(f["code"], 0) + 1
         res["next"] = [f"{k} x{v}" for k, v in sorted(codes.items(), key=lambda kv: -kv[1])[:5]]
         res["metrics"] = {"fail": sum(codes.values()),
-                          "placement_data_fail": sum(v for k, v in codes.items() if k.startswith(("PART_DATA", "PLACEMENT_DATA")))}
+                          "placement_data_fail": sum(v for k, v in codes.items() if _placement_or_data(k))}
     except (OSError, ValueError):
         pass
     return res
@@ -1254,6 +1254,13 @@ def _residual_fail(res, c, d):
     res["residual_report"] = rp
     res["line"] += f"; residual placement findings: {sum(len(v) for v in report['violations'].values())} group(s), full list {rp}"
     return res
+
+
+def _placement_or_data(code):
+    """A review FAIL owned (gapmap) by a part-seating stage or by the data owner (spec, part choice): D71es go limit 0."""
+    from . import gapmap as GM
+    o = GM.owner(code)
+    return o == GM.OWNER_DATA or o in PLACEMENT_STAGES + ("modules", "fanout", "lookahead")
 
 
 PLACEMENT_STAGES = ("floorplan", "placetour", "place", "relieve")      # stages that seat parts: they must not hand on a collision FAIL

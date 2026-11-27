@@ -577,3 +577,12 @@ def test_k13_deferral_to_a_later_owner_still_continues(tmp_path, monkeypatch):
     rc = PL.run(_args(tmp_path, _board(tmp_path), to_stage="critroute"))
     assert rc == 0 and seen[-1] == "critroute"
     assert json.load(open(tmp_path / "W" / "state.json"))["stages"]["critroute"]["gate"]["stop"] == "deferred"
+
+
+def test_k13_placement_data_metric_uses_gapmap_owner():
+    from fluxplace import pipeline as P, gapmap as GM
+    codes = [c for c in GM._X if not c.endswith("_")]
+    data = [c for c in codes if GM.owner(c) == GM.OWNER_DATA]
+    route = [c for c in codes if GM.owner(c) == "route"]
+    assert data and route
+    assert P._placement_or_data(data[0]) and not P._placement_or_data(route[0])
