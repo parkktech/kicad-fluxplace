@@ -164,7 +164,17 @@ def chip_from_mpn(mpn):
 
 
 # ------------------------------------------------------------------ datasheets
-def resolve_dir(path, anchors=(), strict=False):
+def project_dir(ref):
+    """The directory holding the .kicad_pro of `ref` (a board / project file), looked for upward; None when there is none."""
+    d = os.path.dirname(os.path.abspath(ref)) if ref else None
+    while d and d != os.path.dirname(d):
+        if any(f.endswith(".kicad_pro") for f in os.listdir(d)):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def resolve_dir(path, anchors=(), strict=False, project=None):
     """A relative datasheet dir: beside/above each anchor file first (constraints dir, board dir, project root: the project's own,
     whatever the cwd), then as given from the cwd. `strict`: SystemExit when it resolves nowhere (the owner set it, so it must exist)."""
     if not path:
@@ -179,10 +189,14 @@ def resolve_dir(path, anchors=(), strict=False):
             if os.path.isdir(os.path.join(d, path)):
                 return os.path.join(d, path)
             d = os.path.dirname(d)
+    pd = project_dir(project)
+    if pd and os.path.isdir(os.path.join(pd, path)):
+        return os.path.join(pd, path)
     if os.path.isdir(path):
         return os.path.abspath(path)
     if strict:
-        raise SystemExit(f"[docs] datasheets = {path!r} not found beside or above {', '.join(str(a) for a in anchors if a) or 'any anchor'}, nor from {os.getcwd()}")
+        tried = [os.path.join(os.path.dirname(os.path.abspath(a)), path) for a in anchors if a] + ([os.path.join(pd, path)] if pd else [])
+        raise SystemExit(f"[docs] datasheets = {path!r} not found; tried {', '.join(tried) or 'no anchor'} (and above them), nor from {os.getcwd()}")
     return path
 
 

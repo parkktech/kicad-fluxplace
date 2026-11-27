@@ -2240,7 +2240,7 @@ def _text_ctx(a):
     import json as _json
     from fluxplace import constraints as C
     spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
-    return C.load(getattr(a, "constraints", None)), spec
+    return C.load(getattr(a, "constraints", None), getattr(a, "board", None)), spec
 
 
 def cmd_clusters(a):
