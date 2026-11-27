@@ -343,38 +343,42 @@ def undersized(board, cons, nets):
     return out, short
 
 
-def drop_dangling(board, net, tol_mm=0.05):
+def drop_dangling(board, net, tol_mm=0.05, keep=frozenset(), dry=False):
     """K14: delete the UNLOCKED tracks of `net` that end on nothing (no pad, via, other track end or zone of the net on that layer),
-    repeatedly: what a re-lay leaves of a ripped run is a stub with an open end that the solve counts as open copper. Writes `board`
-    in place. -> number of tracks removed."""
+    repeatedly: what a re-lay leaves of a ripped run is a stub with an open end that the solve counts as open copper. Tracks whose key
+    is in `keep` stay (the stubs the board already had: the solve may rely on them). `dry`: write nothing. Writes `board` in place.
+    -> number of tracks removed (dry: the set of keys that would go)."""
     import pcbnew
     b = pcbnew.LoadBoard(board)
     mm = pcbnew.ToMM
-    n_total = 0
+    n_total, dead = 0, set()
     while True:
         trs = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetname() == net]
         pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
-        pts = [(mm(v.GetPosition().x), mm(v.GetPosition().y)) for v in b.GetTracks() if v.GetClass() == "PCB_VIA" and v.GetNetname() == net]
+        pts = [(mm(v.GetPosition().x), mm(v.GetPosition().y), mm(v.GetWidth()) / 2 + 0.02) for v in b.GetTracks() if v.GetClass() == "PCB_VIA" and v.GetNetname() == net]
         zones = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net]
         gone = []
         for t in trs:
-            if t.IsLocked():
+            if t.IsLocked() or _track_key(b, t) in keep:
                 continue
             lay = t.GetLayer()
             for e in (t.GetStart(), t.GetEnd()):
                 x, y = mm(e.x), mm(e.y)
-                ok = any((px - x) ** 2 + (py - y) ** 2 <= 0.04 for px, py in pts) or any(p.HitTest(e, pcbnew.FromMM(0.05)) for p in pads)
+                ok = any((px - x) ** 2 + (py - y) ** 2 <= r * r for px, py, r in pts) or any(p.HitTest(e, pcbnew.FromMM(0.05)) for p in pads)
                 ok = ok or any(o is not t and o.GetLayer() == lay and any(abs(mm(q.x) - x) <= tol_mm and abs(mm(q.y) - y) <= tol_mm
                                                                            for q in (o.GetStart(), o.GetEnd())) for o in trs)
-                ok = ok or any(z.IsOnLayer(lay) and z.Outline().Contains(pcbnew.VECTOR2I(e.x, e.y)) for z in zones)
+                ok = ok or any(z.IsOnLayer(lay) and (z.Outline().Contains(pcbnew.VECTOR2I(e.x, e.y)) or z.HitTestFilledArea(lay, pcbnew.VECTOR2I(e.x, e.y), 0)) for z in zones)
                 if not ok:
                     gone.append(t)
                     break
         if not gone:
             break
         for t in gone:
+            dead.add(_track_key(b, t))
             b.Delete(t)
         n_total += len(gone)
+    if dry:
+        return dead
     if n_total:
         pcbnew.SaveBoard(board, b)
     return n_total
@@ -398,6 +402,7 @@ def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner,
     clearance refused: the run is re-laid by the router at the solved width, another layer or path).  Locked copper never moves.
     `rec[net]["undersized"]` = the runs left, each with the reason.  -> rc 0."""
     import shutil
+    from . import opengate as OG
     cur = src
     wd = os.path.dirname(dst)
     err = None
@@ -422,13 +427,15 @@ def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner,
                 _carry_pro(cur, ripped)
                 if not strip_keys(cur, ripped, {net: mine}):
                     continue
-                drop_dangling(ripped, net)                   # K14: what the rip cut off (a stub with an open end) goes with it
+                old_stubs = drop_dangling(cur, net, dry=True)   # K14: the stubs the board already had stay; what the rip cut off goes with it
+                drop_dangling(ripped, net, keep=old_stubs)
                 before = _open_count(cur, cons, net, track_mm, nlayers)
                 sub = {}
                 route(ripped, relaid, cons, [net], track_mm, nlayers, sig, mk_cmd, runner, left_s, sub)
                 try:
                     if os.path.exists(relaid):
-                        drop_dangling(relaid, net)
+                        drop_dangling(relaid, net, keep=old_stubs)
+                        OG.refill(relaid)                          # K14: the solve credits zone fills: a router output carries stale ones
                     short2 = undersized(relaid, cons, {net})[1]
                     still = _open_count(relaid, cons, net, track_mm, nlayers)
                 except Exception:                            # noqa: BLE001 - unmeasurable trial: dropped
