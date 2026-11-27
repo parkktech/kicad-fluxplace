@@ -47,7 +47,8 @@ def _drc_gate_off_for_synthetic_boards(monkeypatch, request):
 SERIAL_NODEID_PREFIXES = (
     "tests/test_core.py::test_adaptive_fanout_priority",   # default arg tmpdir=/tmp/fluxtest_ff
     "tests/test_core.py::test_constraints_ingest",         # default arg path=/tmp/fluxtest_cons.toml
-    "tests/test_routefr.py::",                             # stall/timing assertions fail under -n 8 load (2026-11-26 main-all run), pass serially
+    "tests/test_routefr.py::",
+    "tests/test_lookahead.py::test_stage_runs_each_ghost_and_drops_a_failed_one",   # load flake (ledger row 219), fails under -n 8                             # stall/timing assertions fail under -n 8 load (2026-11-26 main-all run), pass serially
 )
 
 
