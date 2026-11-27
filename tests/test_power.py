@@ -460,3 +460,19 @@ def test_power_width_value_is_a_shortfall_so_a_partial_widen_scores_lower():
     a, b, c = val(0.15), val(0.4), val(0.8)
     assert a > b > 0 and a < 30.0 + 1e-9 and 0 < b < a
     assert c == 0 or c < b
+
+
+def _dups(path):
+    from fluxplace import dedupe
+    return len(dedupe.duplicates(open(path, errors="surrogateescape").read()))
+
+
+def test_widen_never_stacks_an_exact_duplicate_under_a_wide_twin(tmp_path):
+    """W68: two unlocked narrow tracks with the same ends (the second reversed): widening both made two identical wide tracks
+    (DUPLICATE_COPPER at the route gate's close commit). The second is now removed as covered by the first."""
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (18, 6, 2, 6, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert _dups(out) == 0 and len(_g4_tracks(out, "VBAT")) == 1, _g4_tracks(out, "VBAT")

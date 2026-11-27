@@ -1056,6 +1056,20 @@ def _run_targets(board, cons):
     return out
 
 
+def _covered_by_twin(b, t, width_mm):
+    """W68: another track of `t`'s net and layer with the same two ends (either order, to 0.1 um) and a width >= width_mm is on `b`."""
+    import pcbnew
+
+    def pt(v):
+        return round(pcbnew.ToMM(v.x), 4), round(pcbnew.ToMM(v.y), 4)
+
+    def ends(o):
+        return {pt(o.GetStart()), pt(o.GetEnd())}
+    mine = ends(t)
+    return any(o is not t and o.GetClass() == "PCB_TRACK" and o.GetNetCode() == t.GetNetCode() and o.GetLayer() == t.GetLayer()
+               and pcbnew.ToMM(o.GetWidth()) >= width_mm - 1e-6 and ends(o) == mine for o in b.GetTracks())
+
+
 def widen(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
@@ -1193,7 +1207,7 @@ def widen(board, cons, out, nets=None, protect=()):
             nt.SetLayer(t.GetLayer())
             nt.SetNetCode(t.GetNetCode())
             nt.SetLocked(False)                            # W37: the near part overlays unlocked; a locked original stays whole
-            if not locked:
+            if not locked and not _covered_by_twin(b, nt, near_w):    # W68: no exact duplicate of a neck piece that is already there
                 b.Add(nt)
             sp = pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1]))
             if not locked:
@@ -1208,7 +1222,10 @@ def widen(board, cons, out, nets=None, protect=()):
             wt.SetLayer(t.GetLayer())
             wt.SetNetCode(t.GetNetCode())
             wt.SetLocked(False)
-            b.Add(wt)
+            if not _covered_by_twin(b, wt, chosen):      # W68: a piece as wide with the same ends is already there (an earlier pass)
+                b.Add(wt)
+        elif _covered_by_twin(b, t, chosen):             # W68: a track with the same ends is already as wide: widening this one would stack an exact duplicate
+            b.Remove(t)
         else:
             t.SetWidth(pcbnew.FromMM(chosen))
         if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)
