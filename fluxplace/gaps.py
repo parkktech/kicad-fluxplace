@@ -2324,11 +2324,11 @@ def _blockers_of(board, gaps, skip=(), r=WINDOW_MM):
     try:
         import pcbnew
         rows = _board_rows(board)
+        R = pcbnew.FromMM(r)
         out = set()
         for g in gaps:
             if not g.get("at"):
                 return None
-            R = pcbnew.FromMM(r)
             cx, cy = pcbnew.FromMM(g["at"][0]), pcbnew.FromMM(g["at"][1])
             x0, y0, x1, y1 = cx - R, cy - R, cx + R, cy + R
             own = set(g.get("nets") or [])
@@ -2351,13 +2351,12 @@ def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, 
         man_sha = CX.sha_file(BW.done_path(board))
     except Exception:
         man_sha, RL = None, None
+    nets = sorted({x for g in targets for x in g.get("nets") or []})
     pads = []
     try:
-        nets = {x for g in targets for x in g.get("nets") or []}
         pads = [[nm, ref, round(x / 1e6, 3), round(y / 1e6, 3)] for nm, ref, x, y in _board_rows(board)["pads"] if nm in nets][:60]
     except Exception:
         pass
-    router = None
     try:
         rl = RL.resolve()
         router = {"dir": rl["dir"], "py": rl["py"], "version": rl.get("version"), "commit": rl.get("commit")}
@@ -2367,13 +2366,13 @@ def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, 
     return {"schema": 1, "run": run_id, "attempt": n, "round": rnd, "kind": kind, "rung": rung,
             "input": {"board": board, "board_sha": bsha, "rules_sha": CX.sha_files([cons_path, base + ".kicad_pro", base + ".kicad_dru"]),
                       "cons_hash": cons_hash, "manifest_sha": man_sha},
-            "targets": {"gap_ids": [g["id"] for g in targets], "nets": sorted({x for g in targets for x in g.get("nets") or []}),
+            "targets": {"gap_ids": [g["id"] for g in targets], "nets": nets,
                         "pads": pads},
             "blockers": blockers,
             "params": {"budget_s": round(ctx["budget_s"], 1), "rung_cap_s": al["allow_s"], "krt_max": KRT_MAX,
                        "krt_window_mm": KRT_WINDOW_MM, "protect_n": len(ctx.get("protect") or ()), "inproc": bool(ctx.get("inproc")),
                        "pair_fallback": ctx.get("pair_fallback")},
-            "router": dict(router or {}, order=sorted({x for g in targets for x in g.get("nets") or []}),
+            "router": dict(router, order=nets,
                            seed=((ctx.get("cons") or {}).get("router") or {}).get("seed")),
             "deadline": {"stage_mono": deadline, "reserve_s": reserve, "hard_mono": al["hard"], "child_mono": al["child"],
                          "slack_s": al["slack"], "allow_s": round(al["allow_s"], 1),

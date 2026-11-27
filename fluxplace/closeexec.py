@@ -38,8 +38,7 @@ class RungFailure(RuntimeError):
 def tail(s, n=600):
     if isinstance(s, bytes):
         s = s.decode("utf-8", "replace")
-    s = (s or "").strip()
-    return s[-n:]
+    return (s or "").strip()[-n:]
 
 
 def sha_file(p):
@@ -73,7 +72,7 @@ def allowance(stage_deadline, now, cap_s, reserve, slack_s=KILL_SLACK_S, min_s=M
         return None
     hard = now + min(avail, cap_s)
     slack = min(slack_s, 0.1 * (hard - now))
-    return {"hard": hard, "child": hard - slack, "slack": slack, "allow_s": hard - now, "work_s": hard - slack - now}
+    return {"hard": hard, "child": hard - slack, "slack": slack, "allow_s": hard - now}
 
 
 def left(deadline, cap=None, floor=1.0):
@@ -86,13 +85,6 @@ def left(deadline, cap=None, floor=1.0):
 
 def expired(deadline):
     return deadline is not None and mono() >= deadline
-
-
-def env_deadline(env=None):
-    try:
-        return float((os.environ if env is None else env).get(ENV_DEADLINE))
-    except (TypeError, ValueError):
-        return None
 
 
 # ---- phase marks (written by the child and its descendants, read by the parent) ----
@@ -177,6 +169,17 @@ def phase_times(marks):
 
 # ---- attempt record ----
 
+def _dump_atomic(path, obj, **kw):
+    """Write `obj` as JSON via a temp file and rename (best effort)."""
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh, sort_keys=True, **kw)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 class AttemptRecord:
     """work/close/attempt-NNN.json: written before the child is launched (state "launched"), completed on exit (state "done")."""
 
@@ -189,12 +192,9 @@ class AttemptRecord:
     def _write(self):
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as fh:
-                json.dump(self.doc, fh, sort_keys=True, default=str, indent=1)
-            os.replace(tmp, self.path)
         except OSError:
-            pass
+            return
+        _dump_atomic(self.path, self.doc, default=str, indent=1)
 
     def start(self, **doc):
         try:
@@ -231,13 +231,14 @@ class Clock:
         """Close the current interval by distributing it over `parts` {cat: s} (what is not named goes to the last key), then switch."""
         now = mono() if now is None else now
         span = max(0.0, now - self.last)
-        used = 0.0
-        for c, s in parts.items():
-            s = min(max(0.0, s), span - used)
-            self.acc[c] += s
-            used += s
-        self.acc[next(reversed(parts))] += span - used if parts else 0.0
-        if not parts:
+        if parts:
+            used = 0.0
+            for c, s in parts.items():
+                s = min(max(0.0, s), span - used)
+                self.acc[c] += s
+                used += s
+            self.acc[next(reversed(parts))] += span - used
+        else:
             self.acc[self.cur] += span
         self.last, self.cur = now, then
 
@@ -287,7 +288,8 @@ def next_task(units, done, stats):
     -> (unit, rung) | None. First pass: a unit with no attempt yet this round gets its first rung, in priority order, before any unit
     gets a second one. After that: the remaining (unit, rung) pairs by electrical priority, then the measured rate of closed
     connections per minute of the (kind, rung), then the rung's rank order."""
-    fresh = [u for u in units if u["rungs"] and not any(k == u["key"] for k, _ in done)]
+    tried = {k for k, _ in done}
+    fresh = [u for u in units if u["rungs"] and u["key"] not in tried]
     if fresh:
         u = min(fresh, key=lambda u: (u["prio"], u["key"]))
         return u, u["rungs"][0]
@@ -327,13 +329,7 @@ class CrashMemo:
 
     def add(self, key, outcome, why):
         self.rows[key] = {"outcome": outcome, "why": str(why)[:160]}
-        try:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as fh:
-                json.dump(self.rows, fh, sort_keys=True)
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+        _dump_atomic(self.path, self.rows)
 
 
 # ---- outcome classification ----
@@ -344,14 +340,15 @@ NOT_APPLICABLE = ("no signal layers", "no plain net", "nothing dead", "no rf net
 
 def classify_no_board(summ):
     """Outcome of an attempt whose rung wrote no candidate board, from the rung's own summary."""
-    st = str((summ or {}).get("status") or (summ or {}).get("reason") or "").strip().lower()
+    summ = summ or {}
+    st = str(summ.get("status") or summ.get("reason") or "").strip().lower()
     if st in NOT_APPLICABLE or st.startswith("not applicable"):
         return "not_applicable"
     if "timeout" in st or st == "budget":
         return "timeout"
-    if st in ("krt not found", "error") or st.startswith("error"):
+    if st == "krt not found" or st.startswith("error"):
         return "child_error"
-    if st == "invalid" or st.startswith("invalid"):
+    if st.startswith("invalid"):
         return "invalid_output"
     return "no_change"
 
@@ -360,12 +357,7 @@ def failure_outcome(exc):
     """(outcome, detail dict) of an exception raised by an attempt."""
     if isinstance(exc, RungFailure):
         return exc.outcome, {"code": exc.code, "signal": exc.sig, "stderr_tail": exc.stderr_tail}
-    msg = str(exc)
-    if msg.startswith("rung timeout"):
-        return "timeout", {}
-    if msg.startswith("rung wrote no result") or msg.startswith("rung result unreadable"):
-        return "invalid_output", {}
-    return "child_error", {"exception": f"{type(exc).__name__}: {msg}"[:200]}
+    return "child_error", {"exception": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def truncated_board(path):
