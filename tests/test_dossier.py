@@ -5,7 +5,8 @@ import os
 from fluxplace import dossier as DO, elec as EL, partdocs as PD
 
 PAGES = ["TPS0000 buck converter\nPin Functions\n1 VIN  2 GND  3 SW  4 FB  5 EN\nGPIO bank IO1 IO2",
-         "Recommended Operating Conditions\nVIN 3.0 to 17 V\nPlace a 10 uF capacitor within 2 mm of VIN"]
+         "Recommended Operating Conditions\nVIN 3.0 to 17 V\nPlace a 10 uF capacitor within 2 mm of VIN\n"
+         "Absolute maximum VIN 20 V\nOperating -40 to 125 C\nEN VIH 1.2 V"]
 RAW = {"category": "regulator", "description": "buck",
        "package": {"name": "SOT-23-5", "pins": 5, "p": 1},
        "pins": [{"num": ["1"], "name": "VIN", "type": "power_in", "p": 1}, {"num": ["2"], "name": "GND", "type": "ground", "p": 1},
@@ -15,6 +16,8 @@ RAW = {"category": "regulator", "description": "buck",
                     {"pins": ["VIN"], "min": 2.5, "max": 40, "unit": "V", "p": 2}],
        "decoupling": [{"pins": ["VIN"], "value": "10 uF", "distance_mm": 2, "p": 2}],
        "crystal": {"load_pf": 12, "p": 9},
+       "temp_range": {"min": -40, "max": 125, "p": 2}, "abs_max": [{"param": "VIN", "max": 20, "unit": "V", "p": 2}],
+       "io_levels": [{"domain": "VIN", "vih_min": 1.2, "unit": "V", "p": 2}], "na": {"interfaces": "analog control pins only"},
        "swap_groups": [{"name": "GPIO", "pins": ["IO1", "IO2"], "why": "bank", "p": 1}]}
 
 
@@ -119,3 +122,83 @@ def test_drawing_pdf_is_read_from_pictures_and_never_used_downstream(tmp_path, m
     assert d["evidence"] == "vision" and "page-1.png" in seen[0] and d["pins"] and d["currents"]
     assert "package" in d["unknown"]                                            # page 7 is out of range even from pictures
     assert DO.elec_facts(d) == {} and DO.pinmap_mismatches({"GND": "1"}, d) == []
+
+
+def _escalate_setup(tmp_path, monkeypatch, gap_reply):
+    ds = _project(tmp_path)
+    (tmp_path / "ds" / "TPS0000-appnote.pdf").write_bytes(b"%PDF fake")
+    note = ["Layout guide\nVIN abs max 22 V"]
+    monkeypatch.setattr(DO, "pages", lambda pdf: note if "appnote" in pdf else PAGES)
+    from fluxplace import partcite as PC
+    monkeypatch.setattr(PC, "render_page", lambda pdf, k, png: (True, png))
+    first = {k: v for k, v in RAW.items() if k not in ("abs_max", "io_levels", "temp_range", "na")}
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return json.dumps(first if len(calls) == 1 else gap_reply), 0.01
+    return ds, calls, ask
+
+
+def test_missing_required_facts_escalate_to_pictures_and_other_documents(tmp_path, monkeypatch):
+    gap = {"abs_max": [{"param": "VIN", "max": 22, "unit": "V", "p": 1, "doc": "TPS0000-appnote.pdf"}],
+           "io_levels": [{"domain": "VIN", "vih_min": 1.4, "unit": "V", "p": 1, "img": True}],
+           "na": {"interfaces": "no digital interface"}}
+    ds, calls, ask = _escalate_setup(tmp_path, monkeypatch, gap)
+    d, st, cost = DO.build("TPS0000", os.path.join(ds, "X.pdf"), "ab" * 32, ask=ask, distributor=lambda m: {"temp_min": -40, "temp_max": 105})
+    assert st == "made" and d["knowable"] and d["missing"] == [] and len(calls) == 2 and abs(cost - 0.02) < 1e-9
+    assert "missing: temp_range, abs_max, io_levels, interfaces" in calls[1] and "=== DOC TPS0000-appnote.pdf PAGE 1 ===" in calls[1] and "page-" in calls[1]
+    assert d["abs_max"][0]["doc"] == "TPS0000-appnote.pdf" and d["io_levels"][0]["img"] and d["temp_range"]["src"] == "distributor"
+    assert d["na"] == {"interfaces": "no digital interface"} and d["sources"] == ["datasheet", "pictures+documents", "distributor"]
+
+
+def test_a_part_no_source_completes_is_unknowable_and_the_parts_gate_fails_without_waiver(tmp_path, monkeypatch):
+    ds, calls, ask = _escalate_setup(tmp_path, monkeypatch, {"abs_max": [{"param": "VIN", "max": 99, "unit": "V", "p": 1,
+                                                                         "doc": "TPS0000-appnote.pdf"}]})
+    d, st, _ = DO.build("TPS0000", os.path.join(ds, "X.pdf"), "ab" * 32, ask=ask, distributor=lambda m: None)
+    assert st == "UNKNOWABLE" and not d["knowable"] and d["missing"] == ["temp_range", "abs_max", "io_levels", "interfaces"]
+    assert d["rejected"][-1]["why"] == "max=99 is not on page 1"                 # 99 V is not printed in the app note
+    DO.record_replacement("TPS0000", "ab" * 32, [{"mpn": "TPS0001", "drop_in": True, "differs": [], "knowable": True, "missing": []}])
+    from fluxplace import parts as P
+    spec = {"components": [{"ref": "U1", "mpn": "TPS0000", "mfr": "TI", "value": "TPS0000", "fp": "SOT-23-5"}], "nets": {}}
+    res = P.run(spec, {"parts": {"waive": ["PART_UNKNOWABLE"]}}, ds_dir=ds)
+    f = [x for x in res["findings"] if x["code"] == "PART_UNKNOWABLE"]
+    assert len(f) == 1 and f[0]["level"] == "FAIL" and "temp_range, abs_max, io_levels, interfaces" in f[0]["msg"]
+    assert "proposed replacement TPS0001 (drop-in)" in f[0]["msg"]
+
+
+def test_a_v1_dossier_is_upgraded_without_a_second_text_pass(tmp_path, monkeypatch):
+    ds = _project(tmp_path)
+    monkeypatch.setattr(DO, "pages", lambda pdf: PAGES)
+    v1 = dict(DO.verify(RAW, PAGES), version=1, file="X.pdf", cost_usd=0.5)
+    from fluxplace import sourcing as S
+    S.write_json(DO._path("TPS0000", "ab" * 32), v1)
+    d, st, cost = DO.build("TPS0000", os.path.join(ds, "X.pdf"), "ab" * 32, ask=lambda p: 1 / 0)
+    assert st == "made" and d["version"] == DO.VERSION and cost == 0 and d["cost_usd"] == 0.5
+
+
+def test_passive_and_connector_requirements_follow_the_category():
+    assert DO.gaps({"category": "passive", "package": {"p": 1}, "temp_range": {"p": 1}, "abs_max": [{"p": 1}]}) == []
+    assert DO.gaps({"category": "connector", "pins": [{"num": ["1"], "type": "passive"}]}) == ["package", "temp_range", "currents"]
+    ic = {"pins": [{"num": ["1"], "type": "input"}]}                              # no supply pin: no supplies / decoupling needed
+    assert "supplies" not in DO.gaps(ic) and "decoupling" not in DO.gaps(ic)
+
+
+def test_replacement_takes_the_first_knowable_drop_in(tmp_path, monkeypatch):
+    from fluxplace import partsgate as PG
+    monkeypatch.setattr(PG, "alternatives", lambda *a, **k: [{"mpn": "A1", "drop_in": True, "differs": []},
+                                                              {"mpn": "B2", "drop_in": True, "differs": []}])
+    monkeypatch.setattr(DO, "pages", lambda pdf: PAGES)
+    cd = os.path.join(DO.cache_dir(), "candidates")
+
+    def fetch(mpns, out, log=None):
+        os.makedirs(out, exist_ok=True)
+        for m in mpns:
+            open(os.path.join(out, m + ".pdf"), "wb").write(b"%PDF " + m.encode())
+            man = PD.load_manifest(out)
+            man[m] = {"file": m + ".pdf", "sha256": m * 8}
+            open(PD.manifest_path(out), "w").write(json.dumps(man))
+    bad = {k: v for k, v in RAW.items() if k != "temp_range"}
+    rows = DO.propose_replacement("OLD", fetch=fetch, ask=lambda p: (json.dumps(bad if "A1" in p else RAW), 0.0), enricher=False)
+    assert [r["mpn"] for r in rows] == ["B2", "A1"] and rows[0]["knowable"] and rows[1]["missing"] == ["temp_range"]
+    assert os.path.isdir(cd)

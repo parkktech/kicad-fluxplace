@@ -2047,9 +2047,17 @@ def cmd_datasheets(a):
     t0, dres = _time.time(), DO.build_all(a.out, [k for k, v in res.items() if v], jobs=int(os.environ.get("FLUXPLACE_DOSSIER_JOBS", 4)),
                                          log=lambda m: print(m, flush=True))
     ok = [d for d, _, _ in dres.values() if d]
-    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, "
-          f"{sum(len(d['unknown']) for d in ok)} unknown sections, ${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) "
-          f"in {DO.cache_dir()}")
+    bad = sorted(d["mpn"] for d in ok if not d["knowable"])
+    if bad and DO.online():                              # an unknowable part is replaced, never used: propose a knowable one
+        for m in bad:
+            d = dres[m][0]
+            DO.record_replacement(m, d["sha256"], DO.propose_replacement(m, log=lambda x: print(x, flush=True)))
+    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {len(ok) - len(bad)} fully knowable, "
+          f"${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) in {DO.cache_dir()}")
+    for m in bad:
+        d = DO.load(m, dres[m][0]["sha256"]) or dres[m][0]
+        rep = next((r["mpn"] for r in d.get("replacement") or [] if r["knowable"]), None)
+        print(f"  UNKNOWABLE {m}: missing {', '.join(d['missing'])}; replacement {rep or 'none found'}")
     if miss:
         print("  need a browser (drop the PDF in and run --adopt MPN=file.pdf): "
               + ", ".join(miss))

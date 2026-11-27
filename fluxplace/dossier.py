@@ -9,12 +9,21 @@ Contents (every fact carries `p`, the datasheet page it was read from; the file 
   supplies[{pins[],min,typ,max,unit}] currents[] abs_max[] io_levels[]
   interfaces[{name,protocol,pins[],speed,edge_rate}]    feeds the net budget class
   decoupling[{pins[],value,distance_mm}] keepouts[] thermal{} rf[] crystal{} app_circuit[]
-  unknown[]                                             every section the datasheet did not give (never guessed)
+  na{section: reason}                                   a required section that does not apply (io_levels / interfaces only)
+  missing[] knowable                                    REQUIRED sections (by category) no source gave: the part is UNKNOWABLE
+  replacement[]                                         for an unknowable part: knowable drop-in candidates (propose_replacement)
 
-Trust (`evidence` "text"): the model is told to copy numbers as printed; `verify` keeps a fact only when its page exists and every number in it is on
+Owner rule (2026-11-27): a part that cannot be fully known is a HARD BLOCKER at the parts gate (parts.run PART_UNKNOWABLE, no
+waiver), never "unknown and continue". Sources are escalated in order until every REQUIRED section is found, each fact tagged:
+  1. the datasheet text (`src` absent)          2. OCR / the model reading the page PICTURES (`img`: true)
+  3. the manufacturer's other documents in the datasheets folder (app note, user guide, drawing; `doc`: file)
+  4. distributor parametric data (`src`: "distributor": package, temperature range)
+OPTIONAL sections (swap_groups, msl, thermal, keepouts, rf, crystal, app_circuit) may be absent.
+
+Trust: the model is told to copy numbers as printed; `verify` keeps a fact only when its page exists and every number in it is on
 that page (pin names: the name is on the page), else the fact moves to `rejected` with the reason. Downstream (elec.load_facts,
-partdocs.spec_check) reads only verified facts, and a hand-entered parts-fact always wins over a dossier one. A drawing-only PDF
-with no OCR is read from its page pictures (`evidence` "vision", page range checked only): kept for the reader, never used downstream.
+partdocs.spec_check) reads only text-verified facts, and a hand-entered parts-fact always wins over a dossier one. A fact read from a
+page picture (`img`) or a distributor is page-range checked only: it makes the part knowable, never feeds a check.
 The model call is `claude -p` (haiku by default; FLUXPLACE_DOSSIER_MODEL); FLUXPLACE_AI=0 or no `claude` CLI = offline: the dossier
 is reported missing (not cached, retried next run). Nothing here names a board, a reference or an MPN.
 """
@@ -27,12 +36,17 @@ import subprocess
 import tempfile
 import time
 
-VERSION = 1
+VERSION = 2                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
 MODEL = "haiku"
 TEXT_BUDGET = 240_000                 # characters of datasheet text sent per part (~60k tokens)
 LIST_SECTIONS = ("pins", "swap_groups", "supplies", "currents", "abs_max", "io_levels", "interfaces", "decoupling", "keepouts",
                  "rf", "app_circuit")
 DICT_SECTIONS = ("package", "msl", "temp_range", "thermal", "crystal")
+_IC = ("package", "temp_range", "pins", "supplies", "abs_max", "io_levels", "interfaces", "decoupling")
+REQUIRED = {"connector": ("package", "temp_range", "pins", "currents"), "passive": ("package", "temp_range", "abs_max"),
+            "diode": ("package", "temp_range", "pins", "abs_max"), "transistor": ("package", "temp_range", "pins", "abs_max")}
+NA_OK = ("io_levels", "interfaces")      # may be declared not applicable with a reason (an analog part has no logic levels)
+GAP_PAGES = 8                            # page pictures per gap pass
 _TEXT_KEYS = {"name", "function", "type", "domain", "why", "protocol", "what", "note", "param", "unit", "pad", "vias", "alt", "pins",
               "num", "description", "category"}     # prose: not digit-checked (value, speed, edge_rate, msl v are: their numbers are printed)
 _KEYWORDS = re.compile(r"pin (configuration|description|function|assignment)|pinout|absolute maximum|recommended operating|"
@@ -61,10 +75,21 @@ Return ONE JSON object, no prose, with these keys (omit empty ones):
  "rf": [{{"what": "matching / antenna clearance", "p": 0}}], "crystal": {{"load_pf": 0, "p": 0}},
  "app_circuit": [{{"what": "reference circuit element and value", "p": 0}}],
  "unknown": ["section names not stated"]}}
-Pins: every pin of the package. Swap groups: only pins the datasheet shows as equivalent (same function class, any one usable).
+Pins: every pin of the package; for a GPIO give every mux alternate in "alt" naming its peripheral (e.g. "SPI0_MOSI", "I2C1_SDA", "UART2_TX").
+"na": {{"io_levels": "reason"}} only when a section does not apply to this part (io_levels, interfaces). Swap groups: only pins the datasheet shows as equivalent (same function class, any one usable).
 Connectors: pins are contacts; contacts of one kind (signal / power) form a swap group; contact current rating goes in currents (what=contact).
 
 DATASHEET TEXT:
+{text}
+"""
+GAP = """You complete a component dossier for {mpn}. These REQUIRED sections are still missing: {need}.
+Fill ONLY those sections (same JSON shape as below), from these sources:
+{sources}
+Every fact carries "p" (page number) and, when it comes from another document, "doc": that file name; a fact read from a page picture
+carries "img": true. Copy numbers exactly as printed. Never guess: a section no source states stays out. A section that does not apply to
+this part may be declared in "na": {{"section": "reason"}} (only {na_ok}). Return ONE JSON object, no prose.
+Shapes: {shapes}
+
 {text}
 """
 VISION = """(This datasheet has no text layer. Its pages are pictures in the current directory: {pics}. Read every one with the Read tool;
@@ -83,12 +108,12 @@ def _path(mpn, sha, d=None):
     return os.path.join(cache_dir(d), f"{re.sub(r'[^A-Za-z0-9._-]', '_', mpn)}.{(sha or 'nosha')[:12]}.json")
 
 
-def load(mpn, sha, d=None):
-    """The cached dossier of `mpn` for the datasheet with this sha256, or None."""
+def load(mpn, sha, d=None, any_version=False):
+    """The cached dossier of `mpn` for the datasheet with this sha256, or None (an older version only with any_version)."""
     try:
         with open(_path(mpn, sha, d)) as fh:
             x = json.load(fh)
-        return x if x.get("version") == VERSION else None
+        return x if any_version or x.get("version") == VERSION else None
     except (OSError, ValueError):
         return None
 
@@ -147,16 +172,21 @@ def _on_page(n, text):
     return any(re.search(r"(?<![\d.])" + re.escape(a) + r"(?!\d)", text) for a in alts)
 
 
-def _check(fact, pg, vision=False):
-    """None when the fact stands on its page, else the reason it does not. A page read from its picture (vision) has no text to check."""
+def _check(fact, pg, vision=False, docs=None):
+    """None when the fact stands on its page, else the reason it does not. A page read from its picture (img / vision) has no text to
+    check; a fact from another document (`doc`) is checked on that document's page."""
+    if fact.get("doc"):
+        if fact["doc"] not in (docs or {}):
+            return f"document {fact['doc']} was not given"
+        pg = docs[fact["doc"]]
     p = fact.get("p")
     if not isinstance(p, int) or not 1 <= p <= len(pg):
-        return f"page {p!r} is not in the datasheet"
-    if vision:
+        return f"page {p!r} is not in {fact.get('doc') or 'the datasheet'}"
+    if vision or fact.get("img"):
         return None
     text = _flat(pg[p - 1])
     for k, v in fact.items():
-        if k == "p" or k in _TEXT_KEYS:
+        if k in ("p", "doc", "img") or k in _TEXT_KEYS:
             continue
         for n in _nums(v):
             if not _on_page(n, text):
@@ -169,13 +199,16 @@ def _check(fact, pg, vision=False):
     return None
 
 
-def verify(raw, pg, vision=False):
+def verify(raw, pg, vision=False, docs=None):
     """The model's dossier with every fact checked against its page: unverified facts move to `rejected`. -> dossier dict."""
-    out = {"category": raw.get("category") or "unknown", "description": raw.get("description") or "", "rejected": []}
+    out = {"category": raw.get("category") or "unknown", "description": raw.get("description") or "", "rejected": [],
+           "na": {k: str(v) for k, v in (raw.get("na") or {}).items() if k in NA_OK and v}}
     unknown = {x for x in raw.get("unknown") or [] if isinstance(x, str)}
 
     def stands(s, f):
-        why = _check(f, pg, vision)
+        if vision:
+            f["img"] = True
+        why = _check(f, pg, vision, docs)
         if why:
             out["rejected"].append({"section": s, "fact": f, "why": why})
         return not why
@@ -194,6 +227,30 @@ def verify(raw, pg, vision=False):
             unknown.add(s)
     out["unknown"] = sorted(unknown - set(out))
     return out
+
+
+def required(dos):
+    """The REQUIRED sections of a part by its category; supplies and decoupling only when the part has a supply pin."""
+    req = REQUIRED.get(dos.get("category"), _IC)
+    if dos.get("pins") and not any(p.get("type") == "power_in" for p in dos["pins"]):
+        req = tuple(x for x in req if x not in ("supplies", "decoupling"))
+    return req
+
+
+def gaps(dos):
+    """REQUIRED sections no source has given (and not declared not applicable)."""
+    return [s for s in required(dos) if not dos.get(s) and s not in (dos.get("na") or {})]
+
+
+def merge(dos, add):
+    """Fill `dos` from a later source's verified dossier: only sections still missing, and its `na` / `rejected`."""
+    for s in gaps(dos):
+        if add.get(s):
+            dos[s] = add[s]
+        elif s in (add.get("na") or {}):
+            dos.setdefault("na", {})[s] = add["na"][s]
+    dos["rejected"] = dos.get("rejected", []) + add.get("rejected", [])
+    return dos
 
 
 def n_facts(d):
@@ -229,44 +286,137 @@ def _json_of(text):
     return json.loads(m.group(0))
 
 
-def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False):
-    """The dossier of one part: cached when the datasheet is unchanged, else read by the model and verified.
-    ask(prompt) -> (text, cost) replaces the model (tests). -> (dossier | None, status, cost)."""
-    if not refresh:
-        hit = load(mpn, sha, d)
-        if hit:
-            return hit, "cached", 0.0
+def _first_pass(mpn, pdf, pg, td, ask, model):
+    """-> (raw dossier, vision?, pages sent, cost): the datasheet text, or its page pictures when it has no text."""
+    vision = not any(t.strip() for t in pg)
+    if vision:                           # a drawing-only PDF and no OCR: the model reads the page pictures
+        from . import partcite as PC
+        n = min(PC.page_count(pdf) or 1, OCR_PAGES)
+        sel = [k for k in range(1, n + 1) if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
+        if not sel:
+            raise ValueError("no text layer and the pages did not render")
+        text = VISION.format(pics=", ".join(f"page-{k}.png (page {k})" for k in sel))
+    else:
+        sel = select(pg)
+        text = "\n".join(f"=== PAGE {n} ===\n{pg[n - 1]}" for n in sel)
+    call = ask or (lambda pr: call_model(pr, model, tools="Read" if vision else "", cwd=td))
+    reply, cost = call(PROMPT.format(mpn=mpn, text=text))
+    return _json_of(reply), vision, sel, cost
+
+
+def siblings(pdf, mpn, limit=3):
+    """Other documents of the same part / family in the datasheets folder (app note, user guide, drawing): file stems sharing the first
+    five characters of the MPN or of the datasheet's own stem."""
+    folder, own = os.path.dirname(pdf), os.path.basename(pdf)
+    keys = {re.sub(r"[^A-Z0-9]", "", x.upper())[:5] for x in (mpn, own[:-4])} - {""}
+    keys = {k for k in keys if len(k) == 5}
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    out = [os.path.join(folder, n) for n in names if n.lower().endswith(".pdf") and n != own
+           and re.sub(r"[^A-Z0-9]", "", n.upper())[:5] in keys]
+    return out[:limit]
+
+
+def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
+    """-> (verified additions, cost): the missing REQUIRED sections from the datasheet's page pictures and the family's other documents."""
+    from . import partcite as PC
+    need = gaps(dos)
+    thin = [k for k in range(1, len(pg) + 1) if len(pg[k - 1].strip()) < 300]           # pages whose content is a picture
+    hot = [k for k in range(1, len(pg) + 1) if k not in thin and re.search(r"pin (configuration|description|function)|pinout|"
+                                                                           r"absolute maximum|recommended operating", pg[k - 1], re.I)]
+    pics = [k for k in (thin + hot)[:GAP_PAGES] if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
+    docs = {}
+    for f in siblings(pdf, mpn):
+        docs[os.path.basename(f)] = pages(f)
+    budget, chunks = TEXT_BUDGET // 2, []
+    for name, dp in docs.items():
+        for n, t in enumerate(dp, 1):
+            if budget - len(t) < 0:
+                break
+            budget -= len(t)
+            chunks.append(f"=== DOC {name} PAGE {n} ===\n{t}")
+    sources = []
+    if pics:
+        sources.append("- page pictures of the datasheet (Read them): " + ", ".join(f"page-{k}.png (page {k})" for k in pics))
+    if chunks:
+        sources.append("- text of other documents below (marked === DOC file PAGE n ===)")
+    if not sources:
+        return {"rejected": []}, 0.0
+    shapes = PROMPT[PROMPT.index("{{\"category\""):PROMPT.index("Pins: every pin")].replace("{{", "{").replace("}}", "}")
+    prompt = GAP.format(mpn=mpn, need=", ".join(need), sources="\n".join(sources), na_ok=", ".join(NA_OK), shapes=shapes,
+                        text="\n".join(chunks))
+    call = ask or (lambda pr: call_model(pr, model, tools="Read" if pics else "", cwd=td))
+    reply, cost = call(prompt)
+    return verify(_json_of(reply), pg, docs=docs), cost
+
+
+def _distributor(dos, row):
+    """Package and temperature range from a distributor row (partdata), only where still missing."""
+    if not row:
+        return dos
+    need = gaps(dos)
+    if "package" in need and row.get("package"):
+        dos["package"] = {"name": row["package"], "pins": row.get("pins"), "src": "distributor"}
+    if "temp_range" in need and row.get("temp_min") is not None and row.get("temp_max") is not None:
+        dos["temp_range"] = {"min": row["temp_min"], "max": row["temp_max"], "unit": "C", "src": "distributor"}
+    return dos
+
+
+def _dist_row(mpn):
+    from . import sourcing as S
+    row = (S.cache_load(".partdata_cache.json").get(mpn) or {}).get("data")
+    if row is None and online():
+        from . import partsearch as PS
+        try:
+            row = PS.lookup(mpn)
+        except Exception:                                   # noqa: BLE001 - a distributor hiccup is a missing source, not a crash
+            row = None
+    return row
+
+
+def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributor=None):
+    """The dossier of one part: cached when the datasheet is unchanged, else read by the model, verified and escalated through the
+    sources until every REQUIRED section is found (else `knowable` false, `missing` named).
+    ask(prompt) -> (text, cost) replaces the model and distributor(mpn) -> row the distributor (tests). -> (dossier | None, status, cost)."""
+    hit = None if refresh else load(mpn, sha, d, any_version=True)
+    if hit and hit.get("version") == VERSION:
+        return hit, "cached", 0.0
     if ask is None and not online():
         return None, "offline (FLUXPLACE_AI=0 or no claude CLI)", 0.0
     pg = pages(pdf)
-    vision = not any(t.strip() for t in pg)
-    t0 = time.time()
+    t0, cost = time.time(), 0.0
     with tempfile.TemporaryDirectory(dir=cache_dir(d)) as td:
-        if vision:                       # a drawing-only PDF and no OCR: the model reads the page pictures (facts: page range checked only)
-            from . import partcite as PC
-            n = min(PC.page_count(pdf) or 1, OCR_PAGES)
-            sel = [k for k in range(1, n + 1) if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
-            if not sel:
-                return None, "no text layer and the pages did not render", 0.0
-            pg = [""] * n
-            text = VISION.format(pics=", ".join(f"page-{k}.png (page {k})" for k in sel))
-        else:
-            sel = select(pg)
-            text = "\n".join(f"=== PAGE {n} ===\n{pg[n - 1]}" for n in sel)
         try:
-            call = ask or (lambda pr: call_model(pr, model, tools="Read" if vision else "", cwd=td))
-            reply, cost = call(PROMPT.format(mpn=mpn, text=text))
-            raw = _json_of(reply)
+            if hit:                                          # a v1 dossier: its text pass stands, only the escalation runs
+                dos, vision, sel = hit, hit.get("evidence") == "vision", hit.get("pages_read") or []
+                if vision:
+                    pg = [""] * (hit.get("n_pages") or 1)
+            else:
+                raw, vision, sel, cost = _first_pass(mpn, pdf, pg, td, ask, model)
+                dos = verify(raw, pg, vision)
+            dos.setdefault("na", {})
+            sources = ["datasheet"]
+            if gaps(dos):
+                add, c2 = _gap_pass(mpn, pdf, pg, dos, td, ask, model)
+                cost += c2
+                merge(dos, add)
+                sources.append("pictures+documents")
         except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as e:
             return None, f"model failed: {e}", 0.0
-    dos = verify(raw, pg, vision)
+    if gaps(dos):
+        _distributor(dos, (distributor or _dist_row)(mpn))
+        sources.append("distributor")
+    miss = gaps(dos)
     dos.update(mpn=mpn, file=os.path.basename(pdf), sha256=sha, version=VERSION, pages_read=sel, n_pages=len(pg),
-               evidence="vision" if vision else "text",
-               model=_model(model), cost_usd=round(cost, 5),
-               seconds=round(time.time() - t0, 1), made=time.strftime("%Y-%m-%dT%H:%M:%S"))
+               evidence="vision" if vision else "text", model=_model(model), cost_usd=round(cost + (hit or {}).get("cost_usd", 0), 5),
+               seconds=round(time.time() - t0, 1), made=time.strftime("%Y-%m-%dT%H:%M:%S"), sources=sources,
+               missing=miss, knowable=not miss)
+    dos["unknown"] = sorted(set(dos.get("unknown") or []) - set(dos))
     from . import sourcing as S
     S.write_json(_path(mpn, sha, d), dos, indent=1)
-    return dos, "made", cost
+    return dos, "made" if not miss else "UNKNOWABLE", cost
 
 
 def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False, log=print):
@@ -286,8 +436,9 @@ def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False,
             m = futs[fu]
             res[m] = fu.result()
             dos, st, cost = res[m]
-            log(f"  dossier {m}: {st}" + (f", {n_facts(dos)} facts, {len(dos['unknown'])} unknown, {len(dos['rejected'])} rejected"
-                                          if dos else "") + (f", ${cost:.3f}" if cost else ""))
+            log(f"  dossier {m}: {st}" + (f", {n_facts(dos)} facts, {len(dos['rejected'])} rejected"
+                                          + (f", missing {', '.join(dos['missing'])}" if dos["missing"] else "") if dos else "")
+                + (f", ${cost:.3f}" if cost else ""))
     return res
 
 
@@ -305,11 +456,12 @@ def _si(v, unit, want):
 
 def elec_facts(dos):
     """{key: {value, source}} in the elec fact-store shape, from a dossier's verified facts: supply range per supply pin, decoupling
-    distance per pin, connector contact rating. A key the dossier does not back is absent; a dossier read from pictures backs none."""
-    if dos.get("evidence") == "vision":
-        return {}
-    def src(p):
-        return f"{dos['file']}#p{p} (dossier)"
+    distance per pin, connector contact rating. A key the dossier does not back is absent; a fact read from a picture or a distributor
+    (`img` / `src`) backs none."""
+    dos = _text_only(dos)
+
+    def src(f):
+        return f"{f.get('doc') or dos['file']}#p{f['p']} (dossier)"
 
     out = {}
     lo, hi, pins, srcs = {}, {}, [], []
@@ -319,7 +471,7 @@ def elec_facts(dos):
         for pn in s.get("pins") or []:
             if kind.get(pn, "power_in") == "power_in" and (mn is not None or mx is not None):
                 pins.append(pn)
-                srcs.append(s["p"])
+                srcs.append(s)
                 if mn is not None:
                     lo[pn] = min(lo.get(pn, mn), mn)
                 if mx is not None:
@@ -336,13 +488,21 @@ def elec_facts(dos):
         if isinstance(mm, (int, float)) and not isinstance(mm, bool) and mm > 0:
             for pn in c.get("pins") or []:
                 dist[pn] = min(dist.get(pn, mm), mm)
-            out["decap_mm"] = {"value": dist, "source": src(c["p"])}
-    contact = [(_si(c.get("max") if c.get("max") is not None else c.get("typ"), c.get("unit"), "A"), c["p"])
+            out["decap_mm"] = {"value": dist, "source": src(c)}
+    contact = [(_si(c.get("max") if c.get("max") is not None else c.get("typ"), c.get("unit"), "A"), c)
                for c in dos.get("currents") or [] if c.get("what") == "contact"]
     contact = [x for x in contact if x[0]]
     if contact and dos.get("category") == "connector":
-        a, p = min(contact)
-        out["contact_a"] = {"value": a, "source": src(p)}
+        a, f = min(contact, key=lambda x: x[0])
+        out["contact_a"] = {"value": a, "source": src(f)}
+    return out
+
+
+def _text_only(dos):
+    """The dossier with only text-verified facts (no picture / distributor reads): what checks may use."""
+    out = dict(dos)
+    for s in LIST_SECTIONS:
+        out[s] = [f for f in dos.get(s) or [] if not (f.get("img") or f.get("src"))]
     return out
 
 
@@ -368,9 +528,7 @@ def pinmap_mismatches(pinmap, dos):
     another pad and not this one, or one side calls the pad ground and the other does not (the V1.4 ESD-array miss). Spelling
     differences (FLT vs OC, VCC vs 3V3) are not findings: the page evidence check covers names."""
     from . import partdocs as PD
-    if dos.get("evidence") == "vision":
-        return []
-    tab = pin_table(dos)
+    tab = pin_table(_text_only(dos))
     bad = []
     for name, pad in (pinmap or {}).items():
         al, exact = PD._aliases(name), {PD._norm(name), PD._norm(name.replace("_", ""))}
@@ -385,3 +543,41 @@ def pinmap_mismatches(pinmap, dos):
             elif here[1] != gname and not here[0] <= {str(pd)}:
                 bad.append((name, str(pd), f"datasheet pad {pd} is {'ground' if here[1] else 'not ground'} ({'/'.join(sorted(here[0])[:2])})"))
     return bad
+
+
+# ------------------------------------------------------------------ an unknowable part: a knowable replacement
+def propose_replacement(mpn, fp=None, required=1, temp=(None, None), searcher=None, enricher=None, fetch=None, ask=None, top=5,
+                        log=lambda m: None):
+    """Candidates for an UNKNOWABLE part: partsgate.alternatives (same function and package class, in stock at `required`), each
+    candidate's datasheet fetched (partdocs.fetch) and read into its own dossier. -> [{mpn, mfr, stock, drop_in, differs, knowable,
+    missing}], knowable drop-ins first; the first row is the proposal. Writes the list into the part's dossier as `replacement`."""
+    from . import partdocs as PD, partsearch as PS, partsgate as PG
+    row = _dist_row(mpn) or {"description": mpn}
+    alts = PG.alternatives(mpn, row, fp, required, temp, searcher or PS.keyword_search, limit=top,
+                           enricher=enricher if enricher is not None else PS.lookup)
+    cd = os.path.join(cache_dir(), "candidates")
+    os.makedirs(cd, exist_ok=True)
+    out = []
+    for o in alts:
+        if not o.get("mpn") or o.get("error"):
+            continue
+        (fetch or PD.fetch)([o["mpn"]], cd, log=log)
+        ent = PD.load_manifest(cd).get(o["mpn"])
+        f = os.path.join(cd, ent["file"]) if ent and ent.get("file") else None
+        cdos = build(o["mpn"], f, ent.get("sha256") or PD._sha(f), ask=ask)[0] if f and os.path.isfile(f) else None
+        out.append({"mpn": o["mpn"], "mfr": o.get("mfr"), "stock": o.get("stock"), "drop_in": bool(o.get("drop_in")),
+                    "differs": o.get("differs") or [], "knowable": bool(cdos and cdos.get("knowable")),
+                    "missing": (cdos or {}).get("missing", ["no datasheet fetched"] if not f else ["dossier not made"])})
+        log(f"  candidate {o['mpn']}: drop_in {out[-1]['drop_in']}, knowable {out[-1]['knowable']}")
+        if out[-1]["drop_in"] and out[-1]["knowable"]:
+            break
+    return sorted(out, key=lambda r: (not r["knowable"], not r["drop_in"], len(r["differs"])))
+
+
+def record_replacement(mpn, sha, rows, d=None):
+    """Store the proposal list in the part's cached dossier (the parts gate prints it)."""
+    from . import sourcing as S
+    dos = load(mpn, sha, d)
+    if dos:
+        dos["replacement"] = rows
+        S.write_json(_path(mpn, sha, d), dos, indent=1)

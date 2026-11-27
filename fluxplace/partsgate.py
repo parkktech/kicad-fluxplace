@@ -22,7 +22,7 @@ from . import modelpaths as MP
 
 NEEDS = ("mpn", "mfr", "stock", "datasheet", "pinmap", "package", "model")
 _CODE_NEED = {"PART_GENERIC": "mpn", "PART_MPN_MISSING": "mpn", "PART_MPN_IN_VALUE": "mpn", "PART_MFR_MISSING": "mfr",
-              "PART_NO_STOCK": "stock", "PART_DATASHEET_MISSING": "datasheet", "PART_PINMAP_UNSOURCED": "pinmap",
+              "PART_NO_STOCK": "stock", "PART_DATASHEET_MISSING": "datasheet", "PART_UNKNOWABLE": "datasheet", "PART_PINMAP_UNSOURCED": "pinmap",
               "PART_PACKAGE_MISMATCH": "package", "PART_PINCOUNT_MISMATCH": "package", "PART_FOOTPRINT_MISSING": "package",
               "PART_FOOTPRINT_MISMATCH": "package", "PART_PACKAGE_MISSING": "package"}
 OWNER_FIELDS = ("footprint", "fp", "value", "rating", "pinout")
