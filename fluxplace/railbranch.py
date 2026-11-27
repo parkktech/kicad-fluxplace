@@ -32,15 +32,30 @@ def conn_width(r, amps, track_mm):
     return round(max(track_mm, min(w, max(float(r["track_mm"]), track_mm))), 2)
 
 
+def rail_floor(cons, net, r):
+    """The width contract of a rail net (netclass.contract): its declared `width_mm`, else the narrowest `[route] power_ladder_mm` rung
+    (never over the rail's own width)."""
+    from . import power as PWR
+    if ((cons or {}).get("power") or {}).get(net, {}).get("width_mm"):
+        return float(r["track_mm"])
+    lad = [float(x) for x in ((cons or {}).get("route") or {}).get("power_ladder_mm") or PWR.LADDER_MM] or [0.0]
+    return min(float(r["track_mm"]), min(lad))
+
+
 def conn_ladder(cons, net, r, amps, length_mm, track_mm):
     """[(width, proof)] widest first: the connection's own width (proof None), then the rail ladder rungs below it and the signal
     width, each only when the neck-down test of D71da holds at `amps` over `length_mm` (proof = the heat rise)."""
     from . import power as PWR
     a = r.get("current_a") or 0.0 if amps is None else amps
     w0 = conn_width(r, amps, track_mm)
+    floor = 0.0
+    from . import netclass as NC
+    if length_mm > NC.NECK_MM:                               # the rail's width contract (CONTRACT_CHANGED): only a pad neck may go under it
+        floor = rail_floor(cons, net, r)
+        w0 = max(w0, floor)
     out = [(w0, None)]
-    rungs = PWR.ladder_widths(cons, net, w0, track_mm)[1:]
-    if track_mm < w0 - 1e-6 and (not rungs or rungs[-1] > track_mm + 1e-6):
+    rungs = [w for w in PWR.ladder_widths(cons, net, w0, track_mm)[1:] if w >= floor - 1e-6]
+    if track_mm < w0 - 1e-6 and track_mm >= floor - 1e-6 and (not rungs or rungs[-1] > track_mm + 1e-6):
         rungs = [*rungs, round(track_mm, 2)]
     for w in rungs:
         heat = PWR.neck_heat_c(a, max(length_mm, 0.01), w, r["oz_outer"])

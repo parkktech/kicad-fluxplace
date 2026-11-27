@@ -27,7 +27,7 @@ def test_ladder_only_proven_necks():
     assert lad[0][1] is None and len(lad) > 1 and all(p is not None and p <= R["rise_c"] for _w, p in lad[1:])
     assert [w for w, _p in lad] == sorted({w for w, _p in lad}, reverse=True)
     far = RB.conn_ladder(CONS, "V5", R, 1.0, 40.0, TRK)             # 40 mm run at 1 A: nothing narrower is proven
-    assert [w for w, _p in far] == [lad[0][0]]
+    assert [w for w, _p in far] == [max(lad[0][0], RB.rail_floor(CONS, "V5", R))]    # only the contract floor lifts it
 
 
 def _fake(monkeypatch, comps, routable):
@@ -140,7 +140,7 @@ def test_plan_real_board_finds_open_connections_and_widths(tmp_path):
     cons = {"power": {"N": {"max_current_ma": 2000, "max_v": 5.0, "source": "U1"}}, "dcdrop": []}
     pl = RB.plan(p, cons, ["N"], 0.15, 6)["N"]
     assert pl["main"] == 2 and [c["pads"] for c in pl["comps"]] == [[("C1", "1")]]
-    assert pl["comps"][0]["amps"] == 0.0 and pl["comps"][0]["ladder"][0][0] == 0.15      # a decap branch: the minimum
+    assert pl["comps"][0]["amps"] == 0.0 and pl["comps"][0]["ladder"][0][0] == (0.15 if pl["comps"][0]["len_mm"] <= 1.5 else 0.6)   # a decap branch: the minimum (the rail contract floor past a pad neck)
     assert pl["comps"][0]["len_mm"] == pytest.approx(3.0, abs=0.1)
     # hold/unhold: the pad leaves the net for a router call and comes back
     h = str(tmp_path / "h.kicad_pcb")
@@ -243,3 +243,13 @@ def test_fix_undersized_drops_a_trial_that_leaves_a_connection_open(tmp_path):
                       lambda s, o, lay, widths, ns: ["py", "route.py", s, o, widths], runner, lambda: 100.0, laid, rec)
     assert rec["N"]["undersized"][0]["reason"].startswith("no corridor")
     assert RB.track_keys(str(tmp_path / "o.kicad_pcb"), ["N"]) == RB.track_keys(narrow, ["N"])      # the old copper stays
+
+
+def test_ladder_never_under_the_rail_contract():
+    """W67: a connection longer than a pad neck never gets a rung under the rail's width contract (CONTRACT_CHANGED VBATT_IN 0.15 < 0.6)."""
+    floor = RB.rail_floor(CONS, "V5", R)
+    assert floor == min(R["track_mm"], min(PW.LADDER_MM))
+    for amps in (0.0, 0.05, 1.0):
+        lad = RB.conn_ladder(CONS, "V5", R, amps, 10.0, TRK)
+        assert all(w >= floor - 1e-6 for w, _p in lad)
+    assert RB.conn_ladder(CONS, "V5", R, 0.0, 0.5, TRK)[0][0] == 0.15      # a pad neck keeps the signal width
