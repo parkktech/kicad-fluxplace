@@ -1835,6 +1835,33 @@ def _link_lib(workdir, board):
     return link
 
 
+RENET_FROM = ("route-ready", "critroute", "route")        # a run that starts here meets a board routed before a netlist change
+
+
+def _renet_entry(c, work, board, st):
+    """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
+    `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
+    from . import boardwrite as BW_, renet as RN_
+    out = os.path.join(work, "0-renet", "board.kicad_pcb")
+    try:
+        rep = RN_.apply(board, out, c.cons)
+    except Exception as e:                                                # noqa: BLE001 - a board pcbnew cannot read is the stages' business
+        print(f"pipeline: re-net check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+        return board
+    if not rep:
+        return board
+    _sidecar(board, out)
+    v = BW_.commit(board, out, out, release=rep["release"], reason="re-net", log=print)
+    if not v["written"]:
+        raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
+    c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
+    st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))
+    st["board"] = out
+    print(f"pipeline: re-net: {rep['items']} item(s) stripped from {len(rep['nets'])} net(s) at pad(s) {', '.join(rep['pads'][:8])}; "
+          f"they are routed as open nets ({out})", flush=True)
+    return out
+
+
 def _exec_stage(c, n, name, board, later=()):
     """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
     commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
@@ -1989,6 +2016,8 @@ def _run(a):
             return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    if STAGES_[i0] in RENET_FROM and os.path.isfile(board):
+        board = _renet_entry(c, work, board, st)
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
     failed_on = []
@@ -2067,6 +2096,8 @@ def _run(a):
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
+        if i == i0 and st.get("renet"):
+            st["stages"][name]["renet"] = st["renet"]
         if res.get("gate"):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
             if res["gate"].get("deferred"):
