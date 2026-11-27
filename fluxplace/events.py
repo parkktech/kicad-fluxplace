@@ -134,7 +134,7 @@ _rel = rel_path
 
 
 def iteration(loop, i, n=None, metrics=None, note=""):
-    """iteration event (loop place/pairs/route/close/lookahead/ghost/tune). Never raises."""
+    """iteration event (loop place/pairs/escape/escape-hood/route/close/lookahead/ghost/tune). Never raises."""
     try:
         if os.environ.get(ENV_FILE):
             clean = {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str, bool, list, type(None)))}

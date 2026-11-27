@@ -124,29 +124,34 @@ def coarse_dist(free, viaok, goals, f, step, via_cost):
     cj, ci = free[0].shape[0] // f, free[0].shape[1] // f
     C = np.stack([a[:cj * f, :ci * f].reshape(cj, f, ci, f).any(axis=(1, 3)) for a in free])
     Vc = viaok[:cj * f, :ci * f].reshape(cj, f, ci, f).any(axis=(1, 3)) if viaok is not None and nl > 1 else None
-    d = np.full(C.shape, PK.INF, np.float32)
-    for li, j, i in goals:
-        if j // f < cj and i // f < ci:
-            d[li, j // f, i // f] = 0.0
+    gl = [(li, j // f, i // f) for li, j, i in goals if j // f < cj and i // f < ci]
+    gi = tuple(np.array(x) for x in zip(*gl)) if gl else None
+    P = np.full((nl, cj + 2, ci + 2), PK.INF, np.float32)       # the field inside an INF border: the 8 neighbours are plain views
+    d = P[:, 1:-1, 1:-1]
+    if gi:
+        d[gi] = 0.0
     w1, w2 = np.float32(step * f), np.float32(step * f * math.sqrt(2))
-    dirs = [(0, 1, w1), (0, -1, w1), (1, 0, w1), (-1, 0, w1), (1, 1, w2), (1, -1, w2), (-1, 1, w2), (-1, -1, w2)]
+    nd, tmp = np.empty_like(d), np.empty_like(d)
     for _ in range(4 * max(cj, ci)):
-        nd = d.copy()
-        for l in range(nl):
-            for dy, dx, w in dirs:
-                np.minimum(nd[l], PK._shift(d[l], dy, dx, PK.INF) + w, out=nd[l])
+        np.minimum(P[:, 1:-1, 2:], P[:, 1:-1, :-2], out=nd)         # straight neighbours: min first, one step added (min and + commute exactly)
+        np.minimum(P[:, 2:, 1:-1], P[:, :-2, 1:-1], out=tmp)
+        np.minimum(nd, tmp, out=nd)
+        nd += w1
+        np.minimum(P[:, 2:, 2:], P[:, 2:, :-2], out=tmp)
+        np.minimum(tmp, P[:, :-2, 2:], out=tmp)
+        np.minimum(tmp, P[:, :-2, :-2], out=tmp)
+        tmp += w2
+        np.minimum(nd, tmp, out=nd)
+        np.minimum(nd, d, out=nd)
         if Vc is not None:
-            m = d.min(axis=0) + np.float32(via_cost)
-            for l in range(nl):
-                np.minimum(nd[l], np.where(Vc, m, PK.INF), out=nd[l])
+            np.minimum(nd, np.where(Vc, d.min(axis=0) + np.float32(via_cost), PK.INF), out=nd)
         nd[~C] = PK.INF
-        for li, j, i in goals:
-            if j // f < cj and i // f < ci:
-                nd[li, j // f, i // f] = 0.0
+        if gi:
+            nd[gi] = 0.0
         if np.array_equal(nd, d):
             break
-        d = nd
-    return d
+        d[...] = nd
+    return d.copy()
 
 
 def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost, via_cost, budget, lcost=None, ccost=None, cunit=0.1):

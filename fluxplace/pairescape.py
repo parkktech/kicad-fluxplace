@@ -24,9 +24,10 @@ import hashlib
 import json
 import math
 import os
-import tempfile
+import multiprocessing as mp
 import time
 
+from . import events as EV
 from . import pairgeo as G
 from . import pairlay as PL
 
@@ -41,6 +42,7 @@ def params(cons):
             "grow": int(e.get("escape_grow", 2)), "budget_s": float(e.get("escape_budget_s", 900.0)),
             "dirs": int(e.get("escape_dirs", 4)), "variants": int(e.get("escape_variants", 6)),
             "verify_reach": float(e.get("escape_verify_reach_mm", 8.0)), "grow_reach": float(e.get("escape_grow_reach_mm", 15.0)),
+            "workers": max(1, int(e.get("escape_workers", min(4, os.cpu_count() or 1)))),
             "watch": [str(x) for x in (e.get("escape_watch") or [])], "cross": e.get("escape_cross", True) is not False}
 
 
@@ -352,7 +354,7 @@ def blocker_parts(c, pairs_pads):
 
 def cache_dir(cons):
     d = ((cons or {}).get("pairlay") or {}).get("escape_cache_dir")
-    return d or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(tempfile.gettempdir(), "fluxplace-cache"), "pair-escape")
+    return d or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "fluxplace", "pair-escape")
 
 
 def fingerprint(B, cons, live, focus=()):
@@ -408,7 +410,28 @@ def _load(cons, fp, ctx, info, rules, p):
     return {"choice": choice, "reserve": reserve, "report": rep}
 
 
-def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
+_G = {}
+
+
+def _gcall(i):
+    return _G["fn"](*_G["args"][i])
+
+
+def pmap(fn, arglist, workers):
+    """[fn(*a) for a in arglist] in input order, the calls spread over forked workers (fn and its closure are inherited, never pickled;
+    only the arguments' indices and the results cross the pipe).  One worker or one call: in this process."""
+    if workers <= 1 or len(arglist) < 2:
+        return [fn(*a) for a in arglist]
+    _G.clear()
+    _G.update(fn=fn, args=arglist)
+    try:
+        with mp.get_context("fork").Pool(min(workers, len(arglist))) as pool:
+            return pool.map(_gcall, range(len(arglist)), chunksize=1)
+    finally:
+        _G.clear()
+
+
+def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep, workers=1):
     """diagnostic (outside review 2026-11-26): two materially different candidate exits crossed with the two emission orders of the target
     pairs, each pair scored on its own (laid in full, skew inside the guard limit).  Never changes the selection or the pairs order."""
     picks, seen = [], set()
@@ -419,15 +442,18 @@ def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
             picks.append(asg)
         if len(picks) == 2:
             break
-    rows = []
+    jobs = []
     for ci, asg in enumerate(picks):
         esc, rsv = _escape_of(asg, info)
         tl = [q for q in vset if q in targets]
         for oname, order in (("emission", list(vset)), ("targets-reversed", [q for q in vset if q not in targets] + tl[::-1])):
-            res = ghost(order, esc, rsv)
-            rep["ghost_runs"] += 1
-            sc = {"/".join(q): _in_tol(res.get(q), limit(q[0])) for q in vset}
-            rows.append({"hood": hood, "candidate": ci, "order": oname, "exits": {"/".join(pr) + f"@{ti}": [b["vkey"][0], b["layer"]] for (pr, ti), b in asg.items()}, "scores": sc})
+            jobs.append((ci, asg, oname, order, esc, rsv))
+    results = pmap(ghost, [(order, esc, rsv) for _ci, _asg, _o, order, esc, rsv in jobs], workers)     # independent probes: any order, merged in this one
+    rows = []
+    for (ci, asg, oname, _order, _esc, _rsv), res in zip(jobs, results):
+        rep["ghost_runs"] += 1
+        sc = {"/".join(q): _in_tol(res.get(q), limit(q[0])) for q in vset}
+        rows.append({"hood": hood, "candidate": ci, "order": oname, "exits": {"/".join(pr) + f"@{ti}": [b["vkey"][0], b["layer"]] for (pr, ti), b in asg.items()}, "scores": sc})
     return rows
 
 
@@ -492,35 +518,44 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
             rep["expansions"] += used
             nh["expansions"] = used
             blockers, chosen = set(), None
-            for asg in cands:
-                if time.time() - t0 > p["budget_s"]:
-                    nh["why"].append("escape budget spent")
+            W = p["workers"]
+            for b0 in range(0, len(cands), W):                  # probes of one batch run side by side; judged in shortlist order, the first good one wins
+                if chosen or time.time() - t0 > p["budget_s"]:
+                    if not chosen:
+                        nh["why"].append("escape budget spent")
                     break
-                nh["candidates"] += 1
-                esc, rsv = _escape_of(asg, info)
-                res = ghost(vset, esc, rsv)
-                rep["ghost_runs"] += 1
-                ok, why = judge(res, set(targets), vset, base, limit)
-                sig = frozenset(b["sig"] for b in asg.values())
-                if ok:
-                    chosen = (esc, rsv, asg)
-                    break
-                nh["why"] += why[:2]
-                for q in vset:                                    # a pair laid before and not now is an observed victim: it stays in every later verification
-                    if q not in targets and base.get(q) and (base[q]["full"] or base[q]["e"]["status"] == "kept") and not (res.get(q) or {}).get("full"):
-                        if q not in watch:
-                            rep.setdefault("victims", []).append("/".join(q))
-                        watch.add(q)
-                geom = [c for c in res.values() if c["e"].get("status") in ("not-laid", "partial")]
-                if any("search budget" in (c["e"].get("why") or "") for c in geom):
-                    rep["memory"]["deprioritised"] += 1
-                else:
-                    forbidden.add(sig)
-                    rep["memory"]["forbidden"] += 1
-                for c in res.values():
-                    blockers |= blocker_parts(c, set(comps))
+                batch = cands[b0:b0 + W]
+                escs = [_escape_of(asg, info) for asg in batch]
+                got = pmap(ghost, [(vset, esc, rsv) for esc, rsv in escs], W)
+                for asg, (esc, rsv), res in zip(batch, escs, got):
+                    if time.time() - t0 > p["budget_s"]:
+                        nh["why"].append("escape budget spent")
+                        break
+                    nh["candidates"] += 1
+                    rep["ghost_runs"] += 1
+                    EV.iteration("escape", rep["ghost_runs"], None, {"hood": len(hood), "candidates": nh["candidates"], "expansions": rep["expansions"],
+                                                                      "secs": round(time.time() - t0, 1)}, note="/".join(hood))
+                    ok, why = judge(res, set(targets), vset, base, limit)
+                    sig = frozenset(b["sig"] for b in asg.values())
+                    if ok:
+                        chosen = (esc, rsv, asg)
+                        break
+                    nh["why"] += why[:2]
+                    for q in vset:                                    # a pair laid before and not now is an observed victim: it stays in every later verification
+                        if q not in targets and base.get(q) and (base[q]["full"] or base[q]["e"]["status"] == "kept") and not (res.get(q) or {}).get("full"):
+                            if q not in watch:
+                                rep.setdefault("victims", []).append("/".join(q))
+                            watch.add(q)
+                    geom = [c for c in res.values() if c["e"].get("status") in ("not-laid", "partial")]
+                    if any("search budget" in (c["e"].get("why") or "") for c in geom):
+                        rep["memory"]["deprioritised"] += 1
+                    else:
+                        forbidden.add(sig)
+                        rep["memory"]["forbidden"] += 1
+                    for c in res.values():
+                        blockers |= blocker_parts(c, set(comps))
             if p["cross"] and cands and not any(c.get("hood") == tuple(hood) for c in rep["cross"]):
-                rep["cross"] += cross_scores(ghost, cands, info, vset, targets, base, limit, tuple(hood), rep)
+                rep["cross"] += cross_scores(ghost, cands, info, vset, targets, base, limit, tuple(hood), rep, p["workers"])
             if chosen:
                 esc, rsv, asg = chosen
                 out["choice"].update(esc)
@@ -543,6 +578,8 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
             nh["grown"].append(grow_to[0])
             nh["parts"] = list(hood)
         rep["neighbourhoods"].append(nh)
+        EV.iteration("escape-hood", len(rep["neighbourhoods"]), len(seeds), {"ghost_runs": rep["ghost_runs"], "secs": round(time.time() - t0, 1)},
+                     note=f"{'/'.join(nh['parts'])}: {nh['verdict']}")
         log(f"pairs: escape {nh['parts']} {nh['verdict']} ({nh.get('candidates', 0)} candidates, {nh.get('expansions', 0)} expansions)")
     rep["secs"] = round(time.time() - t0, 1)
     if time.time() - t0 <= p["budget_s"]:
