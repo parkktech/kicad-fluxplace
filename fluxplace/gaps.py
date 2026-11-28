@@ -1056,6 +1056,12 @@ def _move_via(board, out, x, y, nx, ny):
     return n
 
 
+def _sealed(r):
+    """A failed search that expanded fewer than UNSEAL_SEALED_NODES nodes started in a closed pocket."""
+    m = re.search(r"searched (\d+) nodes", str(r.get("reason") or ""))
+    return bool(m) and int(m.group(1)) < UNSEAL_SEALED_NODES
+
+
 def _via_probe(M, v, nx, ny):
     """The via `v` (routediag row) is legal at (nx, ny): its own copper and hole at the old place are not obstacles."""
     from . import handroute as HR, hrgeom as G
@@ -1075,13 +1081,44 @@ def _r_unseal(base, out, gaps, ctx):
     if not want:
         return {"status": "no plain net"}
     cur, res, tmps = base, {"status": "ran", "moved": [], "laid": []}, []
+
+    def _unseal_moves(cands):
+        """(via, nx, ny) tries in order: nearest via first, then each step, away from the end and both sideways."""
+        for d, v, (ex, ey) in cands:
+            ux, uy = (v["x"] - ex) / (d or 1), (v["y"] - ey) / (d or 1)
+            for step in UNSEAL_STEPS:
+                for dx, dy in ((ux, uy), (-uy, ux), (uy, -ux)):
+                    yield v, round(v["x"] + dx * step, 4), round(v["y"] + dy * step, 4)
+
+    def _try_move(cur, net, rec, v, nx, ny):
+        """Move via `v` to (nx, ny) on a copy of `cur`, then search and lay `rec`; the laid board, or None."""
+        mv = f"{out}.unseal{len(tmps)}.kicad_pcb"
+        tmps.append(mv)
+        _sidecars(cur, mv)
+        _move_via(cur, mv, v["x"], v["y"], nx, ny)
+        M2 = HR._model(mv, cp)
+        key = {(round(rec[k]["x"], 2), round(rec[k]["y"], 2)) for k in ("a", "b")}
+        rec2 = next((r for r in HR.open_nets(mv, constraints=cp, M=M2)["connections"] if r["net"] == net
+                     and {(round(r[k]["x"], 2), round(r[k]["y"], 2)) for k in ("a", "b")} == key), None)
+        if rec2 is None:
+            return None
+        for r in CR.search(HR, mv, net, None, cp, None, None, None, rec2, M2, 2.0):
+            if not r.get("found"):
+                if _sealed(r):          # still a closed pocket: the next move, not a wider search
+                    return None
+                continue
+            lay = f"{out}.unseal{len(tmps)}.kicad_pcb"
+            tmps.append(lay)
+            if HR.lay(mv, net, r["path"], out=lay, constraints=cp, lock=True).get("accepted"):
+                return lay
+        return None
+
     try:
         for net in want:
             M = HR._model(cur, cp)
             for rec in [r for r in HR.open_nets(cur, constraints=cp, M=M)["connections"] if r["net"] == net]:
                 first = next(CR.search(HR, cur, net, None, cp, None, None, None, rec, M, 2.0))
-                nodes = re.search(r"searched (\d+) nodes", str(first.get("reason") or ""))
-                if first.get("found") or not nodes or int(nodes.group(1)) >= UNSEAL_SEALED_NODES:
+                if first.get("found") or not _sealed(first):
                     continue
                 B = RD.load(cur)
                 names = sorted({s_["net"] for s_ in B["segs"]} | {v["net"] for v in B["vias"]})
@@ -1090,39 +1127,14 @@ def _r_unseal(base, out, gaps, ctx):
                 cands = sorted(((math.hypot(v["x"] - ex, v["y"] - ey), v, (ex, ey)) for v in B["vias"] for ex, ey in ends
                                 if v["net"] != net and math.hypot(v["x"] - ex, v["y"] - ey) < UNSEAL_R_MM
                                 and LP.level(v["net"], cons, names) in (LP.FREE, LP.SOFT)), key=lambda t: t[0])[:UNSEAL_VIAS]
-                done = False
-                for d, v, (ex, ey) in cands:
-                    ux, uy = (v["x"] - ex) / (d or 1), (v["y"] - ey) / (d or 1)
-                    for step in UNSEAL_STEPS:
-                        for dx, dy in ((ux, uy), (-uy, ux), (uy, -ux)):
-                            nx, ny = round(v["x"] + dx * step, 4), round(v["y"] + dy * step, 4)
-                            if not _via_probe(M, v, nx, ny):
-                                continue
-                            mv = f"{out}.unseal{len(tmps)}.kicad_pcb"
-                            tmps.append(mv)
-                            _sidecars(cur, mv)
-                            _move_via(cur, mv, v["x"], v["y"], nx, ny)
-                            M2 = HR._model(mv, cp)
-                            key = {(round(rec[k]["x"], 2), round(rec[k]["y"], 2)) for k in ("a", "b")}
-                            rec2 = next((r for r in HR.open_nets(mv, constraints=cp, M=M2)["connections"] if r["net"] == net
-                                         and {(round(r[k]["x"], 2), round(r[k]["y"], 2)) for k in ("a", "b")} == key), None)
-                            if rec2 is None:
-                                continue
-                            for r in CR.search(HR, mv, net, None, cp, None, None, None, rec2, M2, 2.0):
-                                if not r.get("found"):
-                                    continue
-                                lay = f"{out}.unseal{len(tmps)}.kicad_pcb"
-                                tmps.append(lay)
-                                if HR.lay(mv, net, r["path"], out=lay, constraints=cp, lock=True).get("accepted"):
-                                    cur, done = lay, True
-                                    res["moved"].append({"net": v["net"], "from": [v["x"], v["y"]], "to": [nx, ny]})
-                                    res["laid"].append(net)
-                                    break
-                            if done:
-                                break
-                        if done:
-                            break
-                    if done:
+                for v, nx, ny in _unseal_moves(cands):
+                    if not _via_probe(M, v, nx, ny):
+                        continue
+                    lay = _try_move(cur, net, rec, v, nx, ny)
+                    if lay:
+                        cur = lay
+                        res["moved"].append({"net": v["net"], "from": [v["x"], v["y"]], "to": [nx, ny]})
+                        res["laid"].append(net)
                         break
         if cur == base:
             return dict(res, status="no change")
