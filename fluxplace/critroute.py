@@ -40,8 +40,8 @@ def _listed(cons):
 
 
 def critical(board, cons, spec, cons_path=None):
-    """Open nets to pre-route: netclass classes in CLASSES plus the `[critroute] nets` list, each net once, rf first, then
-    clock, then listed nets; nets without an open connection are skipped. -> [{net, class, reason}]."""
+    """Open nets to pre-route: netclass classes in CLASSES plus the `[critroute] nets` list, each net once, crystals first, then rf,
+    then clock, then listed nets; nets without an open connection are skipped. -> [{net, class, reason}]."""
     from . import handroute as HR, netclass as NC, routediag as RD
     open_names = {r["net"] for r in HR.open_nets(board, constraints=cons_path)["connections"]}
     cls = NC.classify(RD.load(board), cons, spec)
@@ -55,7 +55,8 @@ def critical(board, cons, spec, cons_path=None):
             info = cls.get(net, {})
             rows[net] = {"net": net, "class": info.get("class", "listed"), "reason": info.get("reason") or "[critroute] nets"}
     out = [r for r in rows.values() if r["net"] in open_names]
-    out.sort(key=lambda r: (rank.get(r["class"], 2), r["net"]))
+    # a crystal net is a few mm at one IC with nowhere else to go: it claims its direct path before the long RF and clock runs
+    out.sort(key=lambda r: (0 if r["reason"] in NC.TOTAL_COPPER else 1, rank.get(r["class"], 2), r["net"]))
     return out
 
 

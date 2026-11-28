@@ -26,6 +26,15 @@ def test_critical_picks_rf_clock_and_listed_open_only(monkeypatch):
     assert [r["class"] for r in got] == ["rf", "clock", "plain"]
 
 
+def test_crystal_nets_are_tried_before_rf_and_other_clocks(monkeypatch):
+    cls = {"BT1_RF": {"class": "rf", "reason": "rf budget"}, "MCLK": {"class": "clock", "reason": "active oscillator"},
+           "XTAL1": {"class": "clock", "reason": "crystal/oscillator"}}
+    monkeypatch.setattr(NC, "classify", lambda B, cons, spec: cls)
+    monkeypatch.setattr(RD, "load", lambda board: {})
+    monkeypatch.setattr(HR, "open_nets", lambda board, constraints=None: {"connections": [_conn(n, i) for i, n in enumerate(cls)]})
+    assert [r["net"] for r in CR.critical("b.kicad_pcb", {}, None)] == ["XTAL1", "BT1_RF", "MCLK"]
+
+
 def test_packet_keys_and_size(monkeypatch):
     monkeypatch.setattr(NC, "classify", lambda B, cons, spec: {"BT1_RF": {"class": "rf", "reason": "rf budget"}})
     monkeypatch.setattr(RD, "load", lambda board: {})
