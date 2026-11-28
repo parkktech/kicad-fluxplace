@@ -209,3 +209,23 @@ def test_route_layers_come_from_the_board_not_a_fixed_stack(tmp_path):
     assert P.route_layers(p, [cu[-1], cu[0]], None) == [cu[0], cu[-1]]    # an explicit list is kept, in stack order
     with pytest.raises(SystemExit, match="not a copper layer"):
         P.route_layers(p, ["F.Cu", "In7.Cu"], None)
+
+
+def test_class_clearance_does_not_depend_on_pcbnew_having_saved_the_project(tmp_path):
+    """Ledger 2026-11-27: a minimal .kicad_pro (rules, no net classes) read as class clearance 0, so the router got the 0.1 floor; after
+    pcbnew had saved the project once (it writes its built-in Default class, 0.2) the same board routed at 0.2.  Both states read 0.2."""
+    import json
+    from fluxplace import routerules as RR
+    p, cp = routed(tmp_path)
+    pro = os.path.splitext(p)[0] + ".kicad_pro"
+    assert not json.load(open(pro)).get("net_settings")                  # the fixture's project is the minimal one
+    r0 = RR.request_clearance(RR.rules(C.load(cp), p, None, None, default=0.2))
+    j = json.load(open(pro))
+    j["net_settings"] = {"classes": [{"name": "Default", "clearance": 0.2, "track_width": 0.2}]}
+    json.dump(j, open(pro, "w"))
+    r1 = RR.request_clearance(RR.rules(C.load(cp), p, None, None, default=0.2))
+    assert r0 == r1 == 0.2
+    j["net_settings"]["classes"][0]["clearance"] = 0.15                  # a class the project does declare is read as written
+    json.dump(j, open(pro, "w"))
+    assert RR._pro_class_clearance(p) == 0.15
+    assert RR._pro_class_clearance(str(tmp_path / "none.kicad_pcb")) == 0.0

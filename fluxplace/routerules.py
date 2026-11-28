@@ -207,15 +207,25 @@ def flags(R, krt_dir, workdir, script="route.py"):
     return out
 
 
+KICAD_DEFAULT_CLASS_CLEARANCE = 0.2   # mm: what KiCad's DRC applies to the Default net class when the project file names none
+
+
 def _pro_class_clearance(board):
+    """The Default net class clearance KiCad will check this board against.  A project file that exists but lists no Default class
+    (a minimal .kicad_pro) still has one inside KiCad, at its built-in 0.2 mm; pcbnew writes it into the file the first time it saves
+    the project.  Reading 0 there made the routed clearance depend on whether such a save had already happened (ledger 2026-11-27:
+    the same board routed at 0.1 or at 0.2, and the 0.1 copper then failed DRC at 0.2).  No project file at all: 0 (no class known)."""
     try:
-        pro = os.path.splitext(board)[0] + ".kicad_pro"
-        for c in json.load(open(pro))["net_settings"]["classes"]:
-            if c.get("name") == "Default":
-                return float(c.get("clearance") or 0.0)
-    except (OSError, KeyError, ValueError, TypeError):
+        pro = json.load(open(os.path.splitext(board)[0] + ".kicad_pro"))
+    except (OSError, ValueError, TypeError):
+        return 0.0
+    try:
+        for c in pro["net_settings"]["classes"]:
+            if c.get("name") == "Default" and c.get("clearance") is not None:
+                return float(c["clearance"])
+    except (KeyError, ValueError, TypeError, AttributeError):
         pass
-    return 0.0
+    return KICAD_DEFAULT_CLASS_CLEARANCE
 
 
 def request_clearance(R):

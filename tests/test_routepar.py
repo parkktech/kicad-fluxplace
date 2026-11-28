@@ -43,6 +43,17 @@ def test_rules_floors_flags_and_defaults(tmp_path):
     assert "--same-net-pad-clearance=-1" in RR.flags(R2, str(krt), str(tmp_path / "W"))
 
 
+def _declare_class(board, clearance=0.1):
+    """The project declares its Default class below the floor: the wire clearance under test is then the floor itself.  (A project
+    that names no class is checked by KiCad at its built-in 0.2, routerules._pro_class_clearance, ledger 2026-11-27.)"""
+    import json
+    pro = os.path.splitext(board)[0] + ".kicad_pro"
+    j = json.load(open(pro)) if os.path.exists(pro) else {}
+    j.setdefault("net_settings", {})["classes"] = [{"name": "Default", "clearance": clearance}]
+    json.dump(j, open(pro, "w"))
+    return board
+
+
 def test_pipeline_route_cmd_carries_the_rules(tmp_path):
     from fluxplace import pipeline as PL
     import argparse
@@ -50,7 +61,7 @@ def test_pipeline_route_cmd_carries_the_rules(tmp_path):
     (krt / "py_router").mkdir(parents=True)
     (krt / "py_router" / "route.py").write_text('"--fab-overrides" "--same-net-pad-clearance" "--grid-step"')
     a = argparse.Namespace(router_py="py", router_dir=str(krt), layers=["F.Cu", "B.Cu"], track=0.1, clearance=0.1)
-    board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
+    board = _declare_class(G.board(tmp_path, G.two("R1", 40, 40, "A", "B")))
     R = RR.rules(CONS, board, a.track, a.clearance)
     cmd = PL._route_cmd(a, board, "o.kicad_pcb", ["A"], limited=True, R=R, rflags=RR.flags(R, str(krt), str(tmp_path)))
     j = " ".join(cmd)
@@ -288,7 +299,7 @@ def test_pcbnew_helper_counts_open_connections_on_a_real_board(monkeypatch):
 
 # ---------------------------------------------------------------- item 1: clearance request margin, dropped-by-reason
 def test_clearance_margin_requested_floor_kept(tmp_path):
-    board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
+    board = _declare_class(G.board(tmp_path, G.two("R1", 40, 40, "A", "B")))
     R = RR.rules(CONS, board, 0.15, 0.2)
     assert R["clearance_margin"] == R["grid"] and R["min_clearance"] == 0.127
     assert abs(RR.request_clearance(R) - 0.127) < 1e-9                              # exactly the floor: no margin is added
