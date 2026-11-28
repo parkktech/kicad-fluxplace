@@ -121,8 +121,12 @@ def net_over_budget(B, cls, cons=None):
             if ln <= 1.15 * floor + 1.0:
                 continue
             lim = floor                      # the rest of the excess is placement's
-        out.append({**_f(FAIL, "NET_OVER_BUDGET",
+        # D71gc (owner realistic-limits rule): a crystal net's copper budget is a stray-C rule of thumb (~0.1 pF/mm), not a sourced
+        # hard limit, so over it is a WARN unless the project set a per-net budget from the part's datasheet ([placement.budget])
+        lvl = WARN if info.get("reason") in NC.TOTAL_COPPER and not info.get("override") else FAIL
+        out.append({**_f(lvl, "NET_OVER_BUDGET",
                          f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm"
+                         f"{' (rule-of-thumb budget, not a sourced hard limit: WARN)' if lvl == WARN else ''}"
                          f"{f' (the fixed parts alone need {floor:.1f})' if floor > 0 and lim == floor else ''} "
                          f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''}){why}",
                          refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]), "net": net})

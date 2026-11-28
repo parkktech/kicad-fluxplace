@@ -76,7 +76,7 @@ def test_crystal_net_over_its_target_inside_the_multidrop_allowance_warns(tmp_pa
     assert [(x["code"], x["level"], x["limit"]) for x in f] == [("NET_OVER_TARGET", "WARN", 8.0)] and "not a sourced hard limit" in f[0]["msg"]
     assert PR.net_over_budget(brd(17.5), NC.classify(brd(17.5), {}), {}) == []          # 7.5 mm: inside the target
     B = brd(23.0)                                                                           # 13 mm: over the allowance too
-    assert [x["code"] for x in PR.net_over_budget(B, NC.classify(B, {}), {})] == ["NET_OVER_BUDGET"]
+    assert [(x["code"], x["level"]) for x in PR.net_over_budget(B, NC.classify(B, {}), {})] == [("NET_OVER_BUDGET", "WARN")]   # D71gc: unsourced
     cons = {"placement": {"budget": {"XT": {"mm": 9, "reason": "datasheet"}}}}              # a per-net budget is the owner's number: no target WARN
     B = brd(18.5)
     assert PR.net_over_budget(B, NC.classify(B, cons), cons) == []
