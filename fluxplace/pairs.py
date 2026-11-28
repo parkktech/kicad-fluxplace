@@ -1412,11 +1412,7 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
                 break
         if best is None:
             return False
-        for g, a, b in best[2]:
-            log(f"pairs: WARN repair {rnd}: {g[0]}/{g[1]} re-laid worse than its first lay: vias {a[0]} -> {b[0]}"
-                + (", skew now over its limit" if b[1] > a[1] else "") + " (kept: it completes " + ", ".join(f[0] for f in F if best[1][f]["full"]) + ")")
         st["res"].update(best[1])
-        st.setdefault("repair_warn", []).extend({"pair": list(g), "vias": [a[0], b[0]], "skew_over": [a[1], b[1]]} for g, a, b in best[2])
         return True
 
     changed = False
@@ -1440,6 +1436,12 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
         st["score"] = (sum(1 for c in st["res"].values() if not _bad(c)), sum(c["nok"] for c in st["res"].values()),
                        -round(sum(c["skew"] for c in st["res"].values()), 3))
         st["repaired"] = True
+        for g, a in first.items():                           # the loss that stayed, once per pair, against its FIRST lay
+            b = _quality(st["res"][g], limit)
+            if b[0] > a[0] or b[1] > a[1]:
+                log(f"pairs: WARN repair: {g[0]}/{g[1]} re-laid worse than its first lay: vias {a[0]} -> {b[0]}"
+                    + (", skew now over its limit" if b[1] > a[1] else "") + " (kept: the rip completed a pair that was open)")
+                st.setdefault("repair_warn", []).append({"pair": list(g), "vias": [a[0], b[0]], "skew_over": [a[1], b[1]]})
     return st
 
 
