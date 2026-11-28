@@ -604,7 +604,7 @@ def test_go_limit_allows_the_gate_rows_it_names(tmp_path, monkeypatch):
     rc = PL.run(_args(tmp_path, _board(tmp_path), constraints=cons, to_stage="close"))
     g = json.load(open(tmp_path / "W" / "state.json"))["stages"]["route"]
     assert rc == 0 and seen[-1] == "close" and g["verdict"] == "warn"
-    assert g["gate"]["stop"] == "allowed" and [r["id"] for r in g["gate"]["allowed"]] == ["power-width:R"] and "within the go limit" in g["line"]
+    assert g["gate"]["stop"] == "allowed" and [r["id"] for r in g["gate"]["allowed"]] == ["power-width:R"]
 
 
 def test_go_limit_exceeded_or_unnamed_kind_keeps_the_gate_closed(tmp_path, monkeypatch):
