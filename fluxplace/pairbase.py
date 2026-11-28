@@ -52,6 +52,20 @@ def modal_gap(segs, pair, wmax=1.5):
             return round(g, 4)
 
 
+def past_breakout(segs, pads, reach):
+    """The segments that are not pad break-out: a segment with both ends within `reach` mm of a pad of its own net on its layer is the
+    escape from that pad, where the pad pitch (not the pair rule) sets the gap between the legs."""
+    by = {}
+    for p in pads or ():
+        if p.get("net"):
+            by.setdefault(p["net"], []).append(p)
+    r2 = reach * reach
+
+    def near(net, layer, pt):
+        return any(layer in p["layers"] and (p["x"] - pt[0]) ** 2 + (p["y"] - pt[1]) ** 2 <= r2 for p in by.get(net, ()))
+    return [x for x in segs if not (near(x["net"], x["layer"], x["a"]) and near(x["net"], x["layer"], x["b"]))]
+
+
 def _segs(path):
     from . import routediag as RD
     B = RD.load(path)

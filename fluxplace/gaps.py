@@ -1919,7 +1919,7 @@ def gap_packet(base, gap, ctx, sid=None):
                 fb = json.load(fh)
         except (OSError, ValueError):
             fb = None
-    p = {"v": 2, "gap": {"id": gap["id"], "kind": gap["kind"], "class": gap.get("class"), "net": net},
+    p = {"v": 2, "gap": {"id": gap["id"], "kind": gap["kind"], "class": gap.get("class"), "net": net, "evidence": gap.get("evidence")},
          "board": base, "conn": conn, "window": win, "corridors": corr, "png": pngs, "sealed_by": sealed,
          "krt": krt, "tried": tried[-6:], "feedback": fb, "actions": _PACKET_ACTIONS}
     if str(gap.get("kind", "")).startswith("pair-") and len(gap.get("nets") or []) == 2:
@@ -3335,7 +3335,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             calllog.append(rec, attempts)
         tries.append({"result": result, "method": rung, "kind": kind, "why": why, "s": rec["s"]})
         n_att += 1
-        last[kind] = {"method": rung, "why": why}
+        last[kind] = {"method": rung, "why": why, "about": summ.get("gap_id")}
         return result in ("closed", "partial")
 
     def sub_attempt(r, kind, rung, ts, left):
@@ -3524,7 +3524,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
         left.append({"id": g["id"], "kind": g["kind"], "class": g["class"], "mag": g.get("mag"),
-                     "last_method": l.get("method"), "why": l.get("why")})
+                     "last_method": l.get("method"), "why": l.get("why"),
+                     **({"why_gap": l["about"]} if l.get("about") and l["about"] != g["id"] else {})})     # the reason was given for another gap of this kind
     ignored = []                                  # PHASE3H A7: answers left unapplied, with the reason
     by_sid = {critroute._safe(ai_key(g))[:80]: g for g in m["gaps"]}
     for f in sorted(glob.glob(os.path.join(ctx_dir_ai(work), "*.action.json"))):

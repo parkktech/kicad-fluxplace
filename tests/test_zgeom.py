@@ -135,3 +135,30 @@ def test_gated_pair_pays_more_for_inner_layers():
     assert gated[0] == plain[0] == gated[3] == 1.0
     assert gated[1] > plain[1] and gated[2] > plain[2]
     assert PA.layer_cost(copper, SIG, PA.params({"pairlay": {"inner_cost": 1.5}}), gated=True)[1] == 1.5
+
+
+def test_pad_escape_is_not_graded_at_the_pad_pitch(tmp_path, monkeypatch):
+    """A pair whose copper on a layer is only the escape from its own pads runs there at the pad pitch (0.5 mm pads -> 0.35 mm gap): that is
+    the bounded break-out, not a mis-laid pair, so no PAIR_IMPEDANCE_OFF; the same gap on a run past the break-out is still a FAIL."""
+    from fluxplace import routediag as RD, pairbase as PB
+    cons = dict(CONS, pairs={"ETH_": {"impedance_diff": 100, "tolerance_pct": 5}})
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text("")
+    tab = Z.family_table(cons, ROWS, PLANES, SIG, "ETH_")
+    w = tab["F.Cu"]["w"]
+    pitch = w + tab["F.Cu"]["gap"] + 0.8                                    # the pads sit wider apart than the pair rule
+
+    def load(length):
+        segs = [{"net": n, "layer": "F.Cu", "w": w, "a": (x, 0.0), "b": (x, length)} for n, x in (("ETH_TX_P", 0.0), ("ETH_TX_N", pitch))]
+        pads = [{"net": n, "x": x, "y": 0.0, "layers": {"F.Cu"}} for n, x in (("ETH_TX_P", 0.0), ("ETH_TX_N", pitch))]
+        return {"segs": segs, "pads": pads}
+
+    def off(length):
+        monkeypatch.setattr(RD, "load", lambda _b: load(length))
+        facts = {"stackup": ROWS, "plane_layers": PLANES, "copper_layers": 6, "board_path": str(board), "net_tracks": {
+            n: {"segments": [("F.Cu", w, length)]} for n in ("ETH_TX_P", "ETH_TX_N")}}
+        return [x["msg"] for x in R.check_pair_geometry(facts, cons) if x["code"] == "PAIR_IMPEDANCE_OFF"]
+    assert off(2.0) == []                                                   # pad -> via escape, inside the uncoupled break-out limit
+    far = off(30.0)                                                         # the same gap carried over a real run
+    assert len(far) == 2 and "measured" in far[0]
+    assert PB.past_breakout(load(2.0)["segs"], load(2.0)["pads"], 5.0) == [] and len(PB.past_breakout(load(30.0)["segs"], load(30.0)["pads"], 5.0)) == 2

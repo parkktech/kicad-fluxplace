@@ -77,6 +77,7 @@ def test_packet_clips_to_4096(monkeypatch, tmp_path):
     krt.write_text(json.dumps({"failed_single": [{"net": "SIG2"}, {"net": "GND"}], "open_single": [{"net": "SIG2"}]}))
     p = GP.gap_packet(str(tmp_path / "in.kicad_pcb"), GAP, _ctx(tmp_path, krt_last=str(krt)))
     assert set(p) == PKT_KEYS and p["conn"]["i"] == 0 and p["conn"]["a"]["pin"] == "R1.1"
+    assert GP.gap_packet(str(tmp_path / "in.kicad_pcb"), dict(GAP, evidence="why it is a gap"), _ctx(tmp_path))["gap"]["evidence"] == "why it is a gap"
     assert len(json.dumps(p).encode()) <= 4096
     assert len(p["window"]["tracks"]) < 60 and len(p["window"]["via_sites"]) == 10
     assert p["krt"] == {"failed": [], "open": []}          # oversized: krt is dropped first

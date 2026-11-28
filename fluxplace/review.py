@@ -593,7 +593,7 @@ def check_pair_geometry(facts, cons):
             continue                                              # explicit geometry is kept; the table above reports its impedance
         nt = facts.get("net_tracks") or {}
         legs = _pair_legs(facts, cons, nt)
-        partner, bsegs = _pair_partners(nt), None
+        partner, bload = _pair_partners(nt), None
         for net, tr in sorted(nt.items()):
             if not net.startswith(fam) or ZG.family_of(cons, net) != fam or net not in legs:
                 continue                                      # PHASE3G G3a: a single-ended net with a family prefix is not graded
@@ -605,23 +605,28 @@ def check_pair_geometry(facts, cons):
                 gg = IM.geometry(rows, planes, layer)
                 if not gg or not gg["model"]:
                     continue
-                gap = g["gap"]
+                gap, how = g["gap"], "planned"
                 if net in partner and board and os.path.isfile(str(board)):             # the gap the pair was laid at (measured), not only the planned one
                     try:
-                        from . import pairbase as PB, routediag as RD_
-                        bsegs = bsegs if bsegs is not None else RD_.load(board)["segs"]
-                        mg = PB.modal_gap([x for x in bsegs if x["layer"] == layer and abs(x["w"] - w) < 1e-6], tuple(sorted((net, partner[net]))))
-                        gap = mg if mg and mg >= 0.05 else gap
+                        from . import pairbase as PB, pairfb as PF, routediag as RD_
+                        bload = bload if bload is not None else RD_.load(board)
+                        pr = tuple(sorted((net, partner[net])))
+                        on = [x for x in bload["segs"] if x["net"] in pr and x["layer"] == layer and abs(x["w"] - w) < 1e-6]
+                        run = PB.past_breakout(on, bload["pads"], PF.uncoupled_limit(cons, pr))
+                        # only pad escapes on this layer: the pad pitch sets their gap, so the bounded break-out is graded on its width alone
+                        mg = PB.modal_gap(on, pr) if sum(math.dist(x["a"], x["b"]) for x in run) >= 1.0 else None
+                        if mg and mg >= 0.05:
+                            gap, how = mg, f"measured {mg:g} mm"
                     except Exception:                                                    # noqa: BLE001 - the planned gap stands
                         pass
                 z = IM.z_diff(w, gap, gg)
                 err = 100.0 * (z - v["impedance_diff"]) / v["impedance_diff"]
                 if abs(err) > g["tol_pct"] and (bad is None or abs(err) > abs(bad[0])):
-                    bad = (err, layer, w, mm, g)
+                    bad = (err, layer, w, mm, g, how)
             if bad:
-                err, layer, w, mm, g = bad
+                err, layer, w, mm, g, how = bad
                 out.append(_f(FAIL, "PAIR_IMPEDANCE_OFF",
-                              f"{net}: {mm:.1f} mm of {w:g} mm on {layer} is {err:+.0f}% off {v['impedance_diff']} ohm at the planned gap; "
+                              f"{net}: {mm:.1f} mm of {w:g} mm on {layer} is {err:+.0f}% off {v['impedance_diff']} ohm at the {how} gap; "
                               f"this layer needs {g['w']:g}/{g['gap']:g} (pairs.geometry)", refs={net}))
     return out
 
