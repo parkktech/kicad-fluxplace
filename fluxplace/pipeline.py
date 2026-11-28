@@ -1419,10 +1419,12 @@ def st_pour_tie(c, n, board):
     untied = rec["untied"]
     if rec.get("skipped"):
         return {"verdict": "pass", "line": f"pour-tie: skipped ({rec['skipped']})", "board": out}
+    fragile = rec.get("fragile") or []
     line = (f"pour-tie: {len(rec['nets'])} pour net(s), {pads} pad(s): {before} tied already by pour, {new} tied by new via, "
-            f"{len(untied)} not tied")
-    return {"verdict": "warn" if untied else "pass", "line": line, "board": out,
-            "next": [f"untied {u['net']} pad {u['pad']} at {u['at']}: {u['reason']}" for u in untied[:6]]}
+            f"{len(untied)} not tied" + (f", {len(fragile)} on a surface pour only (no via site into the plane)" if fragile else ""))
+    return {"verdict": "warn" if untied or fragile else "pass", "line": line, "board": out,
+            "next": [f"untied {u['net']} pad {u['pad']} at {u['at']}: {u['reason']}" for u in untied[:6]]
+            + [f"fragile {u['net']} {u.get('ref')}.{u['pad']} at {u['at']}: {u['reason']}" for u in fragile[:6]]}
 
 
 def pt_rec_nets(ptd):

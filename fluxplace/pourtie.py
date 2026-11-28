@@ -4,7 +4,12 @@ tie stage (after fan-out, before pairs/route): every pad of a pour net is either
 pad's own pour layer) or reached through same-net copper to a via that lands in filled copper of the net; the rest get a
 short stub + via into the pour at a legal site (planes.via_at_points + hole_ok).  Every tie is verified against the FILLED
 zone geometry after one refill; a tie that does not verify is undone.  Layers come from the board's zones, never named here.
-The verified ties are written to pourtie.json; repair() re-checks them after routing and re-ties what routing cut off."""
+The verified ties are written to pourtie.json; repair() re-checks them after routing and re-ties what routing cut off.
+
+Durable ties (W16 C112.2 / L300.2): a pour on a routing layer is whatever the router leaves of it, so for a net that owns a PLANE
+layer (solid_lids) the pour on a pad's own routing layer is no tie: the pad gets its stub + via into the plane here, before any
+signal copper takes the site.  A pad with no legal site stays on its surface pour and is recorded `fragile` (stage WARN, re-checked
+by repair); the placement gate POUR_TIE_BLOCKED (blocked()) names such a pad before any copper exists."""
 import json
 import math
 import os
@@ -47,6 +52,41 @@ def in_outline(board, net, x, y):
     return False
 
 
+def solid_lids(board, cons=None):
+    """copper layers routing does not use (planes): `[preroute] signal_layers` / `plane_layers`, else the stackup's planes, else an INNER
+    layer one netted zone covers >= 90 % of (the rule of preroute.layer_split, on the open board). -> {layer id}"""
+    cu = list(board.GetEnabledLayers().CuStack())
+    name = {l: board.GetLayerName(l) for l in cu}
+    pc = (cons or {}).get("preroute", {})
+    if isinstance(pc.get("signal_layers"), list):
+        return {l for l in cu if name[l] not in pc["signal_layers"]}
+    if isinstance(pc.get("plane_layers"), list):
+        return {l for l in cu if name[l] in pc["plane_layers"]}
+    try:
+        from . import zgeom as ZG
+        planes = set(ZG.resolve_stack(cons)[1] or [])
+    except Exception:                                    # noqa: BLE001 - no stackup in the constraints: the pour test decides
+        planes = set()
+    if planes:
+        return {l for l in cu[1:-1] if name[l] in planes}
+    bb = board.GetBoardEdgesBoundingBox()
+    area = max(float(bb.GetWidth()) * float(bb.GetHeight()), 1.0)
+    out = set()
+    for z in board.Zones():
+        if z.GetIsRuleArea() or not z.GetNetname():
+            continue
+        zb = z.GetBoundingBox()
+        if float(zb.GetWidth()) * float(zb.GetHeight()) >= 0.9 * area:
+            out.update(l for l in cu[1:-1] if z.IsOnLayer(l))
+    return out
+
+
+def tie_layers(pours, solid):
+    """the pour layers a tie must reach: the net's plane layers when durable ties are on (`solid` given) and it has one, else every
+    pour layer (a rail poured on a signal layer only has nothing better)."""
+    return [l for l in pours if l in solid] or list(pours) if solid is not None else list(pours)
+
+
 def pad_copper_lids(pad):
     return _copper_lids(pad.GetLayerSet().Seq())
 
@@ -56,9 +96,11 @@ def _pad_xy(pad):
     return p.x, p.y
 
 
-def tie_status(board, net, pad, pours):
-    """-> ("pour-layer", layer) | ("via", (x_mm, y_mm)) | (None, None): how the pad reaches the net's filled copper now."""
+def tie_status(board, net, pad, pours, solid=None):
+    """-> ("pour-layer", layer) | ("via", (x_mm, y_mm)) | (None, None): how the pad reaches the net's filled copper now.
+    `solid` (solid_lids) given: only the net's plane layers count (tie_layers), on the pad itself and under a via."""
     x, y = _pad_xy(pad)
+    pours = tie_layers(pours, solid)
     for lid in pours:
         if pad.IsOnLayer(lid) and fill_hit(board, net, lid, x, y):
             return "pour-layer", board.GetLayerName(lid)
@@ -107,8 +149,8 @@ def tie_status(board, net, pad, pours):
     return None, None
 
 
-def _ring_sites(x, y):
-    for r_mm in (0.0, 0.8, 1.1, 1.4):
+def _ring_sites(x, y, radii=(0.0, 0.8, 1.1, 1.4)):
+    for r_mm in radii:
         if r_mm == 0.0:
             yield r_mm, x, y
             continue
@@ -121,23 +163,67 @@ def _via_keys(board):
     return {(t.GetPosition().x, t.GetPosition().y) for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T}
 
 
-def _add_tie(board, net, pad, pours, made, rules=None):
-    """stub (if the site is off the pad) + via at the first legal ring site; the created objects go into `made`."""
+REACH_MM = 1.4                     # the farthest tie site from its pad (_ring_sites)
+
+
+def _near(board, pad, layer):
+    """the pads (any net) and the other-net tracks on `layer` a tie site of `pad` can meet."""
+    box = pad.GetBoundingBox()
+    box.Inflate(pcbnew.FromMM(REACH_MM + 1.0) + min(box.GetWidth(), box.GetHeight()) // 2)
+    pads = [p for f in board.GetFootprints() if f.GetBoundingBox(False, False).Intersects(box) for p in f.Pads() if p.GetBoundingBox().Intersects(box)]
+    trks = [t for t in board.GetTracks() if t.GetNetCode() != pad.GetNetCode() and t.IsOnLayer(layer) and t.GetBoundingBox().Intersects(box)]
+    return pads, trks
+
+
+def _site_free(pad, layer, x, y, cx, cy, rules, avoid, near):
+    """durable-tie site rules: the via barrel in no pad (unless `via_in_pad`), outside every keep-free rect (mm), and its stub
+    `clearance` off other-net pads and tracks on the pad's layer."""
+    pads, trks = near
+    if not rules.get("via_in_pad"):
+        at = pcbnew.VECTOR2I(int(cx), int(cy))
+        if any(p.HitTest(at, pcbnew.FromMM(rules["via"]) // 2) for p in pads):
+            return False
+    mx, my = pcbnew.ToMM(int(cx)), pcbnew.ToMM(int(cy))
+    h = rules["via"] / 2
+    if any(a - h < mx < c + h and b - h < my < d + h for a, b, c, d in avoid):
+        return False
+    acc = pcbnew.FromMM(rules["track"] / 2 + rules.get("clearance", 0.2))
+    n = max(1, int(math.hypot(cx - x, cy - y) / pcbnew.FromMM(0.05)))
+    pts = [pcbnew.VECTOR2I(int(x + (cx - x) * k / n), int(y + (cy - y) * k / n)) for k in range(n + 1)]
+    other = [o for o in pads if o.GetNetCode() != pad.GetNetCode() and o.IsOnLayer(layer)] + trks
+    return not any(o.HitTest(q, acc) for o in other for q in pts)
+
+
+def _add_tie(board, net, pad, pours, made, rules=None, avoid=None):
+    """stub (if the site is off the pad) + via at the first legal ring site; the created objects go into `made`.
+    `avoid` given (durable ties): the site also passes _site_free."""
     x, y = _pad_xy(pad)
     nc = board.FindNet(net)
     layer = pad_copper_lids(pad)[0]
     rules = rules or {"via": 0.6, "drill": 0.3, "track": 0.15}
-    for r_mm, cx, cy in _ring_sites(x, y):
-        if not PL.hole_ok(board, cx, cy, via_drill=rules["drill"]):
+    near = _near(board, pad, layer) if avoid is not None else None
+    radii = (0.0, 0.8, 1.1, 1.4)
+    if avoid is not None and not rules.get("via_in_pad"):   # the rings start outside the pad's own copper, whatever its size
+        sz = pad.GetSize(layer)
+        r0 = pcbnew.ToMM(min(sz.x, sz.y)) / 2 + rules["via"] / 2 + rules.get("clearance", 0.2)
+        radii = tuple(round(r0 + k * (REACH_MM - 0.8) / 2, 3) for k in range(3)) if r0 > 0.8 else radii[1:]
+        if pcbnew.ToMM(min(sz.x, sz.y)) >= 2 * rules["via"]:    # a pad two vias wide (thermal pad) takes the via in its own copper
+            radii = (0.0,) + radii
+            near = ([p for p in near[0] if not (p.GetNumber() == pad.GetNumber() and p.GetPosition() == pad.GetPosition())], near[1])
+    for r_mm, cx, cy in _ring_sites(x, y, radii):
+        if avoid is not None and not _site_free(pad, layer, x, y, cx, cy, rules, avoid, near):
+            continue
+        if not PL.hole_ok(board, cx, cy, via_drill=rules["drill"], hgap_mm=max(0.25, rules.get("hole_to_hole", 0.0))):
             continue
         before = _via_keys(board)
         if PL.via_at_points(board, net, [(pcbnew.ToMM(cx), pcbnew.ToMM(cy))], via_d=rules["via"], via_drill=rules["drill"]) != 1:
             continue
-        made.extend(t for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and (t.GetPosition().x, t.GetPosition().y) not in before)
+        new = [t for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and (t.GetPosition().x, t.GetPosition().y) not in before]
+        made.extend(new)
         if r_mm > 0.0:
             tr = pcbnew.PCB_TRACK(board)
             tr.SetStart(pcbnew.VECTOR2I(int(x), int(y)))
-            tr.SetEnd(pcbnew.VECTOR2I(int(cx), int(cy)))
+            tr.SetEnd(new[-1].GetPosition() if new else pcbnew.VECTOR2I(int(cx), int(cy)))     # on the via's own centre (mm round trip)
             tr.SetWidth(pcbnew.FromMM(rules["track"]))
             tr.SetLayer(layer)
             board.Add(tr)
@@ -153,20 +239,29 @@ def _undo(board, made):
             board.Delete(o)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
 
 
-def _tie_pads(board, net, pads, pours, rules=None):
-    """-> (tied: [record], untied: [record]); verified after one refill."""
+def _tie_pads(board, net, pads, pours, rules=None, solid=None, avoid=None):
+    """-> (tied: [record], untied: [record]); verified after one refill.  `solid` given (durable ties): a tie reaches a plane
+    layer of the net; an untied pad its surface pour still reaches carries `surface` = that layer."""
     cands = []
     outside = []
+    all_pours, pours = pours, tie_layers(pours, solid)
+    if solid is not None and avoid is None:
+        avoid = ()
+    surface = {}
     for pad in pads:
         how, where = tie_status(board, net, pad, pours)
         if how:
             continue
+        if solid is not None:
+            h0, w0 = tie_status(board, net, pad, all_pours)
+            if h0 == "pour-layer":
+                surface[tuple(_mm_at(pad))] = w0
         x, y = _pad_xy(pad)
         if not in_outline(board, net, x, y):
             outside.append(pad)              # no via can land in a pour that does not reach the pad: the pour is the limit
             continue
         made = []
-        cands.append((pad, made if _add_tie(board, net, pad, pours, made, rules) else None))
+        cands.append((pad, made if _add_tie(board, net, pad, pours, made, rules, avoid) else None))
     PL.refill(board)
     tied, untied = [], []
     for pad in outside:
@@ -190,6 +285,9 @@ def _tie_pads(board, net, pads, pours, rules=None):
             _undo(board, made)
             untied.append({"net": net, "pad": pad.GetNumber(), "at": [round(pcbnew.ToMM(x), 4), round(pcbnew.ToMM(y), 4)],
                            "reason": "via does not land in the filled pour (verified on the filled zone)"})
+    for u in untied:
+        if tuple(u["at"]) in surface:
+            u["surface"] = surface[tuple(u["at"])]
     if tied or untied:
         PL.refill(board)
     return tied, untied
@@ -482,7 +580,11 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     board = pcbnew.LoadBoard(board_in)
     R = RR.rules(cons, board_in)
     rules = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
-    rec = {"nets": {}, "tied": [], "untied": [], "satisfied": [], "rules": rules}
+    if R.get("via_in_pad"):
+        rules["via_in_pad"] = True
+    if R.get("hole_to_hole"):
+        rules["hole_to_hole"] = R["hole_to_hole"]
+    rec = {"nets": {}, "tied": [], "untied": [], "satisfied": [], "fragile": [], "rules": rules}
     if board is None:                            # not a KiCad board (a stub or an unreadable file): nothing to tie
         import shutil
         shutil.copy(board_in, board_out)
@@ -499,6 +601,8 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     PL.refill(board)
     pm = pour_map(board)
     pcfg = ((cons or {}).get("pours") or {})
+    solid = (solid_lids(board, cons) or None) if pcfg.get("durable_ties", True) else None
+    avoid = pair_aprons(board_in, cons, R) if solid else None
     extend_on = bool(pcfg.get("extend_to_pads", True))
     ext_max = float(pcfg.get("extend_max_mm", 15.0))
     rec["outside"] = []
@@ -508,11 +612,19 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
         pads = [p for f in board.GetFootprints() for p in f.Pads() if p.GetNetname() == net and not p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH]
         if not pads:
             continue
-        already_pads = [p for p in pads if tie_status(board, net, p, pm[net])[0]]
+        already_pads = [p for p in pads if tie_status(board, net, p, pm[net], solid)[0]]
         todo = [p for p in pads if p not in already_pads]
-        tied, untied = _tie_pads(board, net, todo, pm[net], rules) if todo else ([], [])
+        tied, untied = _tie_pads(board, net, todo, pm[net], rules, solid, avoid) if todo else ([], [])
+        fragile = [u for u in untied if u.get("surface")]       # no site for a via into the plane: the surface pour is all it has
+        untied = [u for u in untied if not u.get("surface")]
+        for u in fragile:
+            u["ref"] = _ref(_pad_at(board, net, u["at"]))
+            u["reason"] = f"tied by the {u['surface']} pour only; " + u["reason"]
+        rec["fragile"] += fragile
+        rec["satisfied"] += [{"net": net, "ref": u["ref"], "pad": u["pad"], "at": u["at"]} for u in fragile]
         rec["nets"][net] = {"pour_layers": [board.GetLayerName(l) for l in pm[net]], "pads": len(pads),
-                            "tied_before": len(already_pads), "tied_by_via": len(tied), "untied": len(untied)}
+                            "tied_before": len(already_pads) + len(fragile), "tied_by_via": len(tied), "untied": len(untied),
+                            "fragile": len(fragile)}
         for p in already_pads:
             rec["satisfied"].append({"net": net, "ref": _ref(p), "pad": p.GetNumber(), "at": _mm_at(p)})
         for t in tied:
@@ -563,6 +675,18 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     return rec
 
 
+def pair_aprons(board_in, cons, R):
+    """escape aprons of the controlled pairs (escreserve.pair_aprons) as keep-free rects in mm: a tie via laid before the pairs
+    stage must not stand where a pair leaves its pins. [] when the board has none (or is not a board file)."""
+    try:
+        from . import routediag as RD, netclass as NC, escreserve as ES
+        B = RD.load(board_in)
+        cls = NC.classify(B, cons or {}, None)
+        return [tuple(a["rect"]) for a in ES.pair_aprons(B, cls, max(R["clearance"], B["clearance"]), R["via"])]
+    except Exception:                                    # noqa: BLE001 - no pair model for this board: no keep-free rects
+        return []
+
+
 def _ref(pad):
     if pad is None:
         return ""
@@ -602,8 +726,37 @@ def repair_in_memory(board, rec):
                 repaired += 1
             else:
                 unrepaired += [dict(u, reason="lost after routing; " + u["reason"]) for u in untied]
+    for t in rec.get("fragile", []):                     # surface-pour pads: tied while their fill island still holds a via / drilled pad
+        pad = _pad_at(board, t["net"], t["at"])
+        if pad is None or not pm.get(t["net"]) or island_tied(board, t["net"], pad):
+            continue
+        lost.append(t)
+        tied, untied = _tie_pads(board, t["net"], [pad], pm[t["net"]], rec.get("rules"), solid_lids(board), ())
+        if tied:
+            repaired += 1
+        else:
+            unrepaired += [dict(u, reason="surface pour sealed by routing; " + u["reason"]) for u in untied]
     PL.refill(board)
-    return {"checked": len(rec["tied"]), "lost": len(lost), "repaired": repaired, "unrepaired": unrepaired}
+    return {"checked": len(rec["tied"]) + len(rec.get("fragile", [])), "lost": len(lost), "repaired": repaired, "unrepaired": unrepaired}
+
+
+def island_tied(board, net, pad):
+    """the filled outline of `net` under an SMD pad holds a via or a drilled pad of the net (else the island is sealed: the fill
+    touches the pad and reaches no other layer)."""
+    c = pad.GetPosition()
+    vias = [t.GetPosition() for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
+    holes = [p.GetPosition() for f in board.GetFootprints() for p in f.Pads() if p.GetNetname() == net and p.HasHole()]
+    for z in board.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != net:
+            continue
+        for lid in z.GetLayerSet().CuStack():
+            if not pad.IsOnLayer(lid):
+                continue
+            ps = z.GetFilledPolysList(lid)
+            for i in range(ps.OutlineCount()):
+                if ps.Contains(c, i) and any(ps.Contains(v, i) for v in vias + holes):
+                    return True
+    return False
 
 
 def repair(board_in, board_out, tie_dir, workdir):

@@ -12,6 +12,8 @@ exactly like review findings (same matcher).
                              lane within track + clearance
   PAIR_ESCAPE_BLOCKED  FAIL  a foreign pad stands in the escape apron of a controlled pair's two pins
                              (escreserve.pair_aprons: one or two via rows deep): the coupled pair cannot leave the part
+  POUR_TIE_BLOCKED     WARN  an SMD pad of a plane net has no via site within reach (pads, holes, no-via areas, the edge): it can
+                             only hang on the surface pour, which routing may seal (pourtie durable ties; W16 C112.2 / L300.2)
   KEEPOUT_TRAPPED      FAIL  pad inside a track-forbidding rule area
   CONGESTION           FAIL  coarse global route: demand > capacity (2 mm cells)
   RATSNEST_CROSSINGS   WARN  crossings between MST edges of different signal nets
@@ -46,7 +48,7 @@ from . import legality as LGL
 from . import placechecks as PCK
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
-CODES = ["NET_OVER_BUDGET", "NET_OVER_TARGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED",
+CODES = ["NET_OVER_BUDGET", "NET_OVER_TARGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED", "POUR_TIE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
          "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED",
          "COLLISION"]
@@ -315,6 +317,65 @@ def pair_escape_blocked(B, cls, cons=None):
         f["pins"] = sorted(f"{ref}.{n}" for a, _r, _q in hits for n in a["pins"])
         f["moves"] = [{"ref": r, "dir": s_, "mm": round(v, 3)} for (r, s_), v in sorted(need.items())]
         out.append(f)
+    return out
+
+
+POUR_TIE_REACH = 1.4               # mm: = pourtie.REACH_MM, the farthest tie via from its pad
+
+
+def pour_tie_blocked(B, cons=None):
+    """An SMD pad of a net that owns a plane layer needs a via into that plane (pourtie's durable tie): the pour on its own routing
+    layer is whatever routing leaves of it.  Placement only (no copper counted): a pad with no via site within POUR_TIE_REACH - the
+    barrel off every pad (clearance to other nets), off drilled holes, outside no-via rule areas and inside the outline, and a
+    straight stub to it that clears other-net pads - is reported, one WARN per part with the pads that crowd it."""
+    from . import routerules as RR
+    _sig, planes = layer_split(B, cons)
+    nets = {z["net"] for z in B["zones"] if z["net"] and not z["keepout"] and set(z["layers"]) & set(planes)}
+    if not nets:
+        return []
+    R = RR.rules(cons, None, B=B)
+    clr, via, trk = max(R["clearance"], B["clearance"]), R["via"], R["track"]
+    box = lambda q: (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"])
+    pads = GM.Hash(2.0)
+    for i, q in enumerate(B["pads"]):
+        pads.add(i, box(q), "x")
+    novia = [z for z in B["zones"] if z["keepout"] and z["no_vias"] and z["pts"]]
+    gap = lambda r, x, y: math.hypot(max(r[0] - x, 0.0, x - r[2]), max(r[1] - y, 0.0, y - r[3]))
+    by = defaultdict(list)
+    for p in B["pads"]:
+        if p["net"] not in nets or p["tht"] or p.get("np") or min(p["ex"], p["ey"]) >= via:
+            continue                                     # a pad two vias wide (thermal pad) takes its via in its own copper
+        reach = POUR_TIE_REACH + min(p["ex"], p["ey"])
+        near = [B["pads"][k] for k in pads.hits((p["x"] - reach - 1, p["y"] - reach - 1, p["x"] + reach + 1, p["y"] + reach + 1), "x")]
+        r0 = max(0.8, min(p["ex"], p["ey"]) + via / 2 + clr)
+        free, crowd = False, set()
+        for r in (r0, r0 + 0.3, r0 + 0.6):
+            for k in range(12):
+                x, y = p["x"] + r * math.cos(k * math.pi / 6), p["y"] + r * math.sin(k * math.pi / 6)
+                if not GM.in_outline(B, (x - via / 2 - clr, y - via / 2 - clr, x + via / 2 + clr, y + via / 2 + clr)) \
+                        or any(GM.poly_has(z["pts"], x, y) for z in novia):
+                    continue
+                hit = [q for q in near if gap(box(q), x, y) < via / 2 + (clr if q["net"] != p["net"] or q["tht"] else 0.0)]
+                n = max(1, int(r / 0.1))
+                hit += [q for q in near if q["net"] != p["net"] and (q["tht"] or q["layers"] & p["layers"]) and any(
+                    gap(box(q), p["x"] + (x - p["x"]) * j / n, p["y"] + (y - p["y"]) * j / n) < trk / 2 + clr for j in range(n + 1))]
+                if not hit:
+                    free = True
+                    break
+                crowd.update(q["ref"] for q in hit if q["ref"] != p["ref"])
+            if free:
+                break
+        if not free:
+            by[p["ref"]].append((p, sorted(crowd)))
+    out = []
+    for ref, hits in sorted(by.items()):
+        crowd = sorted({c for _p, cs in hits for c in cs})
+        out.append(_f(WARN, "POUR_TIE_BLOCKED",
+                      f"{ref}: pad(s) {', '.join(sorted({q['num'] for q, _c in hits}))} of plane net {hits[0][0]['net']} have no via site "
+                      f"within {POUR_TIE_REACH} mm (only the surface pour ties them; routing can seal it)"
+                      + (f" -> make room beside {ref}: crowded by {', '.join(crowd[:6])}" if crowd else ""),
+                      refs=[ref] + crowd, value=len(hits), limit=0, cls="pour"))
+        out[-1]["pins"] = sorted(f"{ref}.{q['num']}" for q, _c in hits)
     return out
 
 
@@ -645,6 +706,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
         f += AN.findings(B, cons, spec, cls)
     f += pin_escape_blocked(B)
     f += pair_escape_blocked(B, cls, cons)
+    f += pour_tie_blocked(B, cons)
     f += keepout_trapped(B)
     f += waived_pin_findings(B, cons)
     if surface is not None:                       # (pins, routed) from surface_pins(board): SURFACE_ONLY pins are listed / checked
