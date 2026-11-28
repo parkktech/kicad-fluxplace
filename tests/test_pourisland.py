@@ -86,3 +86,13 @@ def test_k15_a_rails_copper_is_ripped_only_when_nothing_opens(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     result = PI.repair(src, out, "GND", constraints=_cons(tmp_path, rail=True))
     assert not result["accepted"] and not os.path.exists(out)                # the rip would open the rail SIG: refused
+
+
+def test_k15_a_rip_that_alone_lets_the_pour_reach_the_island_is_the_repair(tmp_path, monkeypatch):
+    """W16 C112.2: ripping BT_INT_M let the F.Cu GND fill reach the pad, so the lay on the stripped copy saw nothing left to close."""
+    src = _blocked(str(tmp_path / "in.kicad_pcb"))
+    out = str(tmp_path / "out.kicad_pcb")
+    monkeypatch.setattr(H, "lay", lambda *a, **k: {"accepted": False, "reason": "target not closed: open connections of GND 0 -> 0"})
+    result = PI.repair(src, out, "GND", constraints=_cons(tmp_path))
+    assert result["accepted"] and result["action"] == "rip" and result["ripped"] == {"SIG": 1}
+    assert os.path.exists(out) and "SIG" in open(out).read() and vias(out) == 0

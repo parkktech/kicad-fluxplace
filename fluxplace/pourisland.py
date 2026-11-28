@@ -1,6 +1,7 @@
 """Guarded same-net pour-island repair: one stitching via at a legal site, never an unverified island deletion."""
 import math
 import os
+import re
 
 from . import handroute as H, planes as PL, pourtie as PTF, routerules as RR
 
@@ -164,7 +165,7 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
             import shutil
             shutil.rmtree(session)
     if at is None:                                    # k15: every free site is blocked: rip the blocking unlocked track, then lay
-        hit = _rip_lay(board, out, net, constraints, via, M, reasons)
+        hit = _rip_lay(board, out, net, constraints, via, M, reasons, sum(1 for r in records if r["net"] == net))
         if hit:
             return hit
     return {"accepted": False, "net": net, "reason": "no legal guarded stitching-via site joins the island", "attempts": reasons}
@@ -174,6 +175,7 @@ RIP_IDS = 16                        # k15: most blocking track pieces one rip-an
 RIP_NETS = 2                        # k15: most nets one rip-and-lay may open (each is re-laid by the caller)
 RIP_TRIES = 8                       # k15: rip-and-lay candidates tried per call (each is one guarded edit)
 RIP_KINDS = ("clearance", "crossing", "via_clearance")
+_STILL = re.compile(r"target not closed: open connections of \S+ (\d+) -> (\d+)")
 
 
 def _rippable(M, net, viols, names, cons, never=()):
@@ -232,7 +234,7 @@ def _rip_lay_closed(board, out, net, path, ids, constraints, via):
     return cut, H._edit(board, out, mutate, "lay", net, path, constraints)
 
 
-def _rip_lay(board, out, net, constraints, via, M, reasons):
+def _rip_lay(board, out, net, constraints, via, M, reasons, opens0=None):
     """k15 (sealed pour islands): a via site / pad stub refused only by unlocked tracks of other (non-hard) nets is laid after those
     tracks are ripped (fewest rips first). -> the accepted result with `ripped` {net: tracks} (the caller re-lays a ripped net that
     opened; the close guard judges the whole), or None."""
@@ -264,12 +266,17 @@ def _rip_lay(board, out, net, constraints, via, M, reasons):
             cut = _strip_ids(board, tmp, ids)
             try:
                 result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
+                m = _STILL.search(str(result.get("reason") or ""))
+                if not result["accepted"] and m and opens0 is not None and int(m.group(1)) < opens0:
+                    import shutil                        # the rip alone let the net's own pour reach the island: the stripped board is the repair
+                    shutil.copyfile(tmp, out)
+                    path, result = "rip only", {"accepted": True}
             finally:
                 for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro"):
                     if os.path.exists(f):
                         os.remove(f)
         if result["accepted"]:
-            return {"accepted": True, "action": "rip+" + ("via" if path.startswith("via") else "stub+via"), "net": net, "path": path,
+            return {"accepted": True, "action": "rip" if path == "rip only" else "rip+" + ("via" if path.startswith("via") else "stub+via"), "net": net, "path": path,
                     "via": list(via), "out": out, "ripped": cut, "measure": result.get("measure", {})}
         reasons.append({"path": path, "rip": sorted(cut), "reason": result.get("reason")})
     return None
