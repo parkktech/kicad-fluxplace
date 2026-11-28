@@ -2467,6 +2467,14 @@ def _run(a):
         led.before(prev)
         res = _exec_stage(c, i + 1, name, board, STAGES_[i + 1:])
         led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
+        if name == "route" and res.get("board") and os.path.exists(res["board"]):
+            try:                                               # plan's at-risk nets vs the nets the route left open (calibration data)
+                from . import planroute as PRT_
+                pb = (st["stages"].get("plan-route") or {}).get("board")
+                if pb:
+                    PRT_.risk_vs_open_ledger(led.path, os.path.splitext(pb)[0] + ".fluxmap.json", res["board"], _unc_nets(res["board"]))
+            except Exception as e:                             # noqa: BLE001 - a calibration note never stops the flow
+                print(f"pipeline: at-risk vs open note skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
         if res.get("board") and res["board"] != prev:

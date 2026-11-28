@@ -267,7 +267,7 @@ def plan_section(R):
     return {"corridors": corr, "escapes": {"pins": dict(esc), "headroom": plan.headroom,
                         "legend": "d=direct [dir,lane mm], v=via slot [x,y,stub], p=pour, s=sealed [blocker], n=no via site"},
             "grid": grid, "route": nets, "channels": channels,
-            "verdict": {"risk_frac": v["risk_frac"], "predicted_routable": v["predicted_routable"], "causes": v["causes"], "score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
+            "verdict": {"risk_nets": list(R.get("risk") or []), "risk_frac": v["risk_frac"], "predicted_routable": v["predicted_routable"], "causes": v["causes"], "score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
                         "counts": v["counts"], "reasons": v["reasons"],
                         "findings": rank(R["findings"])[:60], "floors": {k: R["pr"][k] for k in (
                             "track_mm", "clearance_mm", "via_mm", "drill_mm", "cell_mm")}}}
@@ -447,3 +447,31 @@ def calibrate_placement(B, cons, spec, radius=1.5):
     hit = sum(1 for x, y in failed if any(abs(x - px) <= radius + 1.0 and abs(y - py) <= radius + 1.0 and math.hypot(x - px, y - py) <= radius + 1.0
                                           for px, py in pts))
     return (hit / len(failed) if failed else 1.0), len(failed), hit
+
+
+def risk_vs_open(risk, opens):
+    """Plan-route's at-risk nets against the nets the route stage left open (calibrates `max_risk_frac` on measured data).
+    `risk` = iterable of net names, `opens` = {net: open count} or iterable.  -> (dict, ledger line)."""
+    risk, opens = set(risk or ()), set(opens or ())
+    both = risk & opens
+    d = {"at_risk": sorted(risk), "open": sorted(opens), "both": sorted(both), "at_risk_routed": len(risk - opens),
+         "open_not_at_risk": len(opens - risk)}
+    line = (f"plan-route vs route: at-risk {len(risk)}, open {len(opens)}, both {len(both)}, at-risk-but-routed {d['at_risk_routed']}, "
+            f"open-but-not-at-risk {d['open_not_at_risk']}; both: {', '.join(sorted(both)) or '-'}; open-not-at-risk: "
+            f"{', '.join(sorted(opens - risk)) or '-'}")
+    return d, line
+
+
+def risk_vs_open_ledger(ledger_path, map_path, route_board, unc=None):
+    """Append the risk_vs_open line to the run LEDGER.txt; silent no-op when the map has no at-risk list (older map) or is missing."""
+    try:
+        risk = json.load(open(map_path))["verdict"]["risk_nets"]
+    except (OSError, ValueError, KeyError):
+        return None
+    if unc is None:
+        from . import opengate as OG
+        unc = OG.unconnected_nets(route_board)
+    d, line = risk_vs_open(risk, [n for n, k in dict(unc).items() if k])
+    with open(ledger_path, "a") as fh:
+        fh.write(line + "\n")
+    return d
