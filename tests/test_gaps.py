@@ -353,8 +353,8 @@ def test_next_kind_tried_after_accept(monkeypatch, tmp_path, guard):
 
 
 def _fake_layers(monkeypatch, layers, lens):
-    monkeypatch.setattr(GP, "copper_layers", lambda board: list(layers))
-    monkeypatch.setattr(GP, "_track_len_by_layer", lambda board: dict(lens))
+    monkeypatch.setattr(GP, "copper_layers", lambda board, b=None: list(layers))
+    monkeypatch.setattr(GP, "_track_len_by_layer", lambda board, b=None: dict(lens))
 
 
 def test_signal_layers_drops_tiny_planes(monkeypatch):
