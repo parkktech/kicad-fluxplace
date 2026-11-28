@@ -208,6 +208,25 @@ def _strip_ids(board, dst, ids):
     return cut
 
 
+def _rip_lay_closed(board, out, net, path, ids, constraints, via):
+    """Rip `ids` and lay `path` in ONE guarded edit of `board`: refused when any net opens (handroute._edit), so a rail keeps its copper
+    whole. -> ({net: ripped count}, lay result)."""
+    cut = {}
+
+    def mutate(b, M):
+        for t in list(b.GetTracks()):
+            if t.m_Uuid.AsString() in ids:
+                cut[t.GetNetname()] = cut.get(t.GetNetname(), 0) + 1
+                b.Delete(t)
+        prims = H.G.parse_path(path, M.cu)
+        pr = H.probe_prims(M, net, prims, None, via, skip_ids=ids)
+        if not pr["ok"]:
+            raise ValueError("probe failed: " + str(pr["violations"][:2]))
+        H._apply_prims(b, M, net, prims, M.net_rule(net)["width"], via)
+        return {"ripped": dict(cut)}
+    return cut, H._edit(board, out, mutate, "lay", net, path, constraints)
+
+
 def _rip_lay(board, out, net, constraints, via, M, reasons):
     """k15 (sealed pour islands): a via site / pad stub refused only by unlocked tracks of other (non-hard) nets is laid after those
     tracks are ripped (fewest rips first). -> the accepted result with `ripped` {net: tracks} (the caller re-lays a ripped net that
@@ -233,14 +252,17 @@ def _rip_lay(board, out, net, constraints, via, M, reasons):
         if key in seen or len(seen) >= RIP_TRIES:
             continue
         seen.add(key)
-        tmp = out + ".rip.kicad_pcb"
-        cut = _strip_ids(board, tmp, ids)
-        try:
-            result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
-        finally:
-            for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro"):
-                if os.path.exists(f):
-                    os.remove(f)
+        if any(nets_of.get(i) in rails for i in ids):   # a rail's copper: only a rip that opens nothing (one guarded edit on `board`)
+            cut, result = _rip_lay_closed(board, out, net, path, ids, constraints, via)
+        else:
+            tmp = out + ".rip.kicad_pcb"
+            cut = _strip_ids(board, tmp, ids)
+            try:
+                result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
+            finally:
+                for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro"):
+                    if os.path.exists(f):
+                        os.remove(f)
         if result["accepted"]:
             return {"accepted": True, "action": "rip+" + ("via" if path.startswith("via") else "stub+via"), "net": net, "path": path,
                     "via": list(via), "out": out, "ripped": cut, "measure": result.get("measure", {})}

@@ -27,24 +27,25 @@ def test_net_without_pour_is_refused_without_output(tmp_path):
     assert not result["accepted"] and not os.path.exists(out)
 
 
-def _blocked(path, locked=False):
+def _blocked(path, locked=False, far_pad=False):
     """make()'s board plus a wide SIG track on B.Cu over every via site around the GND pad (SIG has a pad of its own: a net with
     no pad is not kept on load)."""
     make(path)
     b = pcbnew.LoadBoard(path)
     sig = pcbnew.NETINFO_ITEM(b, "SIG")
     b.Add(sig)
-    fp = pcbnew.FOOTPRINT(b)
-    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
-    pad = pcbnew.PAD(fp)
-    pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
-    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
-    pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1), pcbnew.FromMM(1)))
-    pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
-    pad.SetNet(sig)
-    pad.SetNumber("1")
-    fp.Add(pad)
-    b.Add(fp)
+    for x in ((17, 5) if far_pad else (17,)):            # far_pad: SIG joins two pads, so ripping its track opens it
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(10)))
+        pad = pcbnew.PAD(fp)
+        pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1), pcbnew.FromMM(1)))
+        pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(10)))
+        pad.SetNet(sig)
+        pad.SetNumber("1")
+        fp.Add(pad)
+        b.Add(fp)
     tr = pcbnew.PCB_TRACK(b)
     tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(5), pcbnew.FromMM(10)))
     tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
@@ -57,10 +58,10 @@ def _blocked(path, locked=False):
     return path
 
 
-def _cons(tmp_path):
-    """Constraints present (no constraints = every net hard, nothing is ripped)."""
+def _cons(tmp_path, rail=False):
+    """Constraints present (no constraints = every net hard, nothing is ripped); rail: SIG is a [power] rail."""
     p = tmp_path / "c.toml"
-    p.write_text("[route]\nrail_min_pads = 8\n")
+    p.write_text("[route]\nrail_min_pads = 8\n" + ('[power."SIG"]\nmax_current_ma = 500\n' if rail else ""))
     return str(p)
 
 
@@ -78,3 +79,10 @@ def test_k15_locked_blocking_track_is_never_ripped(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     result = PI.repair(src, out, "GND", constraints=_cons(tmp_path))
     assert not result["accepted"] and not os.path.exists(out)
+
+
+def test_k15_a_rails_copper_is_ripped_only_when_nothing_opens(tmp_path):
+    src = _blocked(str(tmp_path / "in.kicad_pcb"), far_pad=True)
+    out = str(tmp_path / "out.kicad_pcb")
+    result = PI.repair(src, out, "GND", constraints=_cons(tmp_path, rail=True))
+    assert not result["accepted"] and not os.path.exists(out)                # the rip would open the rail SIG: refused
