@@ -203,10 +203,27 @@ def search(HR, board, net, i, cons_path, layers, avoid, width, rec, M, via_cost)
             return
 
 
+def clean_start(board, nets):
+    """Scratch copy of `board` without ANY copper (locked too) of `nets` -> (path, removed count); (None, 0) when they carry none.
+    A crystal net is a few mm between an IC pin, the crystal and a load cap: an escape stub or via laid on it earlier (fan-out) is
+    stray capacitance and, locked, a wall across the direct path of its sibling net."""
+    from . import handroute as HR, pairrip
+    text, n = pairrip.strip_all(open(board, errors="surrogateescape").read(), nets)
+    if not n:
+        return None, 0
+    tmp = HR._tmp_beside(board, "critroute0")
+    with open(tmp, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    return tmp, n
+
+
 def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     """Lay the suggested path of every open connection of each critical net, in action order (default: `crit` order).
     A path is kept (locked) only when the measured opens fall and the shorts do not rise. The last kept board is copied to
-    `out`. One attempt-log record per try. -> {board, kept, tried, open_nets}."""
+    `out`. One attempt-log record per try. -> {board, kept, tried, open_nets, released}.
+    Crystal nets first get a clean start (`clean_start`): routed pad to pad on a copy without their earlier copper; adopted only when
+    every one of them closes with no more shorts (they are then `released`: the commit point must let their old copper go),
+    else the same nets are routed on the board as it came."""
     from . import gaps, handroute as HR
     crit = crit if crit is not None else critical(board, cons, None, cons_path)
     names = [c["net"] for c in crit]
@@ -217,8 +234,41 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     from . import rfroute as RFR
     rf_outer = RFR.outer_layers(default_layers)
     rf_w = RFR.widths(board, cons, [c["net"] for c in crit if c["class"] == "rf"], rf_outer) if rf_outer else {}
-    cur, base = board, gaps.measure(board)
-    tried, kept, lines, n_try, open_now = set(), [], [], 0, None
+    from . import netclass as NC
+    T = {"cur": board, "base": gaps.measure(board), "tried": set(), "kept": [], "lines": [], "n_try": 0, "open_now": None}
+    released = []
+    xt = [n for n in order if any(c["net"] == n and c.get("reason") in NC.TOTAL_COPPER for c in crit)]
+    clean, n_cut = clean_start(board, xt) if xt else (None, 0)
+    if clean:
+        C = dict(T, cur=clean, base=gaps.measure(clean), tried=set(), kept=[], lines=[])
+        _route(C, xt, board, acts, crit, cons_path, default_layers, rf_outer, rf_w, attempts)
+        still = sorted(set(xt) & set(C["open_now"] or ()))
+        if not still and C["base"]["shorts"] <= T["base"]["shorts"] and C["base"]["opens"] < T["base"]["opens"]:
+            C["lines"].insert(0, f"crystal clean start: {n_cut} earlier copper item(s) of {', '.join(xt)} removed, nets routed pad to pad")
+            T, released = C, list(xt)
+            order = [n for n in order if n not in xt]
+        else:
+            T["n_try"] = C["n_try"]
+            T["lines"].append(f"crystal clean start not adopted (open: {', '.join(still) or 'none'}; opens {T['base']['opens']}->{C['base']['opens']}, "
+                              f"shorts {T['base']['shorts']}->{C['base']['shorts']}); earlier copper kept")
+            _drop(C["cur"])
+    _route(T, order, board, acts, crit, cons_path, default_layers, rf_outer, rf_w, attempts)
+    cur, kept, lines, n_try, open_now = T["cur"], T["kept"], T["lines"], T["n_try"], T["open_now"]
+    if open_now is None:
+        open_now = {r["net"] for r in HR.open_nets(cur, constraints=cons_path)["connections"]}
+    if cur != board:
+        gaps._copy(cur, out)
+        gaps._sidecars(cur, out)
+        _drop(cur)
+        cur = out
+    return {"board": cur, "kept": kept, "tried": n_try, "open_nets": sorted(open_now), "lines": lines, "released": released}
+
+
+def _route(T, order, board, acts, crit, cons_path, default_layers, rf_outer, rf_w, attempts):
+    """The guarded search + lay of every open connection of the nets in `order`, on the state `T` (cur, base, tried, kept, lines,
+    n_try, open_now), which it updates. `board` is the stage input: scratch boards are named from it."""
+    from . import gaps, handroute as HR
+    cur, base, tried, kept, lines, n_try, open_now = T["cur"], T["base"], T["tried"], T["kept"], T["lines"], T["n_try"], T["open_now"]
     for net in order:
         a = acts.get("nets", {}).get(net, {})
         layers = a.get("layers") or default_layers
@@ -282,14 +332,7 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             if attempts:
                 calllog.append(rec_log, attempts)
             lines.append(f"{net} conn {i}: {result} ({why})")
-    if open_now is None:
-        open_now = {r["net"] for r in HR.open_nets(cur, constraints=cons_path)["connections"]}
-    if cur != board:
-        gaps._copy(cur, out)
-        gaps._sidecars(cur, out)
-        _drop(cur)
-        cur = out
-    return {"board": cur, "kept": kept, "tried": n_try, "open_nets": sorted(open_now), "lines": lines}
+    T.update(cur=cur, base=base, n_try=n_try, open_now=open_now if order else T["open_now"])
 
 
 def length_findings(B, cls, nets, cons=None):
@@ -352,6 +395,8 @@ def stage(c, n, board):
             + (f"; open: {', '.join(still)}" if still else ""))
     out = {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
            "next": [f"critroute open: {x}" for x in still]}
+    if res.get("released"):
+        out["released"] = res["released"]                   # commit point: their earlier (locked) copper was replaced, not damaged
     LF = length_findings(RD.load(res["board"]), cls, [x for x in names if x not in still], c.cons)
     if LF:
         out["findings"] = LF

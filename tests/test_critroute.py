@@ -282,7 +282,7 @@ def test_apply_emits_a_progress_event_per_connection():
     """route-10 critroute 2026-11-27: 11+ min with no event fired the stall alarm; each connection try is a progress event."""
     import inspect
     from fluxplace import critroute as CR
-    src = inspect.getsource(CR.apply)
+    src = inspect.getsource(CR._route)
     assert 'EV.emit("progress", "critroute"' in src and src.index('EV.emit("progress", "critroute"') < src.index("for r in search(")
 
 
@@ -295,3 +295,86 @@ def test_length_findings_warn_over_budget_fail_only_when_listed_hard(monkeypatch
     assert [(x["net"], x["level"], x["value"], x["limit"]) for x in f] == [("A", "WARN", 45.2, 38.0)]
     f = CR.length_findings({}, cls, ["A"], {"critroute": {"hard": ["A"]}})
     assert f[0]["level"] == "FAIL"
+
+
+_XT = """(kicad_pcb
+	(segment (start 1 1) (end 2 1) (width 0.127) (locked yes) (layer "F.Cu") (net "XT1") (uuid "00000000-0000-0000-0000-000000000001"))
+	(via (at 3 1) (size 0.46) (drill 0.2) (locked yes) (layers "F.Cu" "B.Cu") (net "XT2") (uuid "00000000-0000-0000-0000-000000000002"))
+	(segment (start 5 5) (end 6 5) (width 0.15) (layer "F.Cu") (net "SIG") (uuid "00000000-0000-0000-0000-000000000003"))
+)
+"""
+
+
+def test_clean_start_removes_all_copper_of_the_named_nets_only(tmp_path):
+    """W16 route-11 resume-3: HUB_XTAL2 routed 20.6 mm for 5.7 mm of pad distance, because the locked fan-out lane of HUB_XTAL1
+    crossed its direct path and its own lane led inward to a via. A crystal net starts from its pads."""
+    board = str(tmp_path / "board.kicad_pcb")
+    open(board, "w").write(_XT)
+    open(str(tmp_path / "board.kicad_pro"), "w").write("{}")
+    tmp, n = CR.clean_start(board, ["XT1", "XT2"])
+    text = open(tmp).read()
+    assert n == 2 and '"XT1"' not in text and '"XT2"' not in text and '(net "SIG")' in text
+    assert "critroute" in os.path.basename(tmp) and os.path.exists(os.path.splitext(tmp)[0] + ".kicad_pro")
+    assert CR.clean_start(board, ["ABSENT"]) == (None, 0)
+
+
+def _lineage_board(monkeypatch, tmp_path, clean_lays_ok):
+    """Fake board state per path: open nets + whether the path descends from the clean-start copy. A lay closes its net; on a
+    clean-start descendant it is refused unless `clean_lays_ok`."""
+    st, lays = {}, []
+    board = str(tmp_path / "board.kicad_pcb")
+    open(board, "w").write("base")
+    st[board] = {"open": {"XT1", "BT1_RF"}, "clean": False}
+
+    def clean_start(b, nets):
+        p = str(tmp_path / "board.critroute0.x.kicad_pcb")
+        open(p, "w").write("clean")
+        st[p] = {"open": set(st[b]["open"]), "clean": True}
+        return p, 3
+
+    def open_nets(b, constraints=None, **kw):
+        return {"connections": [_conn(n, i) for i, n in enumerate(sorted(st[b]["open"]))]}
+
+    def lay(b, net, path, out=None, **kw):
+        lays.append((net, st[b]["clean"]))
+        if st[b]["clean"] and not clean_lays_ok:
+            return {"accepted": False, "reason": "blocked"}
+        open(out, "w").write("x")
+        st[out] = {"open": st[b]["open"] - {net}, "clean": st[b]["clean"]}
+        return {"accepted": True}
+
+    monkeypatch.setattr(CR, "clean_start", clean_start)
+    monkeypatch.setattr(HR, "open_nets", open_nets)
+    monkeypatch.setattr(HR, "suggest", lambda b, net, **kw: {"found": True, "path": f"P{kw.get('pitch')}{kw.get('margin')}", "length_mm": 4.0})
+    monkeypatch.setattr(HR, "lay", lay)
+    monkeypatch.setattr(HR, "_model", lambda b, cons=None, **kw: None)
+    monkeypatch.setattr(gaps, "measure", lambda p, **kw: {"opens": len(st[p]["open"]), "shorts": 0})
+    monkeypatch.setattr(gaps, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr("fluxplace.rfroute.widths", lambda *a, **k: {})
+    crit = [{"net": "XT1", "class": "clock", "reason": NC.TOTAL_COPPER[0]}, {"net": "BT1_RF", "class": "rf", "reason": ""}]
+    out = str(tmp_path / "out" / "board.kicad_pcb")
+    os.makedirs(os.path.dirname(out))
+    return board, out, crit, lays
+
+
+def test_crystal_nets_are_routed_from_a_clean_start_and_released(tmp_path, monkeypatch):
+    board, out, crit, lays = _lineage_board(monkeypatch, tmp_path, clean_lays_ok=True)
+    res = CR.apply(board, out, None, None, {}, None, crit=crit)
+    assert lays == [("XT1", True), ("BT1_RF", True)]            # the other nets continue on the adopted board
+    assert res["released"] == ["XT1"] and res["open_nets"] == [] and res["board"] == out
+    assert res["lines"][0].startswith("crystal clean start: 3 earlier copper item(s) of XT1 removed")
+    assert not [f for f in os.listdir(tmp_path) if "critroute" in f]
+
+
+def test_clean_start_that_does_not_close_every_crystal_net_is_not_adopted(tmp_path, monkeypatch):
+    board, out, crit, lays = _lineage_board(monkeypatch, tmp_path, clean_lays_ok=False)
+    res = CR.apply(board, out, None, None, {}, None, crit=crit)
+    assert ("XT1", False) in lays and ("BT1_RF", False) in lays  # the same nets on the board as it came
+    assert res["released"] == [] and res["open_nets"] == []
+    assert any(l.startswith("crystal clean start not adopted (open: XT1") for l in res["lines"])
+    assert not [f for f in os.listdir(tmp_path) if "critroute" in f]
+
+
+def test_critroute_may_release_the_nets_it_re_laid():
+    from fluxplace import pipeline as PL
+    assert "critroute" in PL.RELEASING_STAGES

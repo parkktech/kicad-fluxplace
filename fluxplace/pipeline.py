@@ -1742,7 +1742,7 @@ def _earlier_gate_defers(g):
 # every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
 # its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
 SEED_STAGES = ("pairs", "tune")
-RELEASING_STAGES = ("tune", "close", "route")
+RELEASING_STAGES = ("tune", "close", "route", "critroute")   # critroute: crystal nets it re-laid from a clean start
 
 
 def _pcbnew_state_guard(name, res):
