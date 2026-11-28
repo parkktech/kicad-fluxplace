@@ -42,6 +42,7 @@ _X = {
     "HOLE_TO_HOLE": ("clearance", "floorplan"),
     "REF_PLANE_GAP": (None, "route"),
     "STALE_FILL": (None, "close"),
+    "CRIT_LENGTH_OVER_BUDGET": (None, "critroute"),      # 3055caa: WARN unless [critroute] hard; the critroute search is the owner
     "SOURCE_OVERLOAD": (None, OWNER_DATA),
     "FUSE_SIZING": (None, OWNER_DATA),
     "CHANNEL_MAX": ("row-away", "floorplan"),
