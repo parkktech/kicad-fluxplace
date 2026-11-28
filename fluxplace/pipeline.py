@@ -1604,6 +1604,48 @@ def _preexisting_only(c, r, d, kinds):
     return pre
 
 
+GATE_POLL_S = 5.0
+
+
+def _gate_state(d):
+    """what the stage gate's gap loop is doing, read from its own files: the newest attempt and that attempt's last phase."""
+    import glob
+    fs = glob.glob(os.path.join(d, "**", "attempt-*.phases.jsonl"), recursive=True)
+    if not fs:
+        return ""
+    try:
+        f = max(fs, key=os.path.getmtime)
+        rows = [x for x in open(f).read().splitlines() if x.strip()]
+        return f"{os.path.basename(f).split('.')[0]} {json.loads(rows[-1]).get('p', '?')} (phase {len(rows)})" if rows else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _gate_watched(d, name, fn, poll=None):
+    """fn() (the gate's gap loop, which logs nothing) with one progress event per CHANGE of _gate_state: real progress only, so a
+    loop that stops moving still goes silent and the stall watcher sees it (W16: 18 min without an event in the pairs gate)."""
+    import threading
+    from . import events as EV
+    stop = threading.Event()
+
+    def watch():
+        last = ""
+        while not stop.wait(GATE_POLL_S if poll is None else poll):
+            s = _gate_state(d)
+            if s and s != last:
+                last = s
+                EV.emit("progress", name, step=f"gate {name}: gap loop {s}", state="running")
+    EV.emit("progress", name, step=f"gate {name}: gap loop start", state="running")
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        EV.emit("progress", name, step=f"gate {name}: gap loop end" + (f", last {_gate_state(d)}" if _gate_state(d) else ""), state="running")
+
+
 def _gate_check(c, n, name, board, kinds, src=None, later=()):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
@@ -1611,8 +1653,8 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
     d = c.dir(n, "gate")
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
     try:
-        r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds,
-                     budget_min=float((c.cons.get("flow") or {}).get("gate_budget_min", 20)))   # PHASE3I F2
+        r = _gate_watched(d, name, lambda: GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds,
+                                                    budget_min=float((c.cons.get("flow") or {}).get("gate_budget_min", 20))))   # PHASE3I F2
     except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
         return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
                 "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
