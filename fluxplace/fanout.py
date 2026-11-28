@@ -391,6 +391,37 @@ def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None, waived=(), 
         pass
 
 
+def drop_new_drc_copper(board_in, out, d0, d1, keep):
+    """Remove from `out` the tracks/vias that fan-out added (uuid not on `board_in`) and that sit in a violation `d1` has and `d0` has
+    not (by drcguard key). -> number of items removed (0 when none could be attributed: the stage then fails as before)."""
+    from . import drcguard as DG
+    import pcbnew
+    base = Counter(DG.key_of(v) for v in d0.get("violations", []) if keep(v))
+    new_ids = set()
+    for v in d1.get("violations", []):
+        if not keep(v):
+            continue
+        k = DG.key_of(v)
+        if base[k] > 0:
+            base[k] -= 1
+            continue
+        new_ids |= {it.get("uuid") for it in v.get("items", []) if it.get("uuid")}
+    if not new_ids:
+        return 0
+    old = {t.m_Uuid.AsString() for t in pcbnew.LoadBoard(board_in).GetTracks()}
+    b = pcbnew.LoadBoard(out)
+    gone = [t for t in b.GetTracks() if t.m_Uuid.AsString() in new_ids and t.m_Uuid.AsString() not in old]
+    for t in gone:
+        b.Remove(t)
+    if gone:
+        pro = os.path.splitext(out)[0] + ".kicad_pro"
+        keep_pro = open(pro, "rb").read() if os.path.exists(pro) else None
+        b.Save(out)
+        if keep_pro is not None:                    # BOARD.Save rewrites the neighbouring project file: the stage's rules stay
+            open(pro, "wb").write(keep_pro)
+    return len(gone)
+
+
 def cmd_fanout(a):
     from . import constraints as C
     spec = json.load(open(a.spec)) if a.spec else None
@@ -412,10 +443,19 @@ def cmd_fanout(a):
         # copper-rule errors only: connectivity (unconnected items) is the open-connection count's, one definition for reports
         keep = lambda v: v.get("severity") == "error" or v["type"] == "hole_to_hole"
         t0 = time.time()
-        k0, (c0, u0) = DG.drc_keys(a.board, keep=keep, unconnected=False)
-        k1, (c1, u1) = DG.drc_keys(out, keep=keep, unconnected=False)
+        d0 = DG.drc_json(a.board)
+        k0, (c0, u0) = DG.keys_from_report(d0, keep=keep, unconnected=False)
+        d1 = DG.drc_json(out)
+        k1, (c1, u1) = DG.keys_from_report(d1, keep=keep, unconnected=False)
         added = dict(Counter(k[0] for k in DG.new_keys(k0, k1)))
-        drc = {"before": c0, "after": c1, "delta": added, "secs": round(time.time() - t0, 1)}
+        dropped = 0
+        if added:                                   # 2026-11-27 W16 route-11: one new clearance error failed the whole stage;
+            dropped = drop_new_drc_copper(a.board, out, d0, d1, keep)       # the fan-out copper in it goes, its pins stay open
+            if dropped:
+                k1, (c1, u1) = DG.drc_keys(out, keep=keep, unconnected=False)
+                added = dict(Counter(k[0] for k in DG.new_keys(k0, k1)))
+                print(f"fanout: dropped {dropped} new track/via item(s) that added DRC errors (their pins are left for the router)")
+        drc = {"before": c0, "after": c1, "delta": added, "dropped": dropped, "secs": round(time.time() - t0, 1)}
     waived = [p for v in per.values() for p in v["waived"]]
     surface = [p for v in per.values() for p in v["surface"]]
     for p in waived:
