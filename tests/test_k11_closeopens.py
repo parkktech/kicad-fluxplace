@@ -260,3 +260,10 @@ def test_board_lines_rows_carry_item_ids(tmp_path):
                        ' (via (at 3 3) (size 0.46) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "12345678-0000-0000-0000-000000000000")))')
     rows = [json.loads(l) for l in open(DC.board_lines(b, str(tmp_path / "d")))]
     assert {r["kind"]: r["id"] for r in rows if r["kind"] in ("seg", "via")} == {"seg": "abcdef12", "via": "12345678"}
+
+
+def test_ai_rung_names_a_pair_leg_open_not_a_budget(tmp_path):
+    """k16 (live run: open-free BT2_DP came back 'ai budget' with budget unused): an open on a live pair's leg is skipped for the pair."""
+    gap = {"id": "g", "kind": "open-free", "class": "plain", "nets": ["P"]}
+    ctx = {"ai_used": {}, "ai_dir": str(tmp_path), "cons": {}, "pair_gap_legs": ["P"]}
+    assert GP._r_ai("b", "o", [gap], ctx)["status"] == "ai pair leg"

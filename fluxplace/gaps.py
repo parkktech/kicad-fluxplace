@@ -2199,7 +2199,7 @@ def _r_ai(base, out, gaps, ctx):
         elif os.path.exists(os.path.join(ai_dir, sid + ".action.json")):   # PHASE3H A9: say why the answer is ignored
             _feedback_note(ai_dir, sid, refused=f"ai budget {used.get(key, 0)}/{budget}")
     if not todo:
-        return {"status": "ai budget"}
+        return {"status": "ai budget" if seen else "ai pair leg"}          # k16: an open on a live pair's leg is the pair's gap, not an exhausted budget
     todo.sort(key=lambda t: (used.get(t[1], 0),                          # PHASE3H A1: least used, then packet missing first
                              0 if not os.path.exists(os.path.join(ai_dir, t[2] + ".packet.json")) else 1))
     for gap, key, sid in todo:
