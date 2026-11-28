@@ -5,6 +5,7 @@ and the threshold in the message. `[review] waive = ["CODE:REGEX"]` waives them
 exactly like review findings (same matcher).
 
   NET_OVER_BUDGET      FAIL  MST length of a net > its class budget (netclass.py)
+  NET_OVER_TARGET      WARN  a crystal net's total copper (MST) > the class target but inside the multi-drop allowance
   SUPPORT_PART_FAR     FAIL  confidently-owned support part beyond its limit (clusters.py)
   ANCHOR_MISORIENTED   FAIL  an anchor > 15 % worse than its best rotation (anchors.py)
   PIN_ESCAPE_BLOCKED   FAIL  fine-pitch pin with a foreign obstacle in its outward
@@ -45,7 +46,7 @@ from . import legality as LGL
 from . import placechecks as PCK
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
-CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED",
+CODES = ["NET_OVER_BUDGET", "NET_OVER_TARGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
          "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED",
          "COLLISION"]
@@ -92,6 +93,15 @@ def net_over_budget(B, cls, cons=None):
         if lim is None:
             continue
         ln = NC.mst_length([NC.pad_xy(p) for p in pads[net]])
+        base = info["budget"]
+        if info.get("reason") in NC.TOTAL_COPPER and not info.get("override") and base < ln <= lim:
+            # the multi-drop allowance (x1.5 per extra part) hid this: stray C counts every mm of the net, load-cap branch included
+            out.append({**_f(WARN, "NET_OVER_TARGET",
+                             f"{net} [{info['class']}, {info['reason']}]: {ln:.2f} mm of copper, target {base:g} mm "
+                             f"(FAIL at the multi-drop allowance {lim:g} mm). Basis: ~0.1 pF/mm stray C against a ~1 pF load-cap tolerance; a design target, "
+                             f"not a sourced hard limit: shorten it, or set [placement.budget].\"{net}\" = {{mm, reason}} from the "
+                             f"part's datasheet (frequency tolerance, load capacitance)",
+                             refs=sorted({p["ref"] for p in pads[net]}), value=round(ln, 2), limit=base, cls=info["class"]), "net": net})
         if ln <= lim:
             continue
         ends = sorted({p["ref"] for p in pads[net]})

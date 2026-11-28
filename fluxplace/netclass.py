@@ -501,6 +501,9 @@ def net_length(B, net, ps=None):
     return mst_length([pad_xy(p) for p in ps])
 
 
+TOTAL_COPPER = ("crystal/oscillator",)   # reasons whose budget is stray capacitance: every mm of the net counts, not the longest branch
+
+
 def effective_budget(info):
     b = info["budget"]
     if b is None:

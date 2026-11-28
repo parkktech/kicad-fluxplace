@@ -61,3 +61,22 @@ def test_oscillator_is_a_clock_crystal_keeps_8mm(tmp_path):
     assert cls["XIN"]["budget"] == 8.0
     cls = NC.classify(B, {"placement": {"budget": {"pair": 80.0, "slow": 500.0}}})
     assert cls["MCLK"]["budget"] == 20.0
+
+
+def test_crystal_net_over_its_target_inside_the_multidrop_allowance_warns(tmp_path):
+    """W16 HUB_XTAL1: crystal + load cap + IC = 3 parts, allowance 8 x 1.5 = 12 mm, 8.44 mm of copper passed in silence."""
+    def brd(x_ic):
+        b = (g.fp("Y1", 10, 10, [g.pad("1", 0, 0, "XT")]) + g.fp("C1", 12, 10, [g.pad("1", 0, 0, "XT")])
+             + g.fp("U1", x_ic, 10, [g.pad("1", 0, 0, "XT")]))
+        return RD.load(g.board(tmp_path, b))
+    B = brd(18.5)
+    cls = NC.classify(B, {})
+    assert cls["XT"]["reason"] == "crystal/oscillator" and cls["XT"]["budget"] == 8.0
+    f = PR.net_over_budget(B, cls, {})
+    assert [(x["code"], x["level"], x["limit"]) for x in f] == [("NET_OVER_TARGET", "WARN", 8.0)] and "not a sourced hard limit" in f[0]["msg"]
+    assert PR.net_over_budget(brd(17.5), NC.classify(brd(17.5), {}), {}) == []          # 7.5 mm: inside the target
+    B = brd(23.0)                                                                           # 13 mm: over the allowance too
+    assert [x["code"] for x in PR.net_over_budget(B, NC.classify(B, {}), {})] == ["NET_OVER_BUDGET"]
+    cons = {"placement": {"budget": {"XT": {"mm": 9, "reason": "datasheet"}}}}              # a per-net budget is the owner's number: no target WARN
+    B = brd(18.5)
+    assert PR.net_over_budget(B, NC.classify(B, cons), cons) == []
