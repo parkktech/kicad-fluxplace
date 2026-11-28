@@ -76,6 +76,17 @@ class Grid:
                         D[l][sl][m] = sdf[m]
                         O[l][sl][m] = idx
 
+    def shut(self, D, O, layer, x, y, r, label):
+        """close the centre-line cells within r of (x, y) in a view (`layer` None: every layer): where the exact check refused a leg."""
+        sl = self.F._sl(x, y, x, y, r + self.step)
+        if sl:
+            m = np.hypot(self.F.X[sl] - x, self.F.Y[sl] - y) <= r
+            idx = self.F._add("seg", None, "", label)
+            for l in ([layer] if layer else list(D)):
+                if l in D:
+                    D[l][sl][m] = -1.0
+                    O[l][sl][m] = idx
+
     def drop_old(self, nets):
         for n in nets:
             self.old.pop(n, None)
@@ -335,6 +346,26 @@ def check(items, pieces, net, clr, skip_old, mate=None):
         if g < worst:
             worst, who = g, it
     return worst, who
+
+
+def fouls(items, pieces, net, clr, skip_old, step):
+    """where the exact check refuses the pieces -> [(layer | None for a via, x, y, item)], sampled every `step` along a track."""
+    out = []
+    for p in pieces:
+        if p[0] == "via":
+            g, it = items.gap_via(p[1], p[2], p[3], net, clr, skip_old)
+            if g < clr - 1e-6:
+                out.append((None, p[1], p[2], it))
+            continue
+        if items.gap_seg(p[2], p[3], p[4], p[1], net, clr, skip_old)[0] >= clr - 1e-6:
+            continue
+        n = max(1, int(math.ceil(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1]) / step)))
+        for k in range(n + 1):
+            q = (p[2][0] + (p[3][0] - p[2][0]) * k / n, p[2][1] + (p[3][1] - p[2][1]) * k / n)
+            g, it = items.gap_seg(q, q, p[4], p[1], net, clr, skip_old)
+            if g < clr - 1e-6:
+                out.append((p[1], q[0], q[1], it))
+    return out
 
 
 def pad_axis(pad, toward):

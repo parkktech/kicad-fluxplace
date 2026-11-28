@@ -258,6 +258,50 @@ def _gates(grid, allowed, li_list, term, R, outward, lats):
     return out
 
 
+def _split(items, t, lays, nets, clr, skip):
+    """a SPLIT terminal: foreign copper sits between its P pad and its N pad (the ground pin of a flow-through protection array, that
+    pin's fan-out stub and via).  Pure geometry on the pad layers; the answer is kept on the terminal."""
+    if "_split" not in t:
+        a, b = (t["p"]["x"], t["p"]["y"]), (t["n"]["x"], t["n"]["y"])
+        r = clr + 0.6
+        t["_split"] = any(it["k"] != "poly" and it["net"] not in nets and not (it["old"] and (it["net"] in skip or it.get("dead")))
+                          and any(l in it["layers"] for l in lays) and items._dist(it, a, b) < clr
+                          for it in items._near(min(a[0], b[0]) - r, min(a[1], b[1]) - r, max(a[0], b[0]) + r, max(a[1], b[1]) + r))
+    return t["_split"]
+
+
+def _sight(ctx, t, gates, dl, wl, nets, clr, R, strict=True):
+    """gates of a split terminal: only those from which each leg sees its own pad in a straight clear line, so the search arrives
+    where the pair can part round the foreign copper between the pads (it used to arrive at the nearest gate, whose break-out had to
+    cross that copper and was refused, five times: W16 USB_DM_J / USB_DP_J at a SOT-23-6 array with the ground pin's via between the
+    pads).  None in sight, or not `strict` (the last attempts): every gate, the blind ones at the cost of a walk round the terminal."""
+    grid, items = ctx["grid"], ctx["items"]
+    if not _split(items, t, [l for l in grid.sig if l in t["p"]["layers"] and l in t["n"]["layers"]], nets, clr, ctx["skip"]):
+        return gates
+    memo = t.setdefault("_sight", {})
+    if memo.get("mark") != items.mark():
+        memo.clear()
+        memo["mark"] = items.mark()
+    out = {}
+    for (li, j, i), lst in gates.items():
+        x, y = grid.xy(j, i)
+        l = grid.sig[li]
+        new = []
+        for d, pol, c in lst:
+            ok = memo.get((li, j, i, d))
+            if ok is None:
+                n = G.left(PL.DVEC[d])
+                sg = dl[l] if pol else -dl[l]                # pol 1: P on the left of travel
+                ok = memo[(li, j, i, d)] = all(
+                    items.gap_seg((x + k * sg * n[0], y + k * sg * n[1]), (pad["x"], pad["y"]), wl[l], l, net, clr, ctx["skip"])[0] >= clr - 1e-6
+                    for pad, net, k in ((t["p"], nets[0], 1), (t["n"], nets[1], -1)))
+            new.append((d, pol, c if ok else c + 3 * R, ok))
+        out[(li, j, i)] = new
+    seen = {k: [g[:3] for g in v if g[3]] for k, v in out.items()} if strict else {}
+    seen = {k: v for k, v in seen.items() if v}
+    return seen or {k: [g[:3] for g in v] for k, v in out.items()}
+
+
 def layer_cost(copper, sig, P, gated):
     """A* length factor per signal layer: outer layers 1.0; inner layers P["inner_cost"], or P["inner_cost_gated"] for a
     gated pair (review.pair_gated: a route stays on the outer layers unless blocked; a cost, not a ban)."""
@@ -353,6 +397,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
     kv_s, kv_d, hv = via_half_pitch(rule["via"], rule["via_gap"], dist, step)
     K = max(2, math.ceil(max(2 * dist * PL.T22, max(hv) - dist + dist * PL.T22) / step + 0.3))
     viaok = None
+    shut = False
     banned = set()
     reason, blockers = "no path", []
     for attempt in range(5):
@@ -362,6 +407,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         Rs = [t["sep"] / 2 + max(t["p"]["w"], t["p"]["h"], t["n"]["w"], t["n"]["h"]) / 2 + env / 2 + clr + (ring or P["ring"]) for t in (ta, tb)]
         ga = {k: v for k, v in _gates(grid, allowed, lays[0], ta, Rs[0], True, [dl[l] for l in sig]).items() if k not in banned}
         gb = {k: v for k, v in _gates(grid, allowed, lays[1], tb, Rs[1], False, [dl[l] for l in sig]).items() if k not in banned}
+        ga, gb = _sight(ctx, ta, ga, dl, wl, nets, clr, Rs[0], attempt < 3), _sight(ctx, tb, gb, dl, wl, nets, clr, Rs[1], attempt < 3)
         for t, g, R in ((ta, ga, Rs[0]), (tb, gb, Rs[1])):
             if not g:
                 return {"ok": False, "reason": f"no room to leave {t['name']} coupled ({env:.2f} mm envelope + {clr:.3f} clearance)",
@@ -465,6 +511,14 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         if min(g1, g2) < clr - 1e-6:
             it = it1 if g1 <= g2 else it2
             reason, blockers = f"coupled path {min(g1, g2):.3f} mm from {it['label']} (exact check)", [it["label"]]
+            # the refusal goes back into the search: the centre-line cells that put a leg there are shut in this section's view, so the
+            # next attempt takes another line (it used to find the same one five times: W16 USB_DM_J / USB_DP_J past its own tap via)
+            if not shut:
+                D, O, shut = {l: x.copy() for l, x in D.items()}, {l: x.copy() for l, x in O.items()}, True
+            for leg, net in ((cp, nets[0]), (cn, nets[1])):
+                for l, x, y, bad in PL.fouls(items, leg, net, clr, ctx["skip"], step / 2):
+                    grid.shut(D, O, l, x, y, (dl[l] if l else max(hv)) + step, f"{bad['label']} (exact check)")
+            viaok = None
             continue
         mark = items.mark()
         _claim(items, cp, nets[0])
@@ -945,6 +999,7 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
     mark = items.mark()
     tp = time.time()
     newdone = set()
+    pitch = max(g[0] + g[1] for g in rule["geo"].values()) if rule["geo"] else rule["w"] + rule["gap"]
     for t in terms:                                           # double pads of one net: joined first, then the pair leaves the pair of pads
         if t.get("twin"):
             jn = twin_join(ctx, t, rule, pr)
@@ -955,6 +1010,10 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
             for net, pcs in jn.items():
                 lead = t["join_lead"].get(net, [])
                 grid.put(D, O, [q for q in pcs if not any(q is x for x in lead)], net, "reserved")     # not the stub the pair itself leaves through
+                # a tap via in that stub is the OTHER leg's obstacle: the own leg may run over it, the partner one pitch further out must
+                # clear it.  The net-blind centre-line grid gets it one pitch smaller (exact for the own leg on the via side; the other
+                # polarity is the exact check's, whose refusal now feeds back into the search)
+                grid.put(D, O, [("via", q[1], q[2], q[3] - 2 * pitch) for q in lead if q[0] == "via"], net, "twin tap via")
                 _claim(items, pcs, net)
                 if not plan_only:
                     out["pcs"][net] += pcs
