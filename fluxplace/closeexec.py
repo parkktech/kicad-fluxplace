@@ -1,6 +1,6 @@
 """B6a: the close execution protocol. Pure helpers used by gaps.close; no pcbnew, no board knowledge.
 
-Outcomes: every rung attempt ends in exactly one of not_applicable, no_change, candidate, timeout, child_error, invalid_output.
+Outcomes: every rung attempt ends in exactly one of not_applicable, no_change, candidate, timeout, memory, child_error, invalid_output.
 Only a measured `candidate` has a verdict (guard_refused / accepted).
 Deadline: one absolute monotonic instant (CLOCK_MONOTONIC is shared by every process on the host). The stage deadline minus a
 verification reserve bounds each rung; the supervisor kill instant ("hard") is the rung deadline and the child's own deadline
@@ -17,8 +17,8 @@ from collections import Counter
 
 mono = time.monotonic
 
-OUTCOMES = ("not_applicable", "no_change", "candidate", "timeout", "child_error", "invalid_output")
-CRASH_OUTCOMES = ("timeout", "child_error", "invalid_output")      # an identical retry of these is suppressed
+OUTCOMES = ("not_applicable", "no_change", "candidate", "timeout", "memory", "child_error", "invalid_output")
+CRASH_OUTCOMES = ("timeout", "memory", "child_error", "invalid_output")      # an identical retry of these is suppressed
 VERDICTS = ("guard_refused", "accepted")
 KILL_SLACK_S = 10.0              # supervisor grace after the child's own deadline; inside the rung allowance
 VERIFY_RESERVE_S = 90.0          # [flow] verify_reserve_s: refill + DRC + guard + commit of the last candidate, kept before the stage deadline
@@ -28,7 +28,7 @@ CATS = ("measure", "diagnose", "queue", "child_start", "router", "rung", "refill
 
 
 class RungFailure(RuntimeError):
-    """A rung attempt that produced no usable result: outcome timeout / child_error / invalid_output."""
+    """A rung attempt that produced no usable result: outcome timeout / memory / child_error / invalid_output."""
 
     def __init__(self, outcome, msg, code=None, sig=None, stderr_tail=""):
         super().__init__(msg)

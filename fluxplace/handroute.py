@@ -368,14 +368,16 @@ def _print_open(R):
 
 
 # ======================================================================================================= window
+FIELD_CAP_MM = 9.0                               # slack fields saturate here: no consumer asks for more free room than this
+
+
 def _free_fields(M, net, layers, bbox, width, pitch, via=None, skip=None):
     """-> (xs, ys, per-layer track slack arrays, via slack (min over layers) array, hole slack array)."""
     import numpy as np
     x0, y0, x1, y1 = bbox
     xs, ys, X, Y, pitch = G.grid(bbox, pitch)
     near = (x0 - 3, y0 - 3, x1 + 3, y1 + 3)
-    slack_t, slack_v, slack_h = {}, np.full(X.shape, 9.0), np.full(X.shape, 9.0)
-    cache = {}
+    slack_v, slack_h = np.full(X.shape, FIELD_CAP_MM), np.full(X.shape, FIELD_CAP_MM)
     inb = np.zeros(X.shape, bool)
     for o in M.obs:
         if o.kind == "edge":
@@ -383,35 +385,45 @@ def _free_fields(M, net, layers, bbox, width, pitch, via=None, skip=None):
             if ay != by:
                 inb ^= ((ay > Y) != (by > Y)) & (X < (bx - ax) * (Y - ay) / (by - ay) + ax)
     all_layers = M.cu
-    for lay in all_layers:
-        st = np.full(X.shape, 9.0)
-        sv = np.full(X.shape, 9.0)
-        for o in M.in_box(near, lay):
-            if skip and skip(o):
-                continue
-            for kind in ("track", "via"):
-                if not M.foreign(o, net, kind):
-                    continue
-                key = (id(o))
-                if key not in cache:
-                    cache[key] = G.ob_dist_np(X, Y, o)
-                d = cache[key]
+    st = {lay: np.full(X.shape, FIELD_CAP_MM) for lay in all_layers}
+    sv = {lay: np.full(X.shape, FIELD_CAP_MM) for lay in all_layers}
+    # One obstacle at a time, on its own patch of the grid, into every layer it sits on. The fields start at FIELD_CAP_MM and only
+    # take minima of (distance - clearance), so cells farther than FIELD_CAP_MM + clearance from the obstacle's box cannot change:
+    # the patch is exact. Nothing per obstacle is kept (a full-grid array per obstacle was N x 3.6 MB: 23 GB on a 63 x 68 mm window).
+    for o in M.in_box(near):
+        if skip and skip(o):
+            continue
+        on = [lay for lay in all_layers if lay in o.layers]
+        kinds = [kind for kind in ("track", "via") if M.foreign(o, net, kind)]
+        hole_first = o.kind == "hole" and all_layers[0] in o.layers
+        if not on or not (kinds or hole_first):
+            continue
+        need = 0.0 if o.kind == "ko" else (o.clr if o.kind == "edge" else M.need(net, o))
+        reach = FIELD_CAP_MM + max(need, o.clr, o.clr_hole, M.hole_clr, 0.0) + pitch
+        ix0, ix1 = np.searchsorted(xs, o.bb[0] - reach), np.searchsorted(xs, o.bb[2] + reach, side="right")
+        iy0, iy1 = np.searchsorted(ys, o.bb[1] - reach), np.searchsorted(ys, o.bb[3] + reach, side="right")
+        if ix0 >= ix1 or iy0 >= iy1:
+            continue
+        sl = (slice(iy0, iy1), slice(ix0, ix1))
+        d = G.ob_dist_np(X[sl], Y[sl], o)
+        for lay in on:
+            for kind in kinds:
                 if o.kind == "hole":
                     if kind == "track" and o.extra.get("npth"):
-                        st = np.minimum(st, d - o.clr)
+                        st[lay][sl] = np.minimum(st[lay][sl], d - o.clr)
                     continue
-                need = 0.0 if o.kind == "ko" else (o.clr if o.kind == "edge" else M.need(net, o))
                 if kind == "track":
-                    st = np.minimum(st, d - need)
+                    st[lay][sl] = np.minimum(st[lay][sl], d - need)
                 else:
-                    sv = np.minimum(sv, d - need)
+                    sv[lay][sl] = np.minimum(sv[lay][sl], d - need)
                     if o.kind in ("pad", "track", "via"):
-                        slack_h = np.minimum(slack_h, d - M.hole_clr)
-            if o.kind == "hole" and lay == all_layers[0]:
-                d = cache.setdefault(id(o), G.ob_dist_np(X, Y, o))
-                slack_h = np.minimum(slack_h, d - o.clr_hole)
-        slack_t[lay] = np.where(inb, st, -9.0)
-        slack_v = np.minimum(slack_v, np.where(inb, sv, -9.0))
+                        slack_h[sl] = np.minimum(slack_h[sl], d - M.hole_clr)
+        if hole_first:
+            slack_h[sl] = np.minimum(slack_h[sl], d - o.clr_hole)
+    slack_t = {}
+    for lay in all_layers:
+        slack_t[lay] = np.where(inb, st[lay], -9.0)
+        slack_v = np.minimum(slack_v, np.where(inb, sv[lay], -9.0))
     return xs, ys, pitch, slack_t, slack_v, slack_h
 
 

@@ -4,7 +4,9 @@ Every child starts in its own session (a process group of its own), so a timeout
 on the parent, or normal interpreter exit signals the WHOLE group (router, kicad-cli, rung jobs and their grandchildren),
 SIGTERM first, SIGKILL after GRACE_S.
 
-  run(cmd, timeout=..., **kw)  drop-in for subprocess.run (same CompletedProcess / TimeoutExpired / CalledProcessError)
+  run(cmd, timeout=..., **kw)  drop-in for subprocess.run (same CompletedProcess / TimeoutExpired / CalledProcessError);
+                               mem_cap_mb=N kills the group and raises MemoryExceeded when the child's process TREE holds more
+                               resident memory (a watchdog, not RLIMIT_AS: a JVM or pcbnew reserves address space it never uses)
   popen(cmd, **kw)             subprocess.Popen in a new session, registered for reap_all()
   forget(p)                    a popen() child the caller has finished with
   reap_all()                   kill every registered group
@@ -35,6 +37,53 @@ _handling = False
 
 class Closing(RuntimeError):
     """popen() after SIGTERM/SIGHUP: the process is going down."""
+
+
+class MemoryExceeded(RuntimeError):
+    """run(mem_cap_mb=...): the child's process tree went over the cap and was killed."""
+
+    def __init__(self, cmd, rss_mb, cap_mb, output=None, stderr=None):
+        super().__init__(f"memory: process tree at {rss_mb:.0f} MB, cap {cap_mb:.0f} MB")
+        self.cmd, self.rss_mb, self.cap_mb, self.output, self.stderr = cmd, rss_mb, cap_mb, output, stderr
+
+
+MEM_POLL_S = 1.0                # a runaway seen live grew ~0.6 GB/s: one sample a second overshoots the cap by about that much
+
+
+def tree_rss_mb(pid):
+    """Resident memory (MB) of `pid` and all its descendants, from /proc (children start their own sessions, so the tree is walked
+    by parent pid). 0.0 when /proc is not readable."""
+    kids, rss = {}, {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return 0.0
+    page = os.sysconf("SC_PAGE_SIZE")
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            with open(f"/proc/{n}/stat") as fh:
+                f = fh.read().rsplit(")", 1)[1].split()     # after "(comm)": state ppid ... rss is field 24 of the line
+        except (OSError, IndexError):
+            continue
+        kids.setdefault(int(f[1]), []).append(int(n))
+        rss[int(n)] = int(f[21]) * page
+    total, todo = 0, [pid]
+    while todo:
+        q = todo.pop()
+        total += rss.get(q, 0)
+        todo.extend(kids.get(q, ()))
+    return total / 1048576.0
+
+
+def _mem_watch(p, cap_mb, stop, hit):
+    while not stop.wait(MEM_POLL_S):
+        mb = tree_rss_mb(p.pid)
+        if mb > cap_mb:
+            hit.append(mb)
+            _reap_proc(p, SIGNAL_GRACE_S)
+            return
 
 
 def _group_alive(pgid):
@@ -109,8 +158,8 @@ def popen(cmd, **kw):
     return p
 
 
-def run(cmd, *, input=None, capture_output=False, timeout=None, check=False, **kw):
-    """subprocess.run in its own process group; the whole group is reaped on timeout / interrupt / error."""
+def run(cmd, *, input=None, capture_output=False, timeout=None, check=False, mem_cap_mb=None, **kw):
+    """subprocess.run in its own process group; the whole group is reaped on timeout / interrupt / error / memory cap."""
     if capture_output:
         if kw.get("stdout") is not None or kw.get("stderr") is not None:
             raise ValueError("stdout and stderr arguments may not be used with capture_output.")
@@ -121,6 +170,9 @@ def run(cmd, *, input=None, capture_output=False, timeout=None, check=False, **k
             raise ValueError("stdin and input arguments may not both be used.")
         kw["stdin"] = subprocess.PIPE
     p = popen(cmd, **kw)
+    stop, hit = threading.Event(), []
+    if mem_cap_mb:
+        threading.Thread(target=_mem_watch, args=(p, float(mem_cap_mb), stop, hit), daemon=True).start()
     try:
         try:
             out, err = p.communicate(input, timeout=timeout)
@@ -135,10 +187,13 @@ def run(cmd, *, input=None, capture_output=False, timeout=None, check=False, **k
             _reap_proc(p)
             raise
         rc = p.poll()
+        if hit:
+            raise MemoryExceeded(p.args, hit[0], float(mem_cap_mb), output=out, stderr=err)
         if check and rc:
             raise subprocess.CalledProcessError(rc, p.args, output=out, stderr=err)
         return subprocess.CompletedProcess(p.args, rc, out, err)
     finally:
+        stop.set()
         forget(p)
 
 

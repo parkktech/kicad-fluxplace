@@ -843,6 +843,21 @@ def _rung_cap(cons, rung=None, budget_s=None):
     return cap
 
 
+RUNG_MEM_GB = 12.0                              # resident memory one rung child and its descendants may hold ([flow] rung_mem_gb, 0 = no cap)
+
+
+def _rung_mem_mb(cons):
+    """MB cap for one rung's process tree: [flow] rung_mem_gb (default RUNG_MEM_GB), never over half of the machine's RAM; None = off."""
+    gb = float(((cons or {}).get("flow") or {}).get("rung_mem_gb", RUNG_MEM_GB))
+    if gb <= 0:
+        return None
+    try:
+        gb = min(gb, os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2.0 ** 30 / 2)
+    except (ValueError, OSError):
+        pass
+    return gb * 1024.0
+
+
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
 SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden", "padvias", "relocate")   # the rungs whose candidate depends on the gap list
 SPLIT_WHY = ("R1 ", "R2 ", "R4 ", "R5 ", "R6 ", "target gap still there")
@@ -2851,7 +2866,8 @@ def _call_rung(name, base, out, gaps, ctx):
     RungFailure, not a dead or poisoned close run.  Only ctx["inproc"] stays in-process: the child itself (it must not recurse) and
     tests that patch RUNGS.  B6a: the supervisor kills the child group at ctx["deadline_hard"] (monotonic); the child and its router
     descendants work to ctx["deadline"], KILL_SLACK_S earlier, so the slack is part of the rung's allowance. A failure is a
-    RungFailure: outcome timeout / child_error (exit code or signal, stderr tail) / invalid_output."""
+    RungFailure: outcome timeout / memory (process tree over [flow] rung_mem_gb) / child_error (exit code or signal, stderr tail) /
+    invalid_output."""
     if ctx.get("inproc"):
         CX.mark(ctx.get("phase_file"), "child_start")
         try:
@@ -2876,9 +2892,11 @@ def _call_rung(name, base, out, gaps, ctx):
         try:
             p = _rung_watched(name, ctx.get("work") or os.path.dirname(out), lambda: _procs.run(
                 [sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
-                text=True, timeout=tmo, cwd=_repo_root(), env=env))
+                text=True, timeout=tmo, cwd=_repo_root(), env=env, mem_cap_mb=_rung_mem_mb(ctx.get("cons"))))
         except subprocess.TimeoutExpired as e:
             raise CX.RungFailure("timeout", f"rung timeout after {tmo:.0f} s", stderr_tail=CX.tail(getattr(e, "stderr", None)))
+        except _procs.MemoryExceeded as e:          # one runaway rung is a failed rung, not an OOM-killed pipeline
+            raise CX.RungFailure("memory", f"rung failed: {e}", stderr_tail=CX.tail(e.stderr))
         err = CX.tail(getattr(p, "stderr", None))
         if not os.path.exists(jout):
             if p.returncode < 0:
