@@ -41,7 +41,36 @@ def _drc_errors(board, work):
 
 def _rows(res, kind):
     g = res.get("gate") or {}
-    return sum(1 for r in list(g.get("left") or []) + list(g.get("deferred") or []) if r.get("kind") == kind)
+    return sum(1 for r in list(g.get("left") or []) + list(g.get("deferred") or []) + list(g.get("allowed") or []) if r.get("kind") == kind)
+
+
+NO_ALLOW_STOPS = ("clean", "packets", "protection", "crashed", "manifest_stale")
+
+
+def kind_key(kind):
+    """The `[go.<stage>]` key that bounds a gap kind's rows: power-width -> power_width_max."""
+    return kind.replace("-", "_") + "_max"
+
+
+def gate_allowed(cons, name, left, later=()):
+    """`[go.<name>] <kind>_max = N` is the owner's go limit for the stage: a stage gate that ends with at most N rows of that kind left
+    does not fail the stage (ledger 2026-11-28: `power_width_max = 1` with 1 power-width row left still read "fail ... flat", because
+    the limit was only measured after a gate that had already failed, and measured 0 rows there).  -> (allowed rows, deferred rows)
+    when every row left is within its kind's limit or owned by a stage still to run (gaps.GATE_DEFER) and at least one is allowed,
+    else None.  A kind without a key keeps the gate closed; on_fail = continue changes nothing here."""
+    from collections import Counter
+    from . import gaps as GP
+    lim = ((cons or {}).get("go") or {}).get(name) or {}
+    later = set(later or ())
+    dfr = [r for r in left or () if any(o in later for o in GP.GATE_DEFER.get(r["kind"], ()))]
+    own = [r for r in left or () if r not in dfr]
+    n = Counter(r["kind"] for r in own)
+    try:
+        if own and all(kind_key(k) in lim and v <= float(lim[kind_key(k)]) for k, v in n.items()):
+            return own, dfr
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 # threshold key -> (check name, "max"|"min", measure(res, board, work))

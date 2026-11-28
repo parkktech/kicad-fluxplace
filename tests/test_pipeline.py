@@ -586,3 +586,37 @@ def test_k13_placement_data_metric_uses_gapmap_owner():
     route = [c for c in codes if GM.owner(c) == "route"]
     assert data and route
     assert P._placement_or_data(data[0]) and not P._placement_or_data(route[0])
+
+
+def _gate_left(monkeypatch, tmp_path, rows, stop="flat"):
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"route": ["power-width", "power-vias"]})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: {"stop": stop, "left": rows, "start": {"opens": 4}, "end": {"opens": 4}, "best": str(_board(tmp_path))})
+
+
+def test_go_limit_allows_the_gate_rows_it_names(tmp_path, monkeypatch):
+    """ledger 2026-11-28 (W16 route-11): [go.route] power_width_max = 1 and one power-width row left is a go, not "fail ... flat"."""
+    from fluxplace import stopgate as SGm
+    seen = _stub_flow(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(SGm, "_opens", lambda b, w: 4)
+    _gate_left(monkeypatch, tmp_path, [{"id": "power-width:R", "kind": "power-width", "class": "power", "nets": ["R"], "mag": 3.0}])
+    cons = _cons(tmp_path, "[go.route]\nopens_max = 8\npower_width_max = 1\n")
+    rc = PL.run(_args(tmp_path, _board(tmp_path), constraints=cons, to_stage="close"))
+    g = json.load(open(tmp_path / "W" / "state.json"))["stages"]["route"]
+    assert rc == 0 and seen[-1] == "close" and g["verdict"] == "warn"
+    assert g["gate"]["stop"] == "allowed" and [r["id"] for r in g["gate"]["allowed"]] == ["power-width:R"] and "within the go limit" in g["line"]
+
+
+def test_go_limit_exceeded_or_unnamed_kind_keeps_the_gate_closed(tmp_path, monkeypatch):
+    from fluxplace import stopgate as SGm
+    monkeypatch.setattr(SGm, "_opens", lambda b, w: 4)
+    row = lambda i, k="power-width": {"id": f"{k}:R{i}", "kind": k, "class": "power", "nets": [f"R{i}"], "mag": 3.0}
+    for rows, stop in (([row(1), row(2)], "flat"), ([row(1), row(2, "power-vias")], "flat"), ([row(1)], "protection")):
+        seen = _stub_flow(monkeypatch, tmp_path, {})
+        _gate_left(monkeypatch, tmp_path, rows, stop)
+        cons = _cons(tmp_path, "[go.route]\nopens_max = 8\npower_width_max = 1\n")
+        rc = PL.run(_args(tmp_path, _board(tmp_path), constraints=cons, to_stage="close"))
+        assert rc == 1 and seen[-1] == "route", (rows, stop)
+    seen = _stub_flow(monkeypatch, tmp_path, {})                    # no [go.route] key: the gate's own verdict, as before
+    _gate_left(monkeypatch, tmp_path, [row(1)])
+    assert PL.run(_args(tmp_path, _board(tmp_path), to_stage="close")) == 1 and seen[-1] == "route"

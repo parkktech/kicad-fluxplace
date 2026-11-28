@@ -1689,6 +1689,13 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
     if unans:
         return {"verdict": "warn", "board": r["best"], "line": line + "; " + ua["ai_unanswered"]["line"], "next": [],
                 "gate": {"kinds": kinds, "stop": stop, "dir": d}, **ua}
+    ok = None if (r.get("review_failed") or stop in SG.NO_ALLOW_STOPS) else SG.gate_allowed(c.cons, name, r.get("left"), later)
+    if ok:                                                  # every row left is inside the owner's [go.<stage>] limit: the flow goes on
+        _stamp_stop(d, {"allowed": ok[0], **({"deferred": ok[1]} if ok[1] else {})})
+        return {"verdict": "warn", "board": r["best"], "next": [],
+                "line": line.replace(f": {stop},", ": within the go limit,", 1) + f"; WARN left inside [go.{name}]: {_deferred_line(ok[0])}"
+                        + (f"; carried: {_deferred_line(ok[1])}" if ok[1] else ""),
+                "gate": {"kinds": kinds, "stop": "allowed", "dir": d, "allowed": ok[0], **({"deferred": ok[1]} if ok[1] else {})}}
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
             "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
             + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
@@ -2518,7 +2525,7 @@ def _run(a):
     for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
         gk_prev = GP_.gate_kinds(c.cons, k)
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
-        if gk_prev and gst.get("stop") not in ("clean", "deferred") and a.board:
+        if gk_prev and gst.get("stop") not in ("clean", "deferred", "allowed") and a.board:
             # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
             # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds.
             # Ledger 2026-11-25: a finding owned by a stage before --from was handled by that stage's run, which this run
@@ -2542,7 +2549,7 @@ def _run(a):
             for r in g["gate"].get("left", [])[:10]:
                 print(f"  gap {r['id']} {r['kind']} {r.get('nets')} at {r.get('at')}")
             return 5
-        if gk_prev and gst.get("stop") not in ("clean", "deferred"):
+        if gk_prev and gst.get("stop") not in ("clean", "deferred", "allowed"):
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
             return 5
@@ -2629,6 +2636,8 @@ def _run(a):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
             if res["gate"].get("deferred"):
                 st["stages"][name]["gate"]["deferred"] = res["gate"]["deferred"]      # review reads these: findings a later stage owns
+            if res["gate"].get("allowed"):
+                st["stages"][name]["gate"]["allowed"] = res["gate"]["allowed"]        # rows inside the stage's [go] limit (stopgate.gate_allowed)
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         if name == "route":
