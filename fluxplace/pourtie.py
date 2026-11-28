@@ -523,6 +523,13 @@ def _strip_zone(board, z, boxes):
         for px, py in _rect_pts(bx):
             q.Append(int(px), int(py))
         ps.BooleanAdd(q)
+    for old in [x for x in board.Zones() if x.GetZoneName() == STRIP_NAME and x.GetNetCode() == z.GetNetCode()
+                and set(x.GetLayerSet().Seq()) == set(z.GetLayerSet().Seq())]:
+        inter = pcbnew.SHAPE_POLY_SET(ps)               # a strip that touches an earlier strip of the same net merges with it:
+        inter.BooleanIntersection(old.Outline())        # two same-net, same-priority zones that overlap are a zones_intersect error
+        if inter.OutlineCount():
+            ps.BooleanAdd(old.Outline())
+            board.Remove(old)
     made = []
     for i in range(ps.OutlineCount()):
         nz = z.Duplicate(False).Cast()
@@ -533,6 +540,7 @@ def _strip_zone(board, z, boxes):
         for k in range(c.PointCount()):
             o.Append(c.CPoint(k).x, c.CPoint(k).y)
         nz.SetZoneName(STRIP_NAME)
+        nz.SetAssignedPriority(z.GetAssignedPriority() + 1)   # a same-priority overlap with its own pour is a zones_intersect error
         board.Add(nz)
         made.append(nz)
     return made

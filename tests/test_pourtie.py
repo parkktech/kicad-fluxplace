@@ -197,3 +197,21 @@ def test_untied_row_after_a_grown_pour_carries_the_tie_reason(tmp_path, monkeypa
     rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
     u = [u for u in rec["untied"] if u["net"] == "RAIL" and u["at"][0] == 30.0]
     assert u and u[0]["reason"].startswith("pour grown to the pad, then: no legal via site")
+
+
+def test_strips_merge_and_sit_above_their_pour_so_no_zones_intersect():
+    """route-11 2026-11-27: same-net strips overlapping each other / their pour at the same priority gave 13 zones_intersect."""
+    import pcbnew
+    from fluxplace import pourtie as PT
+    b = pcbnew.BOARD()
+    net = pcbnew.NETINFO_ITEM(b, "GND"); b.Add(net)
+    z = pcbnew.ZONE(b); z.SetLayer(pcbnew.F_Cu); z.SetNetCode(net.GetNetCode()); z.SetAssignedPriority(0)
+    o = z.Outline(); o.NewOutline()
+    for x, y in ((0, 0), (10, 0), (10, 10), (0, 10)):
+        o.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    b.Add(z)
+    box = lambda x0, y0, x1, y1: pcbnew.BOX2I(pcbnew.VECTOR2I(pcbnew.FromMM(x0), pcbnew.FromMM(y0)), pcbnew.VECTOR2I(pcbnew.FromMM(x1 - x0), pcbnew.FromMM(y1 - y0)))
+    PT._strip_zone(b, z, [box(9, 4, 15, 5)])
+    PT._strip_zone(b, z, [box(14, 4, 15, 9)])                # touches the first strip
+    strips = [x for x in b.Zones() if x.GetZoneName() == PT.STRIP_NAME]
+    assert len(strips) == 1 and strips[0].GetAssignedPriority() == 1
