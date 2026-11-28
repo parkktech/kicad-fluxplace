@@ -214,7 +214,7 @@ def test_a_wide_connector_mates_its_pads_with_terminal_max_mm_and_tune_needs_a_s
 
 
 def _via(net, at):
-    return f'(via (at {at[0]} {at[1]}) (size 0.46) (drill 0.2) (layers "F.Cu" "B.Cu") (net "{net}"))\n'
+    return f'(via (at {at[0]} {at[1]}) (size 0.8) (drill 0.2) (layers "F.Cu" "B.Cu") (net "{net}"))\n'
 
 
 @needs_cli
@@ -225,7 +225,8 @@ def test_track_glue_inside_a_via_annulus_is_not_counted_so_the_pair_is_measured_
     for net, y in (("ETH_P", 0.0), ("ETH_N", 0.8)):
         body += _seg(net, (0, y), (5, y)) + _via(net, (5, y)) + _seg(net, (5, y), (9.5, y), "B.Cu") + _via(net, (9.5, y)) + _seg(net, (9.5, y), (10, y))
     glue = body.replace(_seg("ETH_N", (5, 0.8), (9.5, 0.8), "B.Cu"),                    # N leaves the via through two pieces inside its annulus
-                        _seg("ETH_N", (5, 0.8), (5, 0.9), "B.Cu") + _seg("ETH_N", (5, 0.9), (5.1, 0.9), "B.Cu") + _seg("ETH_N", (5.1, 0.9), (9.5, 0.8), "B.Cu"))
+                        _seg("ETH_N", (5, 0.8), (5, 1.0), "B.Cu") + _seg("ETH_N", (5, 1.0), (5.2, 1.0), "B.Cu") + _seg("ETH_N", (5.2, 1.0), (5.2, 0.8), "B.Cu")
+                        + _seg("ETH_N", (5.2, 0.8), (9.5, 0.8), "B.Cu"))
     assert glue != body
     r = netlen.pair_skew(RD.load(PB.write(tmp_path, glue)), "ETH_P", "ETH_N", {})
     assert r["status"] == "ok", r
