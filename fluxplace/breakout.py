@@ -280,7 +280,7 @@ def plan_side(S, part, ref, k, pads, info, prior=()):
     # row-pattern index inside runs of lanes closer than a via pitch
     for i, q in enumerate(pins):
         net = q["net"]
-        if not net or S.ob.attached(q):
+        if not net or S.ob.attached(q) or net in info.get("local", ()):      # a crystal net is routed pad to pad (critroute): no lane, no via
             continue
         layer = _layer(q)
         others = [o for o in info["netpads"].get(net, []) if o is not q and o["ref"] != ref]
@@ -368,7 +368,8 @@ def _region(recs, pads, k, pr):
 def _info(B, cons, spec):
     cls = NC.classify(B, cons, spec)
     pr = EP.plan_params(cons)
-    return {"netpads": NC.net_pads(B), "plane": set(EP.plane_nets(B, cons, cls, pr))}
+    return {"netpads": NC.net_pads(B), "plane": set(EP.plane_nets(B, cons, cls, pr)),
+            "local": {n for n, i in cls.items() if i.get("reason") in NC.TOTAL_COPPER}}
 
 
 def solve(B, cons=None, spec=None, refs=None, pr=None, ignore_routing=None, others=True):

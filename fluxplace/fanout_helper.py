@@ -525,7 +525,7 @@ class Fan:
                     need = "plane"
                     if tht:
                         continue                                   # the barrel reaches the plane
-                elif mode == "all" and ni.get("npads", 2) >= 2:
+                elif mode == "all" and ni.get("npads", 2) >= 2 and not ni.get("local"):
                     need = "signal"
                 else:
                     continue

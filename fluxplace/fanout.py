@@ -45,6 +45,8 @@ def policy(B, cons, spec, refs=None):
         e = {"npads": len(ps), "controlled": info.get("class") in ("pair", "rf", "clock"), "pair": info.get("partner")}
         if NC.is_ground(n):
             e["ground"] = True
+        if info.get("reason") in NC.TOTAL_COPPER:       # crystal net: every mm is stray C and an escape walls in its sibling; critroute lays it pad to pad
+            e["local"] = True
         if n in pn:
             e["plane"] = True
             pz = pours.get(n)

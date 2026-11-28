@@ -267,3 +267,29 @@ def test_fanout_lays_the_templates_first_and_does_not_escape_those_pins_again(tm
     out2 = str(tmp_path / "o2.kicad_pcb")
     B3, res3 = FO.run(path, {}, None, out2, a(no_breakout=True), None)
     assert [p for p in res3["pins"] if p["ref"] == "J1"]                         # without the templates the generic solver does them
+
+
+def test_crystal_nets_get_no_lane_and_no_via(tmp_path):
+    """W16 route-11: the locked lane of HUB_XTAL1 crossed the direct path of HUB_XTAL2 (20.6 mm for 5.7 mm of pad distance).
+    A crystal net (netclass TOTAL_COPPER) is laid pad to pad by critroute: neither the templates nor the generic escape touch it."""
+    import argparse
+    from fluxplace import fanout as FO, netclass as NC
+    body = qfn("U1", 50, 40) + G.fp("Y1", 43, 40, [G.pad("1", 0, -1.1, "L3", 1.0, 1.2), G.pad("2", 0, 1.1, "L4", 1.0, 1.2)], court=(-0.8, -2.0, 0.8, 2.0))
+    path = G.board(tmp_path, body)
+    txt = open(path).read().replace(' (4 "In1.Cu" signal)', "")
+    open(path, "w").write(txt)
+    B = RD.load(path)
+    cls = NC.classify(B, {}, None)
+    assert cls["L3"]["reason"] in NC.TOTAL_COPPER and cls["L4"]["reason"] in NC.TOTAL_COPPER
+    res = BO.solve(B, {}, None)
+    assert not res["failed"] and len(res["pins"]) == 30
+    assert not [r for r in res["pins"].values() if r["net"] in ("L3", "L4")]
+    assert len(BO.solve(B, {}, None, others=False)["pins"]) == 32               # the isolated template (placement reserve) is unchanged
+    a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60, nodes=200000,
+                           repairs=12, check_only=False, no_breakout=False)
+    out = str(tmp_path / "o.kicad_pcb")
+    _B, r = FO.run(path, {}, None, out, a, None)
+    assert not [p for p in r["pins"] if p["net"] in ("L3", "L4")]
+    B2 = RD.load(out)
+    assert not [s for s in B2["segs"] if s["net"] in ("L3", "L4")] and not [v for v in B2["vias"] if v["net"] in ("L3", "L4")]
+    assert [s for s in B2["segs"] if s["net"] == "L2"]                           # its neighbours are escaped as before
