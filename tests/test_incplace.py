@@ -193,3 +193,19 @@ def test_swapped_connector_pad_on_foreign_copper_is_stripped_and_routed(tmp_path
     b = pcbnew.LoadBoard(st["board"])
     b.BuildConnectivity()
     assert b.GetConnectivity().GetUnconnectedCount(True) == 0
+
+
+def test_route_layers_come_from_the_board_not_a_fixed_stack(tmp_path):
+    """Ledger 2026-11-27: the pipeline's --layers default was a 6-layer signal set; on this 4-copper-layer board the router was handed
+    In3.Cu and laid a segment there whenever a net needed a layer change (about 1 run in 3): KRT graded it routed, the net was open."""
+    import cli
+    from fluxplace import pipeline as P
+    p, cp = routed(tmp_path)
+    a = cli.build_parser().parse_args(["pipeline", p, "--workdir", str(tmp_path / "W"), "--constraints", cp])
+    assert a.layers is None                                              # no project's stack is baked into the parser
+    cu = RD.load(p)["copper"]
+    lay = P.route_layers(p, None, C.load(cp))
+    assert lay and set(lay) <= set(cu) and {cu[0], cu[-1]} <= set(lay)
+    assert P.route_layers(p, [cu[-1], cu[0]], None) == [cu[0], cu[-1]]    # an explicit list is kept, in stack order
+    with pytest.raises(SystemExit, match="not a copper layer"):
+        P.route_layers(p, ["F.Cu", "In7.Cu"], None)

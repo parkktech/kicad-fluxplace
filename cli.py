@@ -1253,6 +1253,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     import os, subprocess, time, json, shutil
     from fluxplace import fab, planes, adaptive
     import pcbnew
+    a.layers = list(a.layers or IO.signal_layers(board))   # never a fixed list: a layer the board does not have gets copper nobody can fab
     placed = os.path.join(a.out, "placed.kicad_pcb")
     routed = os.path.join(a.out, "routed.kicad_pcb")
     finald = os.path.join(a.out, "final.kicad_pcb")
@@ -3754,7 +3755,7 @@ def build_parser():
                      help="route even if legalization left overlaps (default: abort)")
     pco.add_argument("--tht-bands", action="store_true",
                      help="THT parts only above/below obstacle bands (frees X width)")
-    pco.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    pco.add_argument("--layers", nargs="+", default=None, help="signal layers (default: auto-detect = copper minus poured planes)")
     pco.add_argument("--track", type=float, default=0.2)
     pco.add_argument("--clearance", type=float, default=0.2)
     pco.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
@@ -4406,7 +4407,8 @@ def build_parser():
     ppl.add_argument("--no-resume", dest="no_resume", action="store_true",
                      help="--from route: run the router again even when the previous run left a finish record of the same input")
     ppl.add_argument("--replace-on-stall", action="store_true", help="let the stall loop move parts")
-    ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    ppl.add_argument("--layers", nargs="+", default=None,
+                     help="layers the routers may use (default: the board's own signal layers = its copper minus the planes)")
     ppl.add_argument("--track", type=float, default=None, help="routing track mm (default: [route] track_mm, else 0.2)")
     ppl.add_argument("--clearance", type=float, default=None, help="routing clearance mm (default: [route] clearance_mm, else 0.2)")
     ppl.add_argument("--router", choices=["krt", "freerouting", "auto", "krt-whole"], default=None,

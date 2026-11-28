@@ -420,6 +420,23 @@ def st_route_ready(c, n, board):
             "next": nxt + [f"full list: {rj}"]}
 
 
+def route_layers(board, asked=None, cons=None):
+    """The layers a router call may lay copper on, from the BOARD's own copper stack (ledger 2026-11-27: the pipeline default was
+    one project's 6-layer signal set, so on a 4-layer board KRT laid a segment on In3.Cu, a layer the board does not have, whenever
+    a net needed a layer change -- its own grade said routed, the net was open).  `asked` (--layers): kept, every name must be a
+    copper layer of the board; None: preroute.layer_split's signal layers (`[preroute]`, the stackup's planes, else the pour test)."""
+    from . import routediag as RD, preroute as PR
+    B = RD.load(board)
+    cu = list(B["copper"])
+    if asked:
+        bad = [l for l in asked if l not in cu]
+        if bad:
+            raise SystemExit(f"pipeline: --layers {' '.join(bad)}: not a copper layer of {os.path.basename(board)} "
+                             f"(it has {' '.join(cu)}); omit --layers to route on the board's own signal layers")
+        return [l for l in cu if l in asked]
+    return list(PR.layer_split(B, cons)[0]) or cu
+
+
 def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=(), pair=False, gap=None,
                dflags=()):
     """One py_router call. `R` (routerules.rules) and `rflags` (routerules.flags) carry the project's rules:
@@ -521,21 +538,6 @@ def st_route(c, n, board):
     return res
 
 
-def _clip_layers(a, board):
-    """`--layers` defaults to the 6-layer stackup (F, In2, In3, B); a board that lacks one of them (a 4-layer F/In1/In2/B) gets copper on a
-    disabled layer when the router picks it (item_on_disabled_layer, dangling vias, 1 run in 3 in test_incplace). Keep only enabled layers."""
-    try:
-        import pcbnew
-        b = pcbnew.LoadBoard(board)
-        have = [b.GetLayerName(l) for l in b.GetEnabledLayers().CuStack()]
-    except Exception:                                    # noqa: BLE001 - not a readable board: the stage reports it
-        return
-    keep = [l for l in a.layers if l in have]
-    if keep and keep != list(a.layers):
-        print(f"pipeline: route layers {sorted(set(a.layers) - set(keep))} are not on this board; routing on {keep}", flush=True)
-        a.layers = keep
-
-
 def _st_route(c, n, board):
     """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
@@ -543,7 +545,8 @@ def _st_route(c, n, board):
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     from . import routerules as RR, routepar as RP, opengate as OG
     a = c.a
-    _clip_layers(a, board)
+    if not getattr(a, "layers", None):                 # a caller that did not come through _run (which resolves them once)
+        a.layers = route_layers(board, None, c.cons)
     col = _collision_report(c, c.dir(n, "route"), board)  # fast copper-collision gate: seconds, before any router hour
     if col["fail"] and not a.force:
         return {"verdict": "blocked", "board": board,
@@ -2380,6 +2383,13 @@ def _run(a):
     if STAGES_[i0] in ("ready", "modules", "floorplan") and a.constraints:
         board = _apply_lock_at(a, work, board)         # [lock.at] is authoritative before any placement stage
         st["board"] = board
+    if os.path.isfile(board):
+        from . import constraints as C_layers
+        try:
+            cons_l = C_layers.load(a.constraints) if a.constraints else None
+        except Exception:                               # noqa: BLE001 - the stage reports a bad constraints file
+            cons_l = None
+        a.layers = route_layers(board, getattr(a, "layers", None), cons_l)
     if "ready" in STAGES_[i0:]:
         st.pop("undocumented", None)               # the gate runs again; its bypass is re-recorded only if used again
     if upd:
