@@ -53,6 +53,7 @@ def _graph(B, net, via_h=None):
     vn = [np_ + 2 * ns + j for j in range(len(vias))]
     vl = [_range(v, cu) for v in vias]
     hh = [(via_h(v) / 2 if via_h else 0.0) for v in vias]
+    on_via = [{} for _v in vias]
     for i, (u, pu, lu) in enumerate(ends):
         for j, (w, pw, lw) in enumerate(ends[:i]):
             if lu == lw and math.hypot(pu[0] - pw[0], pu[1] - pw[1]) <= TOL:
@@ -60,6 +61,9 @@ def _graph(B, net, via_h=None):
         for j, v in enumerate(vias):
             if lu in vl[j] and math.hypot(pu[0] - v["x"], pu[1] - v["y"]) <= v["d"] / 2 + TOL:
                 link(u, vn[j], hh[j])
+                for w, pw in on_via[j].get(lu, ()):     # two track ends in one via ON ONE LAYER meet in its pad: no barrel between them
+                    link(u, w, math.hypot(pu[0] - pw[0], pu[1] - pw[1]), lu)
+                on_via[j].setdefault(lu, []).append((u, pu))
         for k, p in enumerate(pads):
             if lu in p["layers"] and RC.pad_seg_dist(p, pu, pu) <= segs[(u - np_) // 2]["w"] / 2 + TOL:
                 link(u, k)
@@ -114,15 +118,24 @@ def profile(B, net, want_path=False):
     if ib not in dist:
         return _none_path(want_path)
     layers, nv, on, u = [], 0, [], ib
+    hops = []                                   # (node, layer of the edge that reaches it), goal first
     while u != ia:
         pu, lay, sid = prev[u]
+        hops.append((u, lay))
         if lay and (not layers or layers[-1] != lay):
             layers.append(lay)
         if sid is not None:
             on.append(seg_idx[sid])
-        if u in vn:
-            nv += 1
         u = pu
+    for k, (u, _lay) in enumerate(hops):
+        if u in vn:
+            # a via counts where the path changes layer in it.  One the path runs through on a single layer is a tap (the anchor of a
+            # twin-pad jumper sitting on the leg: W16 USB_DP_J "vias 0 vs 1" took a coupled, matched pair back); via_stubs reports those
+            # (reached from an end pad through zero-length joints only: the layer on that side is the pad's own)
+            after = next(([l] for _n, l in hops[k - 1::-1] if l), pads[ib]["layers"]) if k else pads[ib]["layers"]
+            before = next(([l] for _n, l in hops[k:] if l), pads[ia]["layers"])
+            if not set(after) & set(before):
+                nv += 1
     out = {"path": True, "layers": layers[::-1], "vias": nv, "length": round(dist[ib], 4)}
     if want_path:
         out["segs"] = sorted(on)
