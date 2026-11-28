@@ -545,10 +545,11 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         skew += ba[2] + bb[2]
         left_mm = 0.0
         if abs(skew) > ctx["tol"](nets[0]):
+            gapl = {l: geo[l][1] for l in sig}
             if skew > 0:
-                cn, left_mm = PL.bump(items, cn, nets[1], skew, -pol, clr, ctx["skip"], 0, len(cn), hmax=max(0.6, min(2.0, abs(skew) / 6)))
+                cn, left_mm = PL.bump(items, cn, nets[1], skew, -pol, clr, ctx["skip"], 0, len(cn), hmax=max(0.6, min(2.0, abs(skew) / 6)), mate=nets[0], gap=gapl)
             else:
-                cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, ctx["skip"], 0, len(cp), hmax=max(0.6, min(2.0, abs(skew) / 6)))
+                cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, ctx["skip"], 0, len(cp), hmax=max(0.6, min(2.0, abs(skew) / 6)), mate=nets[1], gap=gapl)
         Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
         items.rollback(mark)
         if left_mm > P["skew_frac"] * ctx["limit"](nets[0]):          # out of tolerance (or marginal) copper is not locked in: the router keeps the pair

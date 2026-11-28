@@ -531,9 +531,15 @@ def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fall
     return None, f"break-outs at {pads[0]['ref']} foul each other", None
 
 
-def bump(items, pieces, net, extra, side, clr, skip_old, lo, hi, hmax=0.6, flat=0.3, lead=0.15):
+def bump(items, pieces, net, extra, side, clr, skip_old, lo, hi, hmax=0.6, flat=0.3, lead=0.15, mate=None, gap=None):
     """lengthen `pieces[lo:hi]` (the coupled part of the short leg) by `extra` mm with 45 degree trapezoids on the side
-    away from the partner (`side` = +1 left of travel), nearest the ends first.  -> (pieces, mm still missing)."""
+    away from the partner (`side` = +1 left of travel), nearest the ends first.  -> (pieces, mm still missing).
+    `mate` = the partner net, `gap` = the pair gap ({layer: mm} or mm): a trapezoid starts and ends on the leg, one pair gap
+    from the partner, so the partner is judged against the gap, not the routing clearance (as `breakout` does).  With the gap
+    under the clearance (0.127 against 0.130) every trapezoid was refused and no skew was ever compensated."""
+    def _mate(layer):
+        g = gap.get(layer) if isinstance(gap, dict) else gap
+        return (mate, clr - g) if mate and g is not None and g < clr else None
     out = list(pieces)
     k2 = 2 * (math.sqrt(2) - 1)
     for k in sorted(range(lo, hi), key=lambda k: min(k - lo, hi - 1 - k)):
@@ -558,7 +564,7 @@ def bump(items, pieces, net, extra, side, clr, skip_old, lo, hi, hmax=0.6, flat=
             p3 = (p2[0] + u[0] * flat, p2[1] + u[1] * flat)
             p4 = (p3[0] + (u[0] - o[0]) * hgt, p3[1] + (u[1] - o[1]) * hgt)
             trap = [("seg", p[1], x, y, p[4]) for x, y in ((p1, p2), (p2, p3), (p3, p4))]
-            if check(items, trap, net, clr, skip_old)[0] >= clr - 1e-6:
+            if check(items, trap, net, clr, skip_old, _mate(p[1]))[0] >= clr - 1e-6:
                 new += [("seg", p[1], prev, p1, p[4])] + trap
                 prev = p4
                 extra -= hgt * k2

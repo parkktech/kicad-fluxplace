@@ -583,7 +583,8 @@ def lay_centreline(board, out, pair, layer, waypoints, cons=None):
             if abs(skew) > limit:                       # the short leg gets the bumps, on the side away from its partner
                 short, net_s, side = (cn, N_net, -sp) if skew > 0 else (cp, P_net, sp)
                 bumped, left = PL.bump(items, short, net_s, abs(skew), side, clr, skip, 0, len(short),
-                                       hmax=max(0.6, min(2.0, abs(skew) / 6)))
+                                       hmax=max(0.6, min(2.0, abs(skew) / 6)), mate=P_net if skew > 0 else N_net,
+                                       gap={l: float(g["gap"]) for l, g in tab.items() if g.get("gap")})
                 if skew > 0:
                     cn = bumped
                 else:

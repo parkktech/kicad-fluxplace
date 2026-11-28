@@ -1,4 +1,6 @@
 """PAIRS-S2: a fine-pitch pad's break-out leaves along the pad axis; PAIRS-S1: a pair's own copper is no obstacle to itself."""
+import pytest
+
 from fluxplace import pairlay as PL, pairgeo as G
 
 
@@ -61,3 +63,21 @@ def test_stub_starts_on_the_pad_centre_not_on_a_grid_cell():
     items = G.Items(["F.Cu"])
     pts = PL.stub(B, items, items.mark(), set(), pad, (3.0, 1.7), "F.Cu", 0.127, "A", 0.13, ())
     assert pts and pts[0] == (0.0137, 0.0291) and pts[-1] == (3.0, 1.7)
+
+
+def test_bump_judges_the_partner_against_the_pair_gap():
+    """W16 route-11 PCIE_CLK: gap 0.127 under clearance 0.130. A skew trapezoid starts and ends ON its leg, one pair gap from the
+    partner, so without `mate` every trapezoid was refused ("no room for bumps" on a clear 58 mm run) and the pair was not laid."""
+    w, gap, clr = 0.153, 0.127, 0.130
+    items = G.Items(["B.Cu"])
+    items.seg((0.0, w + gap), (20.0, w + gap), w, "B.Cu", "P")            # the partner, left of travel
+    leg = [("seg", "B.Cu", (0.0, 0.0), (20.0, 0.0), w)]
+    items.seg((0.0, 0.0), (20.0, 0.0), w, "B.Cu", "N")
+    out, left = PL.bump(items, leg, "N", 0.32, -1, clr, (), 0, 1)        # as before the fix: the partner at clearance
+    assert left == pytest.approx(0.32) and out == leg
+    out, left = PL.bump(items, leg, "N", 0.32, -1, clr, (), 0, 1, mate="P", gap={"B.Cu": gap})
+    assert left <= 0.02 and PL.piece_len(out) == pytest.approx(20.32, abs=0.02)
+    assert min(p[2][1] for p in out) < -0.3 and max(max(p[2][1], p[3][1]) for p in out) <= 1e-9   # away from the partner only
+    items.seg((0.0, -0.45), (20.0, -0.45), w, "B.Cu", "X")               # a foreign track on the bump side still refuses it
+    assert PL.bump(items, leg, "N", 0.32, -1, clr, (), 0, 1, mate="P", gap=gap)[1] == pytest.approx(0.32)
+    assert PL.bump(items, leg, "N", 0.32, -1, clr, (), 0, 1, mate="P", gap=0.2)[1] <= 0.32      # gap above the clearance: no slack needed
