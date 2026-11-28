@@ -24,6 +24,11 @@ def _stub(monkeypatch):
     return calls
 
 
+def _plain_rungs():
+    """open-gap rungs for a non-RF gap: rfroute is dropped unless an RF-class gap is in the group (00269f5, k11)."""
+    return [r for r in G.DISPATCH["open-gap"] if r != "rfroute"]
+
+
 def _close(tmp_path, board, cons=None):
     return G.close(board, str(tmp_path / "work"), cons=cons or {}, runs=str(tmp_path / "runs.jsonl"),
                    attempts=str(tmp_path / "attempts.jsonl"), log=lambda *a: None)
@@ -34,7 +39,7 @@ def test_second_pass_replays_memo_and_makes_no_rung_calls(tmp_path, monkeypatch)
     board = make(str(tmp_path / "in.kicad_pcb"))
     _close(tmp_path, board)
     first = len(calls)
-    assert first == len(G.DISPATCH["open-gap"])
+    assert first == len(_plain_rungs())
     calls.clear()
     _close(tmp_path, board)
     assert calls == []
@@ -169,7 +174,7 @@ def test_a5_one_sweep_with_zero_accepts_stops_flat_at_once(tmp_path, monkeypatch
     calls = _stub(monkeypatch)
     board = make(str(tmp_path / "in.kicad_pcb"))
     res = _close(tmp_path, board)
-    assert res["stop"] == "flat" and len(calls) == len(G.DISPATCH["open-gap"])      # each untried rung once, no second sweep
+    assert res["stop"] == "flat" and len(calls) == len(_plain_rungs())      # each untried rung once, no second sweep
 
 
 def test_a5_no_rung_in_dispatch_for_the_scope_stops_flat_without_an_attempt(tmp_path, monkeypatch):

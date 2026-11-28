@@ -58,16 +58,19 @@ def _crystal_board(tmp_path, dist):
     return g.board(tmp_path, u + xt)
 
 
-def _gate(board, kinds=None):
-    ctx = PG.Ctx(stage="floorplan", board=board, cons={}, spec={}, ds_dir=None)
+def _gate(board, kinds=None, cons=None):
+    ctx = PG.Ctx(stage="floorplan", board=board, cons=cons or {}, spec={}, ds_dir=None)
     return PG.detect(ctx, kinds or PG.SCOPE["floorplan"])
 
 
 def test_microboard_crystal_20mm_from_its_pins_fails_the_placement_gate(tmp_path):
-    far = _gate(_crystal_board(tmp_path, 20.0), ["net-budget"])
+    # 634e5e7 (D71gc): the rule-of-thumb crystal budget is a WARN, not a placement gap, unless a sourced per-net budget is set
+    assert _gate(_crystal_board(tmp_path, 20.0), ["net-budget"])["gaps"] == []
+    cons = {"placement": {"budget": {n: {"mm": 8.0, "reason": "datasheet CL stray-C"} for n in ("XIN", "XOUT")}}}
+    far = _gate(_crystal_board(tmp_path, 20.0), ["net-budget"], cons)
     assert {gp["id"] for gp in far["gaps"]} == {"net-budget:XIN", "net-budget:XOUT"}
-    assert all(gp["mag"] > 5.0 for gp in far["gaps"])            # 20 mm against the 8 mm crystal budget
-    near = _gate(_crystal_board(tmp_path, 4.0), ["net-budget"])
+    assert all(gp["mag"] > 5.0 for gp in far["gaps"])            # 20 mm against the sourced 8 mm budget
+    near = _gate(_crystal_board(tmp_path, 4.0), ["net-budget"], cons)
     assert near["gaps"] == []
 
 

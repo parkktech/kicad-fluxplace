@@ -614,6 +614,8 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     extend_on = bool(pcfg.get("extend_to_pads", True))
     ext_max = float(pcfg.get("extend_max_mm", 15.0))
     rec["outside"] = []
+    from . import forbid as FB
+    wins = FB.windows(cons)                      # B7: a foreign-net via is forbidden in a mask window (dd0cde6 ties laid one there)
     for net in sorted(pm):
         if nets is not None and net not in nets:
             continue
@@ -622,7 +624,8 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
             continue
         already_pads = [p for p in pads if tie_status(board, net, p, pm[net], solid)[0]]
         todo = [p for p in pads if p not in already_pads]
-        tied, untied = _tie_pads(board, net, todo, pm[net], rules, solid, avoid) if todo else ([], [])
+        av = _with_windows(avoid, wins, net)
+        tied, untied = _tie_pads(board, net, todo, pm[net], rules, solid, av) if todo else ([], [])
         fragile = [u for u in untied if u.get("surface")]       # no site for a via into the plane: the surface pour is all it has
         untied = [u for u in untied if not u.get("surface")]
         for u in fragile:
@@ -681,6 +684,18 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     with open(os.path.join(workdir, "pourtie.json"), "w") as fh:
         json.dump(rec, fh, indent=1)
     return rec
+
+
+def _with_windows(avoid, wins, net):
+    """`avoid` plus the bounding box (mm, grown by the mask margin) of every mask window `net` does not own; `avoid` untouched when none."""
+    from . import geom as GM
+    extra = []
+    for w in wins:
+        if w["owner"] != net and len(w["pts"]) >= 3:
+            xs, ys = [q[0] for q in w["pts"]], [q[1] for q in w["pts"]]
+            m = GM.MASK_MARGIN
+            extra.append((min(xs) - m, min(ys) - m, max(xs) + m, max(ys) + m))
+    return (list(avoid or []) + extra) if extra else avoid
 
 
 def pair_aprons(board_in, cons, R):

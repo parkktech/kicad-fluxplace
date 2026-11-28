@@ -77,6 +77,9 @@ def test_synthetic_pads_are_nearest_pair(monkeypatch):
 
 def _fake_drc(monkeypatch, boards):
     """kicad-cli stand-in: writes boards[board_path] as the -o report. Keeps the real drc_raw/summarize_drc path."""
+    # k17 memo: drc_raw keys on the file content sha, and these board paths do not exist (every sha equal) -> key by path, fresh memo
+    monkeypatch.setattr(H, "board_sha", lambda board: "fake:" + os.path.basename(board))
+    monkeypatch.setattr(H, "_DRC_MEMO", {})
     def run(cmd, **kw):
         out = cmd[cmd.index("-o") + 1]
         with open(out, "w") as fh:

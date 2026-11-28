@@ -295,7 +295,8 @@ def test_clearance_margin_requested_floor_kept(tmp_path):
     assert RR.size_args(R)[3] == "0.127"
     R2 = RR.rules(dict(CONS, route={"clearance_margin_mm": 0.03}), board, 0.15, 0.2)
     assert abs(RR.request_clearance(R2) - 0.127) < 1e-9 and R2["min_clearance"] == 0.127   # the margin key does not move the request
-    assert RR.rules({}, board, 0.15, 0.2)["clearance_margin"] == 0.0                # no floor, no margin
+    R0 = RR.rules({}, board, 0.15, 0.2)                                              # no [fab]: house floor applies (72f99bb), so margin = grid
+    assert R0["clearance_margin"] == (R0["grid"] if R0["min_clearance"] else 0.0)
     krt = tmp_path / "krt"
     (krt / "py_router").mkdir(parents=True)
     (krt / "py_router" / "route.py").write_text('"--escalation" "--strict-sizes"')
