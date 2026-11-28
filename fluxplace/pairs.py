@@ -37,7 +37,7 @@ def params(cons):
     return {"enabled": e.get("enabled", True) is not False, "step": float(e.get("step_mm", 0.1)), "clearance": e.get("clearance_mm"),
             "via_cost": float(e.get("via_cost_mm", 20.0)), "turn_cost": float(e.get("turn_cost_mm", 0.4)),
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
-            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)), "exit_reserve_mm": float(e.get("exit_reserve_mm", 4.0)), "near_mm": float(e.get("blocker_near_mm", 2.0)),
+            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)), "repair_rounds": int(e.get("repair_rounds", 3)), "rip_max": int(e.get("repair_rip_max", 4)), "exit_reserve_mm": float(e.get("exit_reserve_mm", 4.0)), "near_mm": float(e.get("blocker_near_mm", 2.0)),
             "inner_cost_gated": float(e.get("inner_cost", 3.0)),        # PHASE3G G3d: gated pairs stay outer unless blocked
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
             "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits") if isinstance(e.get("reserve_exits"), bool) else None,
@@ -1064,6 +1064,11 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
     return out
 
 
+def _lay_line(pr, c, tag=""):
+    e = c["e"]
+    return f"pairs: {tag}{pr[0]}/{pr[1]} {e['status']} ({e.get('secs', 0)} s)" + (f": {e['why'][:200]}" if e.get("why") and not c["full"] else "")
+
+
 def _apply(ctx, pr, c, plan_only):
     """a pair's result becomes part of the state: its copper and kept fan-out are obstacles for every later pair."""
     grid, items = ctx["grid"], ctx["items"]
@@ -1168,7 +1173,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             c = cache.get((pr, prefix))
             if c is None:
                 c = cache[(pr, prefix)] = _lay_pair(ctx, pr, info[pr], rules[pr], plan_only)
-                log(f"pairs: {pr[0]}/{pr[1]} {c['e']['status']} ({c['e'].get('secs', 0)} s)")
+                log(_lay_line(pr, c))
             _apply(ctx, pr, c, plan_only)
             ctx["done"].add(pr)
             st["res"][pr] = c
@@ -1249,6 +1254,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                               "failed_alone": alone_fail, "secs": round(time.time() - tn, 1), "workers": P["workers"]}
         log(f"pairs: negotiation {res['negotiation']}")
     best = one_pass(order0)
+    if not plan_only:                                        # a plan claims no copper: nothing a retry or a rip could change
+        _repair(best, info, rules, key, P, mk_ctx, near, plan_only, log)
     if live:                                                 # B5 repair: only when a pair failed its plain lay, never upfront (+790 s on W16 for no gain)
         best = _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pass, cache, neg, _lay_pair, _apply, log)
     tried = {tuple(best["order"])}
@@ -1303,6 +1310,80 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     res["order"] = ["/".join(pr) for pr in best["order"]]
     res["secs"] = round(time.time() - t0, 1)
     return res
+
+
+def _bad(c):
+    return not (c["full"] or c["e"]["status"] == "kept")
+
+
+def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
+    """End-of-pass repair of the pairs the pass left unlaid, on the pass's own result (the pairs that are fine are not searched again).
+    Per round, the failed pairs F and the laid pairs S their failures name (same or a lower tier only; else: copper beside their
+    terminals) are taken off together; F is laid first, S after it, on a state without presets and reservations (all are released
+    at the end of a pass).  A trial is kept only when every ripped pair is complete again and at least one failed pair is laid,
+    so a round never leaves fewer pairs than it found.  When the joint trial is not kept, each failed pair is tried alone with its
+    own blockers.  Rounds repeat while one gains ([pairlay] repair_rounds, 0 = off); the stage deadline stops it."""
+    import re
+    dl = P.get("deadline")
+    over = lambda: bool(dl and time.time() > dl)
+    nfail = [1]
+
+    def state(skip):
+        ctx = mk_ctx()
+        ctx["preset"], ctx["reserve"], ctx["left"] = {}, {}, lambda: 2 * max(1, nfail[0])
+        for q in st["order"]:
+            if q not in skip and not _bad(st["res"][q]):       # a half-laid pair's copper is never written: no obstacle here
+                _apply(ctx, q, st["res"][q], plan_only)
+            ctx["done"].add(q)
+        return ctx
+
+    def blockers(f):
+        e = st["res"][f]["e"]
+        txt = " | ".join([e.get("blocked_by", "")] + list(e.get("blockers", [])))
+        cand = [g for g in st["order"] if g != f and st["res"][g]["full"] and st["res"][g]["nok"] and key[g][:2] >= key[f][:2]]
+        hit = [g for g in cand if any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)]
+        rest = sorted((g for g in cand if g not in hit and near(st["res"][g], f) <= P["near_mm"]), key=lambda g: near(st["res"][g], f))
+        return (hit + rest)[:max(0, P["rip_max"])]
+
+    def trial(F, S, tag):
+        """F then S on the state without both -> True when kept"""
+        ctx, new = state(set(F) | set(S)), {}
+        for q in list(F) + list(S):
+            if over():
+                return False
+            c = new[q] = _lay_pair(ctx, q, info[q], rules[q], plan_only)
+            log(_lay_line(q, c, tag))
+            if q in S and not c["full"]:
+                return False
+            if c["full"]:                                    # a half-laid pair's copper is never written
+                _apply(ctx, q, c, plan_only)
+        if not any(new[f]["full"] for f in F):
+            return False
+        st["res"].update(new)
+        return True
+
+    changed = False
+    for rnd in range(max(0, P["repair_rounds"])):
+        failed = [f for f in st["order"] if _bad(st["res"][f]) and info[f][2]]
+        if not failed or over():
+            break
+        nfail[0] = len(failed)
+        rip = {f: blockers(f) for f in failed}
+        S = [g for g in st["order"] if any(g in v for v in rip.values())]
+        tag = f"repair {rnd + 1} "
+        gained = trial(failed, S, tag + (f"rip [{' '.join(g[0] for g in S)}] " if S else "retry "))
+        if not gained and S and len(failed) > 1:               # the joint trial lost a ripped pair: one failed pair at a time
+            for f in failed:
+                gained = trial([f], rip[f], tag + (f"rip [{' '.join(g[0] for g in rip[f])}] " if rip[f] else "retry ")) or gained
+        changed = changed or gained
+        if not gained:
+            break
+    if changed:
+        st["grid"] = state(()).get("grid")
+        st["score"] = (sum(1 for c in st["res"].values() if not _bad(c)), sum(c["nok"] for c in st["res"].values()),
+                       -round(sum(c["skew"] for c in st["res"].values()), 3))
+        st["repaired"] = True
+    return st
 
 
 def _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pass, cache, neg, lay_pair, apply_, log):
