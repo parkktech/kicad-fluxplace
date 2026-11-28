@@ -25,3 +25,56 @@ def test_net_without_pour_is_refused_without_output(tmp_path):
     out = str(tmp_path / "missing.kicad_pcb")
     result = PI.repair(src, out, "NO_SUCH_NET")
     assert not result["accepted"] and not os.path.exists(out)
+
+
+def _blocked(path, locked=False):
+    """make()'s board plus a wide SIG track on B.Cu over every via site around the GND pad (SIG has a pad of its own: a net with
+    no pad is not kept on load)."""
+    make(path)
+    b = pcbnew.LoadBoard(path)
+    sig = pcbnew.NETINFO_ITEM(b, "SIG")
+    b.Add(sig)
+    fp = pcbnew.FOOTPRINT(b)
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
+    pad = pcbnew.PAD(fp)
+    pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1), pcbnew.FromMM(1)))
+    pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
+    pad.SetNet(sig)
+    pad.SetNumber("1")
+    fp.Add(pad)
+    b.Add(fp)
+    tr = pcbnew.PCB_TRACK(b)
+    tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(5), pcbnew.FromMM(10)))
+    tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(17), pcbnew.FromMM(10)))
+    tr.SetWidth(pcbnew.FromMM(5))
+    tr.SetLayer(b.GetLayerID("B.Cu"))
+    tr.SetNet(sig)
+    tr.SetLocked(locked)
+    b.Add(tr)
+    b.Save(path)
+    return path
+
+
+def _cons(tmp_path):
+    """Constraints present (no constraints = every net hard, nothing is ripped)."""
+    p = tmp_path / "c.toml"
+    p.write_text("[route]\nrail_min_pads = 8\n")
+    return str(p)
+
+
+def test_k15_sealed_island_rips_the_unlocked_blocking_track_and_lays_the_via(tmp_path):
+    src = _blocked(str(tmp_path / "in.kicad_pcb"))
+    out = str(tmp_path / "out.kicad_pcb")
+    result = PI.repair(src, out, "GND", constraints=_cons(tmp_path))
+    assert result["accepted"], result.get("reason")
+    assert result["action"].startswith("rip+") and result["ripped"] == {"SIG": 1}
+    assert vias(out) == 1 and H.open_nets(out)["open"] == 0
+
+
+def test_k15_locked_blocking_track_is_never_ripped(tmp_path):
+    src = _blocked(str(tmp_path / "in.kicad_pcb"), locked=True)
+    out = str(tmp_path / "out.kicad_pcb")
+    result = PI.repair(src, out, "GND", constraints=_cons(tmp_path))
+    assert not result["accepted"] and not os.path.exists(out)

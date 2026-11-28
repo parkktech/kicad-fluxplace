@@ -631,7 +631,7 @@ POUR_ISLANDS_MAX = 12                          # k11: stitching vias one pourisl
 
 def _r_pourisland(base, out, gaps, ctx):
     from . import pourisland as P
-    cur, wrote, tmps = base, False, []
+    cur, wrote, tmps, ripped = base, False, [], set()
     try:
         for i, net in enumerate(_nets(gaps)):
             for k in range(POUR_ISLANDS_MAX):       # k11: repair ties one island per call; every untied island of the net gets its via
@@ -639,10 +639,13 @@ def _r_pourisland(base, out, gaps, ctx):
                 tmps.append(tmp)
                 _rm(tmp)
                 _sidecars(cur, tmp)
-                P.repair(cur, tmp, net, constraints=ctx["cons_path"])
+                ripped |= set((P.repair(cur, tmp, net, constraints=ctx["cons_path"]) or {}).get("ripped") or ())
                 if not os.path.exists(tmp):
                     break
                 cur, wrote = tmp, True
+        if ripped:                                  # k15: a net a rip-and-lay opened is re-laid by KRT; the close guard judges the whole
+            tmps.append(os.path.join(ctx["work"], "pi-krt.kicad_pcb"))
+            cur = _relay_open(cur, tmps[-1], ripped, ctx)
         if wrote:
             _copy(cur, out)
             _sidecars(cur, out)
@@ -650,6 +653,22 @@ def _r_pourisland(base, out, gaps, ctx):
         for t in tmps:
             _clean_board(t)
     return {"nets": len(_nets(gaps)), "wrote": wrote}
+
+
+def _relay_open(cur, nxt, nets, ctx):
+    """k15: KRT re-lays the nets of `nets` that are open on `cur` into `nxt` -> nxt, or cur when none is open or KRT wrote nothing."""
+    from . import handroute as HR
+    opn = sorted(set(nets) & {r.get("net") for r in HR.open_nets(cur, constraints=ctx.get("cons_path"))["connections"]})
+    cmd = _krt_cmd(cur, nxt, opn, ctx) if opn else None
+    if cmd is None:
+        return cur
+    _rm(nxt)
+    _sidecars(cur, nxt)
+    try:
+        _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 600), cwd=ctx["work"])
+    except subprocess.TimeoutExpired:
+        return cur
+    return nxt if os.path.exists(nxt) else cur
 
 
 def _r_edgesliver(base, out, gaps, ctx):

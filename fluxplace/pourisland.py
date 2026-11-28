@@ -61,7 +61,10 @@ def island_sites(b, net, step=0.4, per_island=12):
                             pts.append((min((x - o.x) ** 2 + (y - o.y) ** 2 for o in own), x, y))
                         y += st
                     x += st
-                out += [(pcbnew.ToMM(x), pcbnew.ToMM(y)) for _d, x, y in sorted(pts)[:per_island]]
+                pts.sort()
+                rest = pts[per_island:]                     # k15: a large island also gets sites spread over the rest of it
+                pick = pts[:per_island] + rest[::max(1, len(rest) // per_island)][:per_island]
+                out += [(pcbnew.ToMM(x), pcbnew.ToMM(y)) for _d, x, y in pick]
     return out
 
 
@@ -155,7 +158,94 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
         if os.path.isdir(session):
             import shutil
             shutil.rmtree(session)
+    if at is None:                                    # k15: every free site is blocked: rip the blocking unlocked track, then lay
+        hit = _rip_lay(board, out, net, constraints, via, M, reasons)
+        if hit:
+            return hit
     return {"accepted": False, "net": net, "reason": "no legal guarded stitching-via site joins the island", "attempts": reasons}
+
+
+RIP_IDS = 16                        # k15: most blocking track pieces one rip-and-lay may remove (routed nets come in short pieces)
+RIP_NETS = 2                        # k15: most nets one rip-and-lay may open (each is re-laid by the caller)
+RIP_TRIES = 8                       # k15: rip-and-lay candidates tried per call (each is one guarded edit)
+RIP_KINDS = ("clearance", "crossing", "via_clearance")
+
+
+def _rippable(M, net, viols, names, cons, never=()):
+    """Full ids of the tracks behind `viols` when every violation is one an unlocked, non-hard track of another net (not in `never`:
+    the [power] rails) causes; else None."""
+    from . import lockpolicy as LP
+    ids, named = set(), {str(v.get("item")) for v in viols if v.get("id")}
+    for v in viols:
+        if not v.get("id") and v.get("kind") == "hole_clearance" and v.get("with") in named:
+            continue                                  # the hole check of a via against a track that is ripped anyway
+        if v.get("kind") not in RIP_KINDS or not str(v.get("item", "")).startswith("track ") or v.get("locked") or v.get("net") in (None, "", net):
+            return None
+        if v["net"] in never or LP.level(v["net"], cons, names) == LP.HARD:
+            return None
+        hit = [o for o in H._resolve(M, v["id"]) if o.kind == "track" and not o.locked]
+        if not hit:
+            return None
+        ids.update(o.id for o in hit)
+    nets = {o.net for o in M.obs if o.id in ids}
+    return ids if 0 < len(ids) <= RIP_IDS and len(nets) <= RIP_NETS else None
+
+
+def _strip_ids(board, dst, ids):
+    """Copy `board` to `dst` without the tracks whose uuid is in `ids` -> {net: count}."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    cut = {}
+    for t in list(b.GetTracks()):
+        if t.m_Uuid.AsString() in ids:
+            cut[t.GetNetname()] = cut.get(t.GetNetname(), 0) + 1
+            b.Delete(t)
+    b.Save(dst)
+    pro = os.path.splitext(board)[0] + ".kicad_pro"
+    if os.path.exists(pro):
+        import shutil
+        shutil.copyfile(pro, os.path.splitext(dst)[0] + ".kicad_pro")
+    return cut
+
+
+def _rip_lay(board, out, net, constraints, via, M, reasons):
+    """k15 (sealed pour islands): a via site / pad stub refused only by unlocked tracks of other (non-hard) nets is laid after those
+    tracks are ripped (fewest rips first). -> the accepted result with `ripped` {net: tracks} (the caller re-lays a ripped net that
+    opened; the close guard judges the whole), or None."""
+    from . import constraints as CN
+    cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
+    names = sorted({o.net for o in M.obs if o.net})
+    from . import power as PW
+    rails = {n for n, r in PW.plan(cons).items() if r and r.get("track_mm") is not None}
+    cands = []
+    for r in reasons:
+        path = r.get("path") or (f"via {r['at'][0]:.4f},{r['at'][1]:.4f}" if r.get("at") else None)
+        if not path or not str(r.get("reason", "")).startswith("probe"):
+            continue
+        pr = H.probe(board, net, path, constraints, via=via, M=M)
+        ids = None if pr["ok"] else _rippable(M, net, pr["violations"], names, cons)
+        if ids and H.probe_prims(M, net, H.G.parse_path(path, M.cu), None, via, skip_ids=ids)["ok"]:
+            cands.append((len(ids), path, ids))
+    nets_of = {o.id: o.net for o in M.obs if o.id}
+    seen = set()                                      # plain copper first, a rail's copper last (fewest pieces within each)
+    for _n, path, ids in sorted(cands, key=lambda c: (any(nets_of.get(i) in rails for i in c[2]), c[0])):
+        key = frozenset(ids)
+        if key in seen or len(seen) >= RIP_TRIES:
+            continue
+        seen.add(key)
+        tmp = out + ".rip.kicad_pcb"
+        cut = _strip_ids(board, tmp, ids)
+        try:
+            result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
+        finally:
+            for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro"):
+                if os.path.exists(f):
+                    os.remove(f)
+        if result["accepted"]:
+            return {"accepted": True, "action": "rip+" + ("via" if path.startswith("via") else "stub+via"), "net": net, "path": path,
+                    "via": list(via), "out": out, "ripped": cut, "measure": result.get("measure", {})}
+        reasons.append({"path": path, "rip": sorted(cut), "reason": result.get("reason")})
+    return None
 
 
 def cmd(a):
