@@ -35,8 +35,9 @@ def board(tmp_path, two_terminal=False):
     for net, a, b in [("USB_DP", (0, 0), (9, 0)), ("USB_DP", (9, 0), (10, 0)), ("USB_DM", (0, 0.8), (9, 0.8)), ("USB_DM", (9, 0.8), (10, 0.8))]:
         body += _seg(net, a, b)
     if not two_terminal:
-        for net, a, b in [("USB_DP", (9, 0), (9, 2)), ("USB_DP", (9, 2), (10, 2)), ("USB_DM", (9, 0.8), (9, 2.8)),
-                          ("USB_DM", (9, 2.8), (10.5, 2.8)), ("USB_DM", (10.5, 2.8), (10, 2.8))]:
+        # the N leg's 0.5 mm detour sits clear of the pads (a detour over a pad body is joined at the pad, as KiCad does: 52d0e26)
+        for net, a, b in [("USB_DP", (9, 0), (9, 2)), ("USB_DP", (9, 2), (10, 2)), ("USB_DM", (9, 0.8), (9, 1.6)),
+                          ("USB_DM", (9, 1.6), (8.75, 1.6)), ("USB_DM", (8.75, 1.6), (8.75, 2.8)), ("USB_DM", (8.75, 2.8), (10, 2.8))]:
             body += _seg(net, a, b)
     return RD.load(PB.write(tmp_path, body))
 
