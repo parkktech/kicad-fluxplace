@@ -1018,6 +1018,7 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
                 _claim(items, pcs, net)
                 if not plan_only:
                     out["pcs"][net] += pcs
+            t.pop("dog", None)                               # dog-bone exits found before the join (negotiation precompute) may foul it: found again against it
             e["twin_join"] = {"at": t["name"], "pieces": sum(len(v) for v in jn.values())}
             if plan_only:
                 e.setdefault("join_pcs", {}).update({net: [list(p) for p in pcs] for net, pcs in jn.items()})

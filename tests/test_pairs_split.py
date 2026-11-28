@@ -88,3 +88,31 @@ def test_twin_receptacle_with_long_pads_keeps_the_pair_whose_leg_runs_over_its_o
     assert row["open"] == [0, 0], row
     a = PA.audit(RD.load(out), [("USB_DP", "USB_DM")], {}, set())[("USB_DP", "USB_DM")]
     assert set(a["causes"]) <= {"skew"}, a
+
+
+def test_dog_bone_exits_of_a_twin_terminal_are_found_again_after_its_join(tmp_path, monkeypatch):
+    # with two live pairs the negotiation finds every terminal's dog-bone exits up front, BEFORE the twin join exists; exits that
+    # foul the join were then dropped silently at the lay and the working exit (found against the join) never tried (W16 USB_J)
+    row = [PB.pad(str(i + 1), 0.5 * i, 0, net, 0.3, 1.15) for i, net in enumerate(("USB_DM", "USB_DP", "USB_DM", "USB_DP"))]
+    duo = [PB.pad("1", 0, 0, "USB_DP", 0.3, 0.8), PB.pad("2", 0.8, 0, "USB_DM", 0.3, 0.8)]
+    two = lambda a, b: [PB.pad("1", 0, 0, a, 0.3, 0.8), PB.pad("2", 0.8, 0, b, 0.3, 0.8)]
+    b = PB.write(tmp_path, PB.fp("J5", 40, 60, row) + PB.fp("U8", 40.35, 45, duo)
+                 + PB.fp("U1", 60, 45, two("X_DP", "X_DM")) + PB.fp("U2", 60, 60, two("X_DP", "X_DM")))
+    calls, dog0, join0 = [], PR.dogbone, PR.twin_join
+
+    def dog(ctx, t, *a, **k):
+        if t.get("twin"):
+            calls.append("cached" if "dog" in t else "found")
+        return dog0(ctx, t, *a, **k)
+
+    def join(ctx, t, *a, **k):
+        r = join0(ctx, t, *a, **k)
+        calls.append("join" if r else "nojoin")
+        return r
+    monkeypatch.setattr(PR, "dogbone", dog)
+    monkeypatch.setattr(PR, "twin_join", join)
+    res = PR.plan(b, {"pairlay": {"workers": 1}}, None)
+    assert res["negotiation"], "two live pairs: the negotiation ran (the up-front dog-bone pass)"
+    assert "join" in calls and calls.index("found") < calls.index("join"), calls
+    after = calls[calls.index("join") + 1:]
+    assert after and after[0] == "found", calls
