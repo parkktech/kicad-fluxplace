@@ -167,40 +167,111 @@ def island_links(b, board, net, constraints, M, names, cons, skip=()):
     return out
 
 
-def link_pads(board, out, pads, constraints=None):
-    """Pads that reach their plane only through a surface pour (pourtie's `pour` state: no via site of their own) get a track on
-    their layer to the nearest via / through pad of the net (_link, nothing ripped), each one a guarded edit (no new DRC error,
-    no net opened). `pads` = [{net, ref, pad, at [x, y] mm}]. Writes `out` when at least one link is laid.
-    -> [{net, ref, pad, at, state: "link" | "pour", path | reason}]."""
+NEW_VIA_R = (1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0)   # mm from the pad: beyond pourtie's own 1.4 mm reach, up to LINK_REACH
+NEW_VIA_TRIES = 3                                  # new-via sites tried per pad (two guarded edits each)
+
+
+def _new_via_sites(M, board, net, pad, constraints, via):
+    """Sites for a NEW via of `net` round `pad`, nearest first: on a plane layer's fill of the net (pourtie.solid_lids; with no plane, another
+    pour layer of the net), in no pad,
+    and legal as a via by the copper model (handroute.probe). -> [(x, y)] mm."""
     import pcbnew
     from . import pourtie as PT
-    keep, cur, rows = H.FILL_CACHE_DIR, board, []
+    b, c = M.b, pad.GetPosition()
+    pours = PT.pour_map(b).get(net, ())
+    plane = [lid for lid in PT.solid_lids(b) if lid in pours] or [lid for lid in pours if not pad.IsOnLayer(lid)]   # no plane known: any other pour of the net
+    pads = [p for f in b.GetFootprints() for p in f.Pads()]
+    out = []
+    for r in NEW_VIA_R:
+        for k in range(16):
+            x, y = c.x + pcbnew.FromMM(r) * math.cos(k * math.pi / 8), c.y + pcbnew.FromMM(r) * math.sin(k * math.pi / 8)
+            at = pcbnew.VECTOR2I(int(x), int(y))
+            if not any(PTF.fill_hit(b, net, lid, x, y) for lid in plane) or any(p.HitTest(at, pcbnew.FromMM(via[0]) // 2) for p in pads):
+                continue
+            xm, ym = pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y))
+            if H.probe(board, net, f"via {xm:.4f},{ym:.4f}", constraints, via=via, M=M)["ok"]:
+                out.append((xm, ym))
+    return out
+
+
+def _link_new_via(cur, out, net, at, lid_name, constraints, via, stop):
+    """No via of the net in reach: lay a NEW via into the net's plane (first guarded edit), then the track from the pad to it on
+    the pad's layer (second guarded edit); a via the track cannot reach is not kept. Writes `out` -> (path, [x, y]) or None."""
+    import pcbnew
+    from . import pourtie as PT
+    M = H._model(cur, constraints)
+    pad = PT._pad_at(M.b, net, at)
+    v1, v2 = os.path.splitext(out)[0] + ".nv1.kicad_pcb", os.path.splitext(out)[0] + ".nv2.kicad_pcb"
+    try:
+        for x, y in _new_via_sites(M, cur, net, pad, constraints, via)[:NEW_VIA_TRIES]:
+            if _late(stop):
+                break
+            _drop(v1)
+            # the via alone may dangle or open the net until its track is there: the pair of edits is judged at the end
+            if not _guarded(cur, v1, net, f"via {x:.4f},{y:.4f}", constraints, via, close=False, may_open=True)[1]["accepted"]:
+                continue
+            M1 = H._model(v1, constraints)
+            p1 = PT._pad_at(M1.b, net, at)
+            pos = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+            hit = _link(M1.b, v1, net, p1, M1.b.GetLayerID(lid_name), [pos], constraints, M1, copper_only=True)
+            if hit and _guarded(v1, v2, net, hit[0], constraints, via, close=False)[1]["accepted"]:
+                was, now = (H.summarize_drc(H.drc_raw(f))["unc_by_net"] for f in (cur, v2))
+                if all(n <= was.get(k, 0) for k, n in now.items()):
+                    os.replace(v2, out)
+                    return hit[0], [round(x, 4), round(y, 4)]
+    finally:
+        for f in (v1, v2, os.path.splitext(v1)[0] + ".kicad_pro", os.path.splitext(v2)[0] + ".kicad_pro", v1 + ".session", v2 + ".session"):
+            _drop(f)
+    return None
+
+
+LINK_PADS_S = 600.0                                # seconds link_pads may spend before it stops starting guarded edits
+
+
+def link_pads(board, out, pads, constraints=None, budget=LINK_PADS_S):
+    """Pads that reach their plane only through a surface pour (pourtie's `pour` state: no via site of their own) get a track on
+    their layer to the nearest via / through pad of the net (_link, nothing ripped), or, with none in reach, to a NEW via into the
+    net's plane up to LINK_REACH away (_link_new_via). Every edit is guarded (no new DRC error, no net opened); no edit starts after
+    `budget` seconds. `pads` = [{net, ref, pad, at [x, y] mm}]. Writes `out` when at least one link is laid.
+    -> [{net, ref, pad, at, state: "link" | "pour", path, via (a new one) | reason}]."""
+    import shutil
+    from . import pourtie as PT
+    keep, cur, rows, stop = H.FILL_CACHE_DIR, board, [], time.monotonic() + budget
     if keep is None:
         H.FILL_CACHE_DIR = out + ".fill"
     tmp = os.path.splitext(out)[0] + ".link.kicad_pcb"
     try:
         for t in pads:
-            M = H._model(cur, constraints)
-            pad = PT._pad_at(M.b, t["net"], t["at"])
             row = {k: t.get(k) for k in ("net", "ref", "pad", "at")}
             rows.append(row)
+            if _late(stop):
+                row.update(state="pour", reason="out of time before this pad was tried")
+                continue
+            M = H._model(cur, constraints)
+            pad = PT._pad_at(M.b, t["net"], t["at"])
             lids = [lid for lid in M.b.GetEnabledLayers().CuStack() if pad is not None and pad.IsOnLayer(lid)]
-            hit = _link(M.b, cur, t["net"], pad, lids[0], _tied_points(M.b, t["net"]), constraints, M, copper_only=True) if lids else None
-            if not hit:
-                row.update(state="pour", reason=f"no free track on its layer to a via of {t['net']} within {LINK_REACH:g} mm")
+            if not lids:
+                row.update(state="pour", reason="pad not found on a copper layer")
                 continue
             rule = M.net_rule(t["net"])
-            res = _guarded(cur, tmp, t["net"], hit[0], constraints, (rule["via_dia"], rule["via_drill"]), close=False)[1]
-            if res["accepted"]:
-                os.replace(tmp, out)
-                pro = os.path.splitext(board)[0] + ".kicad_pro"
-                if os.path.exists(pro) and os.path.abspath(board) != os.path.abspath(out):
-                    import shutil
-                    shutil.copyfile(pro, os.path.splitext(out)[0] + ".kicad_pro")
-                cur = out
+            via = (rule["via_dia"], rule["via_drill"])
+            hit = _link(M.b, cur, t["net"], pad, lids[0], _tied_points(M.b, t["net"]), constraints, M, copper_only=True)
+            res = _guarded(cur, tmp, t["net"], hit[0], constraints, via, close=False)[1] if hit else None
+            if res and res["accepted"]:
                 row.update(state="link", path=hit[0])
             else:
-                row.update(state="pour", reason="link refused: " + str(res.get("reason"))[:160])
+                why = "link refused: " + str(res.get("reason"))[:160] if res else f"no free track on its layer to a via of {t['net']} within {LINK_REACH:g} mm"
+                new = _link_new_via(cur, tmp, t["net"], t["at"], M.b.GetLayerName(lids[0]), constraints, via, stop)
+                if new:
+                    row.update(state="link", path=new[0], via=new[1])
+                else:
+                    row.update(state="pour", reason=why + "; no new via site with a free track to it either")
+                    continue
+            os.replace(tmp, out)
+            pro = os.path.splitext(board)[0] + ".kicad_pro"
+            if os.path.exists(pro) and os.path.abspath(board) != os.path.abspath(out):
+                shutil.copyfile(pro, os.path.splitext(out)[0] + ".kicad_pro")
+            cur = out
     finally:
         for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro", tmp + ".session", out + ".session"):
             _drop(f)

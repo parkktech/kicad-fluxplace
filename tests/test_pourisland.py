@@ -247,3 +247,24 @@ def test_a_pad_tied_only_by_its_surface_pour_gets_a_track_to_an_existing_via(tmp
     pad = next(o for o in M.obs if o.kind == "pad" and o.net == "GND")
     via = next(o for o in M.obs if o.kind == "via" and o.net == "GND")
     assert omap[pad.id] == omap[via.id] and H.open_nets(out)["open"] == H.open_nets(src)["open"]
+
+
+def test_a_pour_only_pad_with_no_via_in_reach_gets_a_new_plane_via_and_a_track_to_it(tmp_path):
+    """W16 C504.2 / C520.2: no via site within pourtie's 1.4 mm and no via of the net within 4 mm."""
+    src = _sealed(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    for t in list(b.GetTracks()):
+        if t.Type() == pcbnew.PCB_VIA_T:
+            b.Delete(t)
+    b.Save(src)
+    assert vias(src) == 0
+    out = str(tmp_path / "out.kicad_pcb")
+    rows = PI.link_pads(src, out, [{"net": "GND", "ref": "", "pad": "1", "at": [10.0, 10.0]}], _cons(tmp_path))
+    assert rows[0]["state"] == "link" and rows[0]["via"] and vias(out) == 1, rows
+    M = H._model(out)
+    isl, omap = M.islands("GND", fills=False)
+    pad = next(o for o in M.obs if o.kind == "pad" and o.net == "GND")
+    via = next(o for o in M.obs if o.kind == "via" and o.net == "GND")
+    assert omap[pad.id] == omap[via.id]
+    assert PI.link_pads(src, str(tmp_path / "late.kicad_pcb"), [{"net": "GND", "ref": "", "pad": "1", "at": [10.0, 10.0]}],
+                        _cons(tmp_path), budget=0)[0]["state"] == "pour"       # out of time: nothing is started

@@ -130,9 +130,9 @@ def test_crashed_child_leaves_its_exit_and_last_phase_in_the_record(monkeypatch,
 # ---- 3. one monotonic deadline ----
 
 def test_five_percent_rung_cannot_hold_more_than_its_allowance():
-    now, stage = 1000.0, 1000.0 + 2400
-    al = CX.allowance(stage, now, GP._rung_cap({}, "pourisland", 2400), CX.reserve_s({}, 2400))
-    assert al["allow_s"] == pytest.approx(120)                          # 5 % of 40 min; the review's +120 s made it 240
+    now, stage = 1000.0, 1000.0 + 7200
+    al = CX.allowance(stage, now, GP._rung_cap({}, "pourisland", 7200), CX.reserve_s({}, 7200))
+    assert al["allow_s"] == pytest.approx(360)                          # 5 % of 2 h (under 80 min the 240 s floor of one island repair applies)
     assert al["child"] + al["slack"] == pytest.approx(al["hard"]) and al["slack"] <= CX.KILL_SLACK_S
 
 

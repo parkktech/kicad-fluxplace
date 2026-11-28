@@ -649,6 +649,7 @@ def _r_joingaps(base, out, gaps, ctx):
 
 POUR_ISLANDS_MAX = 12                          # k11: stitching vias one pourisland rung lays per net
 ISLAND_S = 300.0                               # seconds one island repair may spend before it stops starting guarded edits
+EDIT_S = 75.0                                  # one guarded edit in flight (model + full DRC + snapshot) at the deadline
 
 
 def _r_pourisland(base, out, gaps, ctx):
@@ -657,7 +658,11 @@ def _r_pourisland(base, out, gaps, ctx):
     try:
         for i, net in enumerate(_nets(gaps)):
             for k in range(POUR_ISLANDS_MAX):       # k11: repair ties one island per call; every untied island of the net gets its via
-                left = _left(ctx, ISLAND_S) if ctx.get("deadline") is not None or ctx.get("budget_s") else ISLAND_S
+                # the call stops starting guarded edits EDIT_S before the rung's deadline, so the rung returns the islands it
+                # tied instead of being killed inside an edit; with less than that left no call starts
+                left = _left(ctx, ISLAND_S + EDIT_S) - EDIT_S if ctx.get("deadline") is not None or ctx.get("budget_s") else ISLAND_S
+                if left <= 0:
+                    break
                 tmp = os.path.join(ctx["work"], f"pi-{i}-{k}.kicad_pcb")
                 tmps.append(tmp)
                 _rm(tmp)
@@ -824,14 +829,17 @@ RUNG_CAP_S = 900                                # PHASE3F A1: one rung gets at m
 RUNG_FRAC = {"pourisland": 0.05, "rfroute": 0.10, "handrepair": 0.15, "pairgroup": 0.15}   # B11: slow rungs get a fraction of the close budget (W16: pourisland 434 s; w70: rfroute 900 s and handrepair 900 s each took 40 % of a 40 min close with 0 connections closed)
 
 
+RUNG_FLOOR_S = {"pourisland": 240.0}            # a fraction never leaves less than one island repair needs (a 12 min close gave the rung 36 s: killed mid-edit, 0 closed)
+
+
 def _rung_cap(cons, rung=None, budget_s=None):
     """Seconds one rung may take: [flow] rung_cap_min (default 900 s), and for a rung with a fraction (`[flow.rung_frac]` NAME = F, else
-    RUNG_FRAC) at most F of the close budget `budget_s`."""
+    RUNG_FRAC) at most F of the close budget `budget_s`, but never under RUNG_FLOOR_S."""
     flow = (cons or {}).get("flow") or {}
     cap = float(flow.get("rung_cap_min", RUNG_CAP_S / 60)) * 60
     frac = (flow.get("rung_frac") or {}).get(rung, RUNG_FRAC.get(rung)) if rung else None
     if frac and budget_s:
-        cap = min(cap, float(frac) * float(budget_s))
+        cap = min(cap, max(float(frac) * float(budget_s), RUNG_FLOOR_S.get(rung, 0.0)))
     return cap
 
 
@@ -2727,6 +2735,53 @@ JOB_OUT_KRT = "_krt_last"
 JOB_OUT_AI_USED = "_ai_used"
 
 
+RUNG_EVENT_S = 60.0                            # a running rung child reports at most this often
+
+
+def _newest(work):
+    """mtime of the newest file in `work` (one level down too): the rung child's own files are its sign of life."""
+    best = 0.0
+    try:
+        for e in os.scandir(work):
+            try:
+                best = max(best, e.stat().st_mtime)
+                if e.is_dir(follow_symlinks=False):
+                    best = max([best] + [x.stat().st_mtime for x in os.scandir(e.path)])
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return best
+
+
+def _rung_watched(name, work, fn, every=None):
+    """fn() (one rung child, which logs nothing to the run) with a progress event at start and end and one every RUNG_EVENT_S
+    while the child's work files keep changing. A child that stops writing stays silent, so the stall watcher still sees it
+    (fable-pairs full-4: 237 s inside one rung child without an event)."""
+    import threading
+    t0, stop, every = time.monotonic(), threading.Event(), RUNG_EVENT_S if every is None else every
+
+    def watch():
+        seen = _newest(work)
+        while not stop.wait(every):
+            now = _newest(work)
+            if now > seen:
+                seen = now
+                EV.emit("progress", "close", step=f"rung {name}: running {time.monotonic() - t0:.0f} s, files moving", state="running")
+    EV.emit("progress", "close", step=f"rung {name}: start", state="running")
+    th = threading.Thread(target=watch, daemon=True)
+    th.start()
+    end = "failed"
+    try:
+        r = fn()
+        end = "end"
+        return r
+    finally:
+        stop.set()
+        th.join(timeout=2)
+        EV.emit("progress", "close", step=f"rung {name}: {end} after {time.monotonic() - t0:.0f} s", state="running")
+
+
 def _call_rung(name, base, out, gaps, ctx):
     """Run one rung in a child process (`python -m fluxplace.gaps --rung-job JOB`) so a native crash or a pcbnew Remove() decay is a
     RungFailure, not a dead or poisoned close run.  Only ctx["inproc"] stays in-process: the child itself (it must not recurse) and
@@ -2755,8 +2810,9 @@ def _call_rung(name, base, out, gaps, ctx):
             env[CX.ENV_DEADLINE] = repr(float(ctx["deadline"]))
         CX.mark(ctx.get("phase_file"), "launch")
         try:
-            p = _procs.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
-                           text=True, timeout=tmo, cwd=_repo_root(), env=env)
+            p = _rung_watched(name, ctx.get("work") or os.path.dirname(out), lambda: _procs.run(
+                [sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
+                text=True, timeout=tmo, cwd=_repo_root(), env=env))
         except subprocess.TimeoutExpired as e:
             raise CX.RungFailure("timeout", f"rung timeout after {tmo:.0f} s", stderr_tail=CX.tail(getattr(e, "stderr", None)))
         err = CX.tail(getattr(p, "stderr", None))
