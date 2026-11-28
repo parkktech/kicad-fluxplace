@@ -397,4 +397,4 @@ def test_escape_batch_start_emits_a_progress_event():
     import inspect
     from fluxplace import pairescape as PE
     src = inspect.getsource(PE.plan)
-    assert 'EV.emit("progress", "pairs", step=f"escape' in src and src.index("probing") < src.index("got = pmap(")
+    assert src.count('EV.emit("progress", "pairs", step=f"escape') >= 2 and src.index("probing") < src.index("got = pmap(") and src.index("baseline lay") < src.index("base = ghost(")

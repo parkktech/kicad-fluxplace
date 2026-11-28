@@ -1272,6 +1272,8 @@ def _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pa
     neg["escape"].update(esc["choice"])
     neg["escape_reserve"].update(esc["reserve"])
     cache.clear()                                            # lay results depend on the exits
+    from . import events as EV
+    EV.emit("progress", "pairs", step=f"pairs: escape repair pass over {len(best['order'])} pair(s) with {len(esc['choice'])} planned exit(s)")
     st = one_pass(best["order"])
     st["escape_report"] = esc["report"]
     if st["score"] > best["score"]:

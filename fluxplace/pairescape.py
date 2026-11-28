@@ -551,6 +551,8 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     break
             boxes = [part_box(B, c) for c in hood]
             vset = sorted(verification_set(info, rules, key, live, targets, boxes, p["verify_reach"], watch), key=lambda q: pos.get(q, 1e9))
+            EV.emit("progress", "pairs", step=f"escape {'/'.join(hood)}: baseline lay of {len(vset)} pair(s) "
+                    f"({round(time.time() - t0)} of {round(p['budget_s'])} s)")
             base = ghost(vset, {}, {})
             rep["ghost_runs"] += 1
             okb, whyb = judge(base, set(targets), vset, base, limit)
