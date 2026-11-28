@@ -292,6 +292,27 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     return {"board": cur, "kept": kept, "tried": n_try, "open_nets": sorted(open_now), "lines": lines}
 
 
+def length_findings(B, cls, nets, cons=None):
+    """Routed length of each closed critical net vs its budget -> [{level, code, net, value, limit, msg}]. Over budget is a WARN
+    (realistic-limits rule: a budget is a link/loss allocation, not an interface hard limit) unless the net is listed in
+    `[critroute] hard` (the project cites a sourced hard limit for it), then FAIL. Nets not fully connected are skipped."""
+    from . import budget as BG, netclass as NC
+    hard = {str(x) for x in ((cons or {}).get("critroute") or {}).get("hard") or []}
+    out = []
+    for net in nets:
+        info = (cls or {}).get(net) or {}
+        lim = NC.effective_budget(info) if info.get("budget") is not None else None
+        ln = BG.routed_length(B, net) if lim is not None else None
+        if ln is None or ln <= lim:
+            continue
+        lvl = "FAIL" if net in hard else "WARN"
+        why = f"; budget: {info['override_reason']}" if info.get("override_reason") else ""
+        out.append({"level": lvl, "code": "CRIT_LENGTH_OVER_BUDGET", "net": net, "value": round(ln, 2), "limit": lim,
+                    "msg": f"{net} routed {ln:.1f} mm, budget {lim:g} mm"
+                           f"{'' if lvl == 'FAIL' else ' (allocation, not a sourced hard limit: WARN)'}{why[:160]}"})
+    return out
+
+
 def stage(c, n, board):
     """Pipeline stage `critroute`. No actions file and `[ai] mode` = "packet" (default): writes the packets and returns
     verdict "packets" (the pipeline stops with exit 5) only when `[ai] answer` = "required". Otherwise (default "optional") an
@@ -331,6 +352,11 @@ def stage(c, n, board):
             + (f"; open: {', '.join(still)}" if still else ""))
     out = {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
            "next": [f"critroute open: {x}" for x in still]}
+    LF = length_findings(RD.load(res["board"]), cls, [x for x in names if x not in still], c.cons)
+    if LF:
+        out["findings"] = LF
+        out["line"] += "; length: " + "; ".join(f["msg"].split(" (")[0] for f in LF)
+        out["verdict"] = "fail" if any(f["level"] == "FAIL" for f in LF) else "warn"
     if unanswered:
         from . import packets as PK, questions as QS
         ans = {**{str(k): str(v) for k, v in ((c.cons or {}).get("answers") or {}).items()}, **QS.parse_answers(getattr(getattr(c, "a", None), "answer", None))}

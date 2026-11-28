@@ -284,3 +284,14 @@ def test_apply_emits_a_progress_event_per_connection():
     from fluxplace import critroute as CR
     src = inspect.getsource(CR.apply)
     assert 'EV.emit("progress", "critroute"' in src and src.index('EV.emit("progress", "critroute"') < src.index("for r in search(")
+
+
+def test_length_findings_warn_over_budget_fail_only_when_listed_hard(monkeypatch):
+    from fluxplace import budget as BG
+    monkeypatch.setattr(BG, "routed_length", lambda B, net: {"A": 45.2, "B": 30.0, "C": None, "D": 45.2}[net])
+    cls = {n: {"budget": 38.0, "drops": 2, "pads": 2, "override_reason": "link budget"} for n in "ABCD"}
+    cls["D"]["budget"] = None
+    f = CR.length_findings({}, cls, ["A", "B", "C", "D"])
+    assert [(x["net"], x["level"], x["value"], x["limit"]) for x in f] == [("A", "WARN", 45.2, 38.0)]
+    f = CR.length_findings({}, cls, ["A"], {"critroute": {"hard": ["A"]}})
+    assert f[0]["level"] == "FAIL"
