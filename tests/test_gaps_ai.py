@@ -563,7 +563,7 @@ def test_close_stop_lists_packets_then_second_close_applies(close_env, apply_env
 # ---- PHASE3G G1: pair gaps reach the ai rung; pair actions are filtered; one packet key per pair -----------------
 def test_pair_gaps_dispatch_to_ai_after_pairgroup():
     for k in ("pair-open", "pair-asym"):
-        assert GP.DISPATCH[k] == (["pairgroup", "krt", "ai"] if k == "pair-open" else ["pairgroup", "ai"])   # w78: krt takes the legs pairgroup could not lay
+        assert GP.DISPATCH[k] == (["pairgroup", "krt", "pairrip", "ai"] if k == "pair-open" else ["pairgroup", "ai"])   # w78: krt takes the legs pairgroup could not lay; k15: pairrip rips locked blockers
     assert GP.DISPATCH["pair-skew"] == ["pairgroup", "tune", "ai"]     # PHASE3H B8
 
 

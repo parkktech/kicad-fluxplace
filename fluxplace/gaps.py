@@ -221,6 +221,16 @@ def _release_nets(kind, targets, man):
     return out & set((man or {}).get("nets") or {})
 
 
+def _rung_release(summ, cons, board):
+    """k15: nets a rung ripped on purpose and re-laid (summ["release"], pairrip): released like a pair rung's targets, never a HARD net."""
+    from . import lockpolicy as LP, routediag as RD
+    nets = set((summ or {}).get("release") or ())
+    if not nets:
+        return set()
+    names = sorted({p["net"] for p in RD.load(board)["pads"] if p["net"]})
+    return {n for n in nets if LP.level(n, cons, names) != LP.HARD}
+
+
 def _skew_fails(g):
     """True when the pair-skew gap's measured skew is past its maximum (gap limit = the maximum); unknown numbers count as failing."""
     sk, lim = g.get("skew"), g.get("limit")
@@ -2535,11 +2545,38 @@ def _r_pairgroup(base, out, gaps, ctx):
     return {"status": "ran", "laid": laid, "failed": len(rep["failed"]), "pairs": len(pairs)}
 
 
+def _r_pairrip(base, out, gaps, ctx):
+    """k15: a pair-open the pair layer cannot lay through LOCKED copper: pairrip strips both legs and the blocking nets it names
+    (locked too; never RF, another pair's leg, a zone net or a rail), lays the pair, then KRT re-lays the ripped nets."""
+    from . import pairrip as PRP, routediag as RD, netclass as NC, pairaudit as PA
+    want = {n for g in gaps if g["kind"] == "pair-open" for n in g["nets"]}
+    pairs = [p for p in PA.pair_list(NC.classify(RD.load(base), ctx["cons"], None)) if set(p) & want]
+    if not pairs:
+        return {"status": "no pair"}
+    never = set(ctx.get("protect") or ()) | set(_zone_nets(base)) | set(_rail_widths(base, ctx["cons"], signal_layers(base), 0.0))
+    cur, rows, tmps = base, [], []
+    try:
+        for i, pr in enumerate(pairs):
+            tmps += [f"{out}.pr{i}.kicad_pcb", f"{out}.pk{i}.kicad_pcb"]
+            r = PRP.relay(cur, tmps[-2], pr, ctx["cons"], never - set(pr), log=ctx.get("log") or (lambda m: None))
+            rows.append({"pair": "/".join(pr), "status": r["status"], "ripped": r["ripped"]})
+            if r["status"] == "laid":
+                cur = _relay_open(tmps[-2], tmps[-1], r["ripped"], ctx) if r["ripped"] else tmps[-2]
+        if cur == base:
+            return {"status": "nothing laid", "pairs": rows}
+        _copy(cur, out)
+        _sidecars(cur, out)
+        return {"status": "ran", "pairs": rows, "release": sorted({n for r in rows if r["status"] == "laid" for n in r["ripped"]})}
+    finally:
+        for t in tmps:
+            _clean_board(t)
+
+
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_edgesliver, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "krt_locked": _r_krt_locked, "ai": _r_ai, "prune": _r_prune,
          "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "padvias": _r_padvias, "railpour": _r_railpour,
-         "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute, "unseal": _r_unseal, "relay": _r_relay}
+         "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute, "unseal": _r_unseal, "relay": _r_relay, "pairrip": _r_pairrip}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
@@ -2557,12 +2594,12 @@ DISPATCH = {
     "silk-fit": [],                        # B8: silkscreen text / artwork off the board or over a pad: the `silk` stage's fit repairs it (copper is never touched)
     "silk-title": [],                      # B8: title text without a version or without room: the `silk` stage writes it; no version = owner data
     "net-contract": [],                    # A6: kind defined here; B1 (w49-netcontract) owns detection and repair
-    "pair-open": ["pairgroup", "krt", "ai"],   # w78: legs pairgroup could not lay (gated too) go to KRT, both in one call (pair_fallback), tune fixes skew     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
+    "pair-open": ["pairgroup", "krt", "pairrip", "ai"],   # k15: pairrip rips locked blockers (L1)   # w78: legs pairgroup could not lay (gated too) go to KRT, both in one call (pair_fallback), tune fixes skew     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
     "pair-asym": ["pairgroup", "ai"],
     "pair-skew": ["pairgroup", "tune", "ai"],
     "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
 }
-LEVEL = {"unseal": "L1", "relay": "L1", "relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt_locked": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
+LEVEL = {"pairrip": "L1", "unseal": "L1", "relay": "L1", "relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt_locked": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
 
 def _tool():
@@ -2714,7 +2751,7 @@ class _NoTime(Exception):
     """attempt(): not enough of the stage budget is left before the verification reserve."""
 
 
-ROUTER_RUNGS = ("krt", "krt_region", "krt_locked", "handrepair", "pairgroup", "rfroute", "patch_rip")   # w78: rungs that start KRT / a router
+ROUTER_RUNGS = ("krt", "krt_region", "krt_locked", "handrepair", "pairgroup", "rfroute", "patch_rip", "pairrip")   # w78: rungs that start KRT / a router
 ROUTER_FIXED_S = 150.0                           # w78: below this a router call cannot finish (W16 obstacle map + search 170-250 s): not launched
 WHOLE_BOARD = ("prune", "patch", "handrepair")        # w78: rungs that take no net list: one attempt per round for the whole kind, not one per blocker group
 GROUPED = ("open-gap", "open-pour", "open-free")          # B6a: kinds whose gaps are attempted per blocker group
@@ -3050,7 +3087,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     clock.switch("commit")
                     if ok and man0["nets"]:                 # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
                         # least release: only the target pair nets this candidate re-laid (an untouched target pair is not released)
-                        rel = _release_nets(kind, targets, man) & set(BW.changed(final, man))
+                        rel = (_release_nets(kind, targets, man) | _rung_release(summ, cons, final)) & set(BW.changed(final, man))
                         # the same verify the final commit point runs: against the INPUT manifest with every release so far
                         v0 = BW.verify(best, final, release=set(released) | rel, manifest=man0)
                         if not v0["ok"]:
