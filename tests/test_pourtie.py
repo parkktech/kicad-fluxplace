@@ -157,13 +157,43 @@ def test_k14_pad_beyond_the_pour_is_reached_by_a_strip_when_the_box_growth_is_bl
     rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
     assert not [u for u in rec["untied"] if u["net"] == "RAIL"], rec["untied"]
     assert [o for o in rec["outside"] if o["net"] == "RAIL" and o["extendable"]]
+    RC.PY = "/usr/bin/python3"                           # and the SAVED board holds it after a refill (the record alone said tied before)
+    assert RC.open_by_net(str(tmp_path / "out.kicad_pcb"), method="pcbnew", fill=True).get("RAIL", 0) == 0
 
 
 def test_k14_strip_is_refused_over_foreign_copper(tmp_path):
     src = board(str(tmp_path / "in.kicad_pcb"))
     b = pcbnew.LoadBoard(src)
-    _track(b, 25, 8, 25, 12, "In2.Cu", "VT")             # across the path to U2
+    _track(b, 25, 0.3, 25, 29.7, "In2.Cu", "VT")         # a wall across the whole board between the pour and U2: no way round
     b.Save(src)
     rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
     o = [o for o in rec["outside"] if o["net"] == "RAIL"][0]
     assert not o["extendable"] and any(u["net"] == "RAIL" for u in rec["untied"])
+
+
+def test_strip_steps_round_copper_that_blocks_both_l_shapes_and_survives_a_refill(tmp_path):
+    """W16 +3V3 (U5.7, U10.3, C27, C56, FB5): one foreign track on the straight strip refused both fixed shapes. And the strips K14
+    did lay were extra contours of the pour's outline: KiCad saves one contour per zone, so the saved board had them only in its
+    fill and the first refill removed them (tied in pourtie.json, unconnected in DRC)."""
+    src = board(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    _track(b, 25, 8, 25, 12, "In2.Cu", "VT")             # on the straight strip to U2 (30, 10); both L shapes are that strip here
+    b.Save(src)
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PT.run(src, out, str(tmp_path))
+    assert not [u for u in rec["untied"] if u["net"] == "RAIL"], rec["untied"]
+    RC.PY = "/usr/bin/python3"
+    assert RC.open_by_net(out, method="pcbnew", fill=True).get("RAIL", 0) == 0     # one cluster after a fresh fill of the SAVED board
+    b2 = pcbnew.LoadBoard(out)
+    strips = [z for z in b2.Zones() if z.GetZoneName() == PT.STRIP_NAME]
+    assert strips and all(z.GetNetname() == "RAIL" and z.Outline().OutlineCount() == 1 for z in strips)
+    main = [z for z in b2.Zones() if z.GetNetname() == "RAIL" and z.GetZoneName() != PT.STRIP_NAME]
+    assert len(main) == 1 and main[0].Outline().Outline(0).PointCount() == 4       # the pour itself keeps its rectangle
+
+
+def test_untied_row_after_a_grown_pour_carries_the_tie_reason(tmp_path, monkeypatch):
+    src = board(str(tmp_path / "in.kicad_pcb"))
+    monkeypatch.setattr(PT, "_add_tie", lambda *a, **k: False)                     # no via site anywhere
+    rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
+    u = [u for u in rec["untied"] if u["net"] == "RAIL" and u["at"][0] == 30.0]
+    assert u and u[0]["reason"].startswith("pour grown to the pad, then: no legal via site")

@@ -222,6 +222,7 @@ def _grown_box(board, net, pad, pour_lids, max_mm):
     zs = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net and any(z.IsOnLayer(l) for l in pour_lids)]
     if not zs:
         return None, None, None, "no pour of this net"
+    zs = [q for q in zs if q.GetZoneName() != STRIP_NAME] or zs
     z = min(zs, key=lambda q: q.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y))))
     d = pcbnew.ToMM(int(z.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y)))))
     if d > max_mm:
@@ -298,6 +299,7 @@ def _tongue(board, net, pad, pour_lids, max_mm):
     zs = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net and any(z.IsOnLayer(l) for l in pour_lids)]
     if not zs:
         return None, None, "no pour of this net"
+    zs = [q for q in zs if q.GetZoneName() != STRIP_NAME] or zs       # a strip starts at the pour itself, not at an earlier strip
     z = min(zs, key=lambda q: q.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y))))
     if z.Outline().Outline(0).PointCount() != 4:
         return None, None, "outline is not a rectangle"
@@ -322,7 +324,136 @@ def _tongue(board, net, pad, pour_lids, max_mm):
         if not bad:
             return z, legs, None
         why = bad
+    legs = _tongue_search(board, net, (x, y), bb, ins, pour_lids, z, max_mm)
+    if legs:
+        return z, legs, None
     return None, None, why
+
+
+def _blockers(board, net, pour_lids, z, win):
+    """(l, t, r, b) boxes (0.2 mm clearance added) inside `win` that a strip of `net` on `pour_lids` may not touch: the items `_blocked` refuses."""
+    clr, out = pcbnew.FromMM(0.2), []
+
+    def add(bx, grow=clr):
+        if bx.Intersects(win):
+            out.append((bx.GetLeft() - grow, bx.GetTop() - grow, bx.GetRight() + grow, bx.GetBottom() + grow))
+    for t in board.GetTracks():
+        if t.GetNetname() != net and (t.Type() == pcbnew.PCB_VIA_T or t.GetLayer() in pour_lids):
+            add(t.GetBoundingBox())
+    for f in board.GetFootprints():
+        for q in f.Pads():
+            if q.GetNetname() not in (net, "") and any(l in pour_lids for l in pad_copper_lids(q)):
+                add(q.GetBoundingBox())
+    for k in board.Zones():
+        if k is not z and k.GetNetname() != net and any(k.IsOnLayer(l) for l in pour_lids):
+            add(k.GetBoundingBox(), 0)
+    return out
+
+
+def _tongue_search(board, net, at, bb, ins, pour_lids, z, max_mm, step_mm=0.25):
+    """The strip as a searched path: breadth-first over a `step_mm` grid from the pad to the pour's rectangle, every cell a
+    TONGUE_MM square free of `_blockers`, at most max_mm long; the cell path becomes one box per straight run. The two fixed
+    L shapes of `_tongue` fail when one via, mounting-hole pad or inner track stands on both (W16: U5.7, U10.3, C27, C56, FB5 of
+    +3V3), while a strip that steps around it exists. -> [BOX2I legs] | None."""
+    from collections import deque
+    x, y = at
+    step, h = pcbnew.FromMM(step_mm), pcbnew.FromMM(TONGUE_MM) // 2
+    reach = pcbnew.FromMM(max_mm)
+    win = pcbnew.BOX2I(pcbnew.VECTOR2I(int(x - reach), int(y - reach)), pcbnew.VECTOR2I(int(2 * reach), int(2 * reach)))
+    blk = _blockers(board, net, pour_lids, z, win)
+    L, T, Rr, Bt = bb.GetLeft() + ins, bb.GetTop() + ins, bb.GetRight() - ins, bb.GetBottom() - ins
+    e = board.GetBoardEdgesBoundingBox()
+    eL, eT, eR, eB = e.GetLeft() + 2 * h, e.GetTop() + 2 * h, e.GetRight() - 2 * h, e.GetBottom() - 2 * h
+
+    def free(i, j):
+        cx, cy = x + i * step, y + j * step
+        if not (eL <= cx <= eR and eT <= cy <= eB):
+            return False
+        return not any(l < cx + h and cx - h < r and t < cy + h and cy - h < b for l, t, r, b in blk)
+
+    if not free(0, 0):
+        return None
+    n_max = int(max_mm / step_mm)
+    par, q, goal = {(0, 0): None}, deque([((0, 0), 0, None)]), None
+    while q:
+        (i, j), n, dirn = q.popleft()
+        cx, cy = x + i * step, y + j * step
+        if L <= cx <= Rr and T <= cy <= Bt:
+            goal = (i, j)
+            break
+        if n >= n_max:
+            continue
+        nb = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        if dirn in nb:                                     # straight on first: fewer runs
+            nb.remove(dirn)
+            nb.insert(0, dirn)
+        for d in nb:
+            c = (i + d[0], j + d[1])
+            if c not in par and free(*c):
+                par[c] = (i, j)
+                q.append((c, n + 1, d))
+    if goal is None:
+        return None
+    cells = [goal]
+    while par[cells[-1]] is not None:
+        cells.append(par[cells[-1]])
+    corners = [cells[0]]
+    for a, b, c in zip(cells, cells[1:], cells[2:]):
+        if (b[0] - a[0], b[1] - a[1]) != (c[0] - b[0], c[1] - b[1]):
+            corners.append(b)
+    corners.append(cells[-1])
+    legs = []
+    for a, b in zip(corners, corners[1:]):
+        x0, x1 = sorted((x + a[0] * step, x + b[0] * step))
+        y0, y1 = sorted((y + a[1] * step, y + b[1] * step))
+        legs.append(pcbnew.BOX2I(pcbnew.VECTOR2I(int(x0 - h), int(y0 - h)), pcbnew.VECTOR2I(int(x1 - x0 + 2 * h), int(y1 - y0 + 2 * h))))
+    return legs
+
+
+STRIP_NAME = "pourtie-strip"
+
+
+def _strip_zone(board, z, boxes):
+    """The strip as its own zone(s): a copy of `z` (net, layer, priority, clearances) whose outline is the union of `boxes`.
+    Was: extra contours on z's outline. KiCad keeps one contour per zone on save, so the strips were in the saved FILL but not in
+    the outline, and the first refill by a later stage or by DRC removed them: pourtie.json said tied, the board said open
+    (W16 route-10: U313, Y500, C20, C315 "tied" by K14, all four still unconnected in the DRC of that board)."""
+    ps = pcbnew.SHAPE_POLY_SET()
+    for bx in boxes:
+        q = pcbnew.SHAPE_POLY_SET()
+        q.NewOutline()
+        for px, py in _rect_pts(bx):
+            q.Append(int(px), int(py))
+        ps.BooleanAdd(q)
+    made = []
+    for i in range(ps.OutlineCount()):
+        nz = z.Duplicate(False).Cast()
+        o = nz.Outline()
+        o.RemoveAllContours()
+        o.NewOutline()
+        c = ps.Outline(i)
+        for k in range(c.PointCount()):
+            o.Append(c.CPoint(k).x, c.CPoint(k).y)
+        nz.SetZoneName(STRIP_NAME)
+        board.Add(nz)
+        made.append(nz)
+    return made
+
+
+LANDING_MM = 1.6          # half side of the pour square added round a strip's pad end: covers the tie-via ring (1.4 mm)
+
+
+def _landing(board, net, pad, pour_lids, z):
+    """A strip is TONGUE_MM wide, so only tie-via sites on its centre line landed in copper (W16 U5.7, U10.3, C27.1: strip laid, "no
+    legal via site"). A square round the pad lets every ring site land; the zone fill keeps its own clearance to the foreign copper
+    inside it, so only another zone or a keep-out on the pour layers refuses it. -> [BOX2I] | []."""
+    x, y = _pad_xy(pad)
+    h = pcbnew.FromMM(LANDING_MM)
+    box = pcbnew.BOX2I(pcbnew.VECTOR2I(int(x - h), int(y - h)), pcbnew.VECTOR2I(int(2 * h), int(2 * h)))
+    for k in board.Zones():
+        if k is not z and k.GetNetname() != net and any(k.IsOnLayer(l) for l in pour_lids) and k.GetBoundingBox().Intersects(box):
+            return []
+    return [box]
 
 
 def try_extend(board, net, pad, max_mm, pour_lids, commit=False):
@@ -334,11 +465,7 @@ def try_extend(board, net, pad, max_mm, pour_lids, commit=False):
         if why2:
             return False, f"{why}; strip: {why2}"
         if commit:
-            o = z.Outline()
-            for bx in legs:
-                o.NewOutline()
-                for px, py in _rect_pts(bx):
-                    o.Append(px, py)
+            _strip_zone(board, z, legs + _landing(board, net, pad, pour_lids, z))
         return True, None
     if commit:
         o = z.Outline()
@@ -413,6 +540,10 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
                 if not tied and tie_status(board, o["net"], p_, pm[o["net"]])[0]:     # the grown pour already reaches it (tied through copper/via)
                     x_, y_ = _pad_xy(p_)
                     tied = [{"net": o["net"], "pad": p_.GetNumber(), "at": o["at"], "via": None}]
+                for u in _u:                               # still untied after the growth: the row carries the tie's reason, not "outside"
+                    for row in rec["untied"]:
+                        if row["net"] == o["net"] and row["at"] == o["at"]:
+                            row["reason"] = f"pour grown to the pad, then: {u['reason']}"
                 if tied:
                     rec["tied"] += tied
                     rec["satisfied"].append(dict(tied[0], ref=o["ref"]))
