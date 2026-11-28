@@ -1090,9 +1090,18 @@ def _via_site_clear(b, M, net, x, y, vd, vdr):
     return True
 
 
+STITCH_ISLANDS = 12                 # most islands one lay may tie (one via each); a lay that cuts more is refused as before
+
+
 def _stitch_attempts(b, M, nets, via=None, tries=3):
-    """PHASE3H-C: yields attempts [(net, x, y, via_dims)...]: up to 2 legal vias per zone net in its split-off island."""
+    """PHASE3H-C: yields attempts [(net, x, y, via_dims)...].  Every UNTIED island of each zone net (a fill outline with a pad
+    of the net and no via / through-hole pad: pourisland.island_groups) gets one legal via that lands on the net's fill on
+    another layer; attempt j takes each island's j-th such site.  A track on an outer layer cuts the outer pour into as many
+    pieces as it passes pads, so the islands are counted, not assumed to be one (the old picker stitched the SMALLEST outline
+    of the net anywhere on the board, at most 2 vias: W16 RF_EXT "GND 2->5" was refused, "2->3" passed by tying an old island
+    40 mm away).  The old smallest-outline sites stay as the last group (an island the rule above does not see)."""
     import pcbnew
+    from . import pourisland as PI, pourtie as PTF
     f = pcbnew.ZONE_FILLER(b)
     zs = pcbnew.ZONES()
     for z in b.Zones():
@@ -1102,13 +1111,17 @@ def _stitch_attempts(b, M, nets, via=None, tries=3):
     for n in nets:
         rule = M.net_rule(n)
         vv = via or (rule["via_dia"], rule["via_drill"])
-        sites = [(x, y) for x, y in _split_sites(b, n) if _via_site_clear(b, M, n, x, y, *vv)]
-        per[n] = (vv, sites)
+        lids = {lid for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == n for lid in z.GetLayerSet().CuStack()}
+        tied = lambda x, y: sum(1 for lid in lids if PTF.fill_hit(b, n, lid, pcbnew.FromMM(x), pcbnew.FromMM(y))) >= 2
+        groups = [[(x, y) for x, y in g if tied(x, y) and _via_site_clear(b, M, n, x, y, *vv)] for g in PI.island_groups(b, n)[:STITCH_ISLANDS]]
+        old = [(x, y) for x, y in _split_sites(b, n) if _via_site_clear(b, M, n, x, y, *vv)]
+        per[n] = (vv, [g for g in groups if g], old)
     for j in range(tries):
         att = []
         for n in nets:
-            vv, sites = per[n]
-            att += [(n, x, y, vv) for x, y in _pick_pair(sites, j)]
+            vv, groups, old = per[n]
+            got = [g[j] for g in groups if j < len(g)]
+            att += [(n, x, y, vv) for x, y in (got or _pick_pair(old, j))]
         if att:
             yield att
 

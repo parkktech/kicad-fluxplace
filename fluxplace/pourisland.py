@@ -31,10 +31,15 @@ def outline_index(b, net):
 
 
 def island_sites(b, net, step=0.4, per_island=12):
+    """Via sites inside the untied pour islands of `net` -> [(x, y)] in mm (island_groups, flat)."""
+    return [s for g in island_groups(b, net, step, per_island) for s in g]
+
+
+def island_groups(b, net, step=0.4, per_island=12):
     """Via sites inside the untied pour islands of `net`: a fill outline that holds a pad of the net but no via and no
     through-hole pad of it has no path to the other layers. KiCad reports such an open at the zone's anchor corner, not
     at the island, so the sites are taken from the fill itself: grid points inside the outline, nearest its pads first.
-    -> [(x, y)] in mm."""
+    -> [[(x, y)] per island] in mm."""
     import pcbnew
     vias = [t.GetPosition() for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
     pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
@@ -64,7 +69,7 @@ def island_sites(b, net, step=0.4, per_island=12):
                 pts.sort()
                 rest = pts[per_island:]                     # k15: a large island also gets sites spread over the rest of it
                 pick = pts[:per_island] + rest[::max(1, len(rest) // per_island)][:per_island]
-                out += [(pcbnew.ToMM(x), pcbnew.ToMM(y)) for _d, x, y in pick]
+                out.append([(pcbnew.ToMM(x), pcbnew.ToMM(y)) for _d, x, y in pick])
     return out
 
 

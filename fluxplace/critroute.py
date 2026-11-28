@@ -248,7 +248,9 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                     continue
                 tmp = HR._tmp_beside(board, f"critroute{n_try}")   # named from the stage input: a name built on `cur` grew by one tag per kept path (ENAMETOOLONG at ~14)
                 try:
-                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True, width=width)
+                    # stitch: a track on an outer layer cuts that layer's pour; the islands are tied in the same guarded edit
+                    # and the guard judges the result (was: refused "lay opened connection(s): GND 2->5", W16 RF_EXT)
+                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True, width=width, stitch=True)
                     if not res.get("accepted"):             # a refused lay never writes `tmp`: it is still the empty mkstemp slot (W30: "Unexpected end of input")
                         raise _Refused(str(res.get("reason") or "lay refused")[:200])
                     m = gaps.measure(tmp)
