@@ -208,6 +208,49 @@ def _inside(pads, layer_id, x, y):
     return any(p.IsOnLayer(layer_id) and p.HitTest(pt, 0) for p in pads)
 
 
+def via_glue_saving(segs, vias):
+    """{index in segs: mm}: what KiCad's length rule does NOT count of copper laid inside a same-net via's own annulus.  KiCad replaces the
+    chain of track pieces that stays inside a via's copper on one layer by the straight line from the via centre to where the chain leaves
+    the annulus (measured: ETH_P3_N U11>T3, 0.104 + 0.1 + 0.22 mm of glue counted as 0.23).  A piece ending at the centre saves 0; a chain
+    with no exit (all inside) is left as laid.  `segs` = PCB_TRACK of ONE net, `vias` = its PCB_VIA; straight pieces only."""
+    import pcbnew
+    mm = pcbnew.ToMM
+    out = {}
+    for v in vias:
+        vx, vy = mm(v.GetPosition().x), mm(v.GetPosition().y)
+        try:
+            r = v.GetWidth(v.TopLayer()) / 2e6
+        except Exception:                                   # noqa: BLE001 - older API: no layer argument
+            r = v.GetWidth() / 2e6
+        by_layer = {}
+        for k, t in enumerate(segs):
+            if t.GetClass() != "PCB_TRACK" or not v.IsOnLayer(t.GetLayer()):
+                continue
+            a, b = (mm(t.GetStart().x), mm(t.GetStart().y)), (mm(t.GetEnd().x), mm(t.GetEnd().y))
+            ia, ib = math.hypot(a[0] - vx, a[1] - vy) <= r + 1e-6, math.hypot(b[0] - vx, b[1] - vy) <= r + 1e-6
+            if ia or ib:
+                by_layer.setdefault(t.GetLayer(), []).append((k, a, b, ia, ib, t.GetLength() / 1e6))
+        for rows in by_layer.values():
+            exits = [r_ for r_ in rows if r_[3] != r_[4]]
+            if not exits:
+                continue
+            part = {}
+            for k, a, b, ia, ib, L in rows:
+                if ia and ib:
+                    part[k] = L                                         # wholly inside: KiCad counts none of it
+                    continue
+                p0, p1 = (a, b) if ia else (b, a)                       # p0 inside, p1 outside: where the piece leaves the circle
+                dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                fx, fy = p0[0] - vx, p0[1] - vy
+                A, Bq, Cq = dx * dx + dy * dy, 2 * (fx * dx + fy * dy), fx * fx + fy * fy - r * r
+                s = min(1.0, max(0.0, (-Bq + math.sqrt(max(0.0, Bq * Bq - 4 * A * Cq))) / (2 * A))) if A else 0.0
+                part[k] = L * s - r                                     # inside part, less the straight centre-to-exit line (r)
+            if sum(part.values()) > 0:                                  # a lone piece ending at the centre saves 0
+                for k, v in part.items():
+                    out[k] = out.get(k, 0.0) + v
+    return out
+
+
 def _eff_len(t, pads, mm):
     """Segment length (mm) with the part inside the net's own pads removed -> (effective, inside)."""
     import pcbnew
@@ -293,6 +336,7 @@ def _graph(board, net, rows, zones=False):
             vias.append(t)
         elif t.GetClass() in ("PCB_TRACK", "PCB_ARC"):
             segs.append(t)
+    vglue = via_glue_saving(segs, vias)
     adj, nid = {}, [0]
 
     def new():
@@ -308,6 +352,7 @@ def _graph(board, net, rows, zones=False):
     for k, t in enumerate(segs):
         mm = t.GetLength() / 1e6
         eff, ins = _eff_len(t, pads, mm)
+        eff = max(0.0, eff - vglue.get(k, 0.0))
         lyr = board.GetLayerName(t.GetLayer())
         info = {"kind": "seg", "layer": lyr, "mm": eff, "raw": mm, "inside": ins, "w": t.GetWidth() / 1e6, "id": k}
         a, b = new(), new()

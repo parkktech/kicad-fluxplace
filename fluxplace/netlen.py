@@ -113,19 +113,18 @@ def leg_decomposition(board, net, rows, planes, tol=0.005):
     import pcbnew
     from . import channel as CH, lengthmatch as LM
     cu = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
-    lmm, lw, ends, vias = {}, {}, [], []
-    for t in board.GetTracks():
-        if str(t.GetNetname()) != net:
-            continue
-        if t.GetClass() == "PCB_VIA":
-            vias.append(t)
-        elif t.GetClass() in ("PCB_TRACK", "PCB_ARC"):
-            lyr = board.GetLayerName(t.GetLayer())
-            mm = t.GetLength() / 1e6
-            lmm[lyr] = lmm.get(lyr, 0.0) + mm
-            lw[lyr] = lw.get(lyr, 0.0) + mm * t.GetWidth() / 1e6
-            for pt in (t.GetStart(), t.GetEnd()):
-                ends.append((lyr, pcbnew.ToMM(pt.x), pcbnew.ToMM(pt.y)))
+    lmm, lw, ends = {}, {}, []
+    mine = [t for t in board.GetTracks() if str(t.GetNetname()) == net]
+    segs = [t for t in mine if t.GetClass() in ("PCB_TRACK", "PCB_ARC")]
+    vias = [t for t in mine if t.GetClass() == "PCB_VIA"]
+    glue = CH.via_glue_saving(segs, vias)                              # KiCad does not count track glue inside a via's annulus
+    for k, t in enumerate(segs):
+        lyr = board.GetLayerName(t.GetLayer())
+        mm = max(0.0, t.GetLength() / 1e6 - glue.get(k, 0.0))
+        lmm[lyr] = lmm.get(lyr, 0.0) + mm
+        lw[lyr] = lw.get(lyr, 0.0) + mm * t.GetWidth() / 1e6
+        for pt in (t.GetStart(), t.GetEnd()):
+            ends.append((lyr, pcbnew.ToMM(pt.x), pcbnew.ToMM(pt.y)))
     via_mm = 0.0
     for v in vias:
         pos = v.GetPosition()
