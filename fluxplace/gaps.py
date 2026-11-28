@@ -599,10 +599,10 @@ def _clean_board(p):
         _rm(q)
 
 
-def _track_len_by_layer(board):
+def _track_len_by_layer(board, b=None):
     """{layer name: total track + arc length, mm} over the board's tracks (vias excluded)."""
     import pcbnew
-    b = pcbnew.LoadBoard(board)
+    b = b or pcbnew.LoadBoard(board)
     out = {}
     for t in b.GetTracks():
         if t.Type() == pcbnew.PCB_VIA_T:
@@ -612,18 +612,18 @@ def _track_len_by_layer(board):
     return out
 
 
-def copper_layers(board):
+def copper_layers(board, b=None):
     import pcbnew
-    b = pcbnew.LoadBoard(board)
+    b = b or pcbnew.LoadBoard(board)
     return [b.GetLayerName(lid) for lid in b.GetEnabledLayers().CuStack()]
 
 
-def signal_layers(board):
+def signal_layers(board, b=None):
     """Copper layers that carry at least 5 % of the board's track length. A plane layer carries almost none,
     and this rule does not depend on zones: boards whose layers are all full pours still resolve. If no layer
     passes (no tracks, or too many layers to pass), every copper layer counts as signal."""
-    cu = copper_layers(board)
-    lens = _track_len_by_layer(board)
+    cu = copper_layers(board, b)
+    lens = _track_len_by_layer(board, b)
     total = sum(lens.values())
     if total <= 0:
         return cu
@@ -1729,6 +1729,19 @@ def _feed(do, target, ok, why, before, after):
     return {"do": do, "target": target, "ok": bool(ok), "why": str(why)[:120], "opens_before": before, "opens_after": after}
 
 
+_PACKET_MODEL = {}
+
+
+def _packet_model(base, cp):
+    """The refilled handroute model of `base`, kept for the packets of one round (key: board+rules sha, constraints path)."""
+    from . import handroute as HR
+    key = (HR.board_sha(base), cp)
+    if key not in _PACKET_MODEL:
+        _PACKET_MODEL.clear()
+        _PACKET_MODEL[key] = HR._model(base, cp)
+    return _PACKET_MODEL[key]
+
+
 def gap_packet(base, gap, ctx, sid=None):
     """Repair packet v2 for one gap (<= PACKET_BYTES): its first open connection of the net, the copper window around
     it (PNG views: connection and the pad pocket with less free room), the direct corridors, the obstacles that seal it,
@@ -1744,12 +1757,17 @@ def gap_packet(base, gap, ctx, sid=None):
     i = None
     conns = []
     raw = None
+    M = None
     if want:
         try:                                        # ONE DRC for the whole packet: `i` indexes this list, and a second
             raw = HR.drc_raw(base)                  # DRC (refill) can order the connections differently
         except Exception:
             raw = None
-        conns = HR.open_nets(base, constraints=cp, raw=raw)["connections"]
+        try:
+            M = _packet_model(base, cp)             # ONE refilled model for open_nets, both windows and suggest
+        except Exception as e:                      # noqa: BLE001 - unreadable board: each call then reports its own failure
+            print(f"ai: packet model unavailable: {e}", file=sys.stderr)
+        conns = HR.open_nets(base, constraints=cp, raw=raw, M=M)["connections"]
         i = next((k for k, r in enumerate(conns) if r.get("net") in want), None)
         if i is not None and pair:
             net = conns[i]["net"]
@@ -1763,14 +1781,14 @@ def gap_packet(base, gap, ctx, sid=None):
                 "rules": r.get("rules")}
         if r.get("closest"):                        # the window frames the islands' closest approach, not the DRC ends
             conn["closest"] = {k: r["closest"].get(k) for k in ("gap_mm", "a", "b", "a_item", "b_item")}
-        W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=ai_margin(r), raw=raw)
+        W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=ai_margin(r), raw=raw, M=M)
         pngs += got
         mid = ((r["a"]["x"] + r["b"]["x"]) / 2, (r["a"]["y"] + r["b"]["y"]) / 2)
         sites = (W.get("via_sites") or {}).get("sites") or []
         isl = None
         if r["a"].get("island_fills"):              # PHASE3H B4: a zone end: the via sites inside its island only
             sites, isl = _island_sites(base, cp, r["a"]["island_fills"], sites)
-        win = {"box": W.get("window"), "layers": signal_layers(base),
+        win = {"box": W.get("window"), "layers": signal_layers(base) if M is None else signal_layers(base, M.b),
                "tracks": _near(W.get("tracks") or [], mid, ("a", "b")),
                "vias": _near(W.get("vias") or [], mid, ("pos",)),
                "via_sites": [[round(s[0], 2), round(s[1], 2)] for s in sites[:10]]}
@@ -1788,10 +1806,10 @@ def gap_packet(base, gap, ctx, sid=None):
             end = {"x": r["closest"][side][0], "y": r["closest"][side][1]}
         if ai_dir and sid:
             try:
-                pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(AI_POCKET_MM, AI_POCKET_MM))[1]
+                pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(AI_POCKET_MM, AI_POCKET_MM), M=M)[1]
             except Exception as e:
                 print(f"ai: pocket view failed for {sid}: {e}", file=sys.stderr)
-        lim = (HR.suggest(base, net, conn=i, constraints=cp, raw=raw).get("sealed_by") or {}).get("limiting_obstacles") or []
+        lim = (HR.suggest(base, net, conn=i, constraints=cp, raw=raw, M=M).get("sealed_by") or {}).get("limiting_obstacles") or []
         sealed = [{k: e.get(k) for k in ("id", "net", "layer", "locked", "border_cells")} for e in lim[:8]]
     krt = {"failed": [], "open": []}
     js = ctx.get("krt_last")

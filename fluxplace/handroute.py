@@ -13,6 +13,7 @@ Rules of record: the floors come from the board's own design rules, raised by `-
 profile); nothing is ever laid below them. Locked copper changes only by explicit guarded commands. Measurement is
 kicad-cli DRC with zones refilled, the project file beside the board."""
 import heapq
+import copy
 import json
 import math
 import os
@@ -58,7 +59,36 @@ def _drop_tmp(tmp):
         _unlink_quiet(stem + ext)
 
 
+_DRC_MEMO = {}
+
+
+def board_sha(board):
+    """sha1 of the board file and its project/rules sidecars: the key of every per-board cache."""
+    import hashlib
+    h = hashlib.sha1()
+    stem = os.path.splitext(board)[0]
+    for q in (board, stem + ".kicad_pro", stem + ".kicad_dru"):
+        try:
+            with open(q, "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            h.update(b"-")
+    return h.hexdigest()
+
+
 def drc_raw(board, kicad_cli="kicad-cli", timeout=600):
+    """kicad-cli DRC of `board`; the last 2 results are memoised by content sha (several packets of one round share a board)."""
+    key = (kicad_cli, board_sha(board))
+    if key in _DRC_MEMO:
+        return copy.deepcopy(_DRC_MEMO[key])
+    raw = _drc_raw(board, kicad_cli, timeout)
+    while len(_DRC_MEMO) >= 2:
+        _DRC_MEMO.pop(next(iter(_DRC_MEMO)))
+    _DRC_MEMO[key] = copy.deepcopy(raw)
+    return raw
+
+
+def _drc_raw(board, kicad_cli="kicad-cli", timeout=600):
     # a unique report slot: two runs on one board must not unlink each other's report (the pour-island missing-file crash)
     fd, out = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(board)), prefix=os.path.basename(board) + ".", suffix=".drc.json")
     os.close(fd)

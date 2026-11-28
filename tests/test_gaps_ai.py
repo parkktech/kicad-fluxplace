@@ -1021,3 +1021,22 @@ def test_load_ai_action_accepts_keyed_verb_form(monkeypatch, tmp_path):
     f.write_text(json.dumps({"actions": acts, "why": "x"}))
     a = GP.load_ai_action(str(f), str(tmp_path / "b.kicad_pcb"))
     assert [x["do"] for x in a["actions"]] == ["path", "give_up"] and not a["dropped"]
+
+
+def test_packet_builds_one_model_and_memoises_drc(tmp_path, monkeypatch):
+    """k17: one refilled model per board sha for the whole packet (was 4), DRC memoised by content."""
+    from fluxplace import handroute as HR
+    n = {"m": 0, "d": 0}
+    monkeypatch.setattr(GP, "_PACKET_MODEL", {})
+    monkeypatch.setattr(HR, "_DRC_MEMO", {})
+    monkeypatch.setattr(HR, "_drc_raw", lambda *a, **k: n.__setitem__("d", n["d"] + 1) or {"x": 1})
+    monkeypatch.setattr(HR, "_model", lambda *a, **k: n.__setitem__("m", n["m"] + 1) or object())
+    b = tmp_path / "in.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    for _ in range(2):
+        HR.drc_raw(str(b))
+        GP._packet_model(str(b), None)
+    assert n == {"m": 1, "d": 1}
+    b.write_text("(kicad_pcb )")
+    HR.drc_raw(str(b))
+    assert n["d"] == 2
