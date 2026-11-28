@@ -338,5 +338,28 @@
   ],
   "target": 0.1,
   "unit": "mm"
+ },
+ "laminate_rti:fr4": {
+  "rule": "laminate_rti",
+  "interface": "fr4",
+  "unit": "C",
+  "target": null,
+  "hard": 130.0,
+  "basis": "spec",
+  "confidence": "medium",
+  "date": "2026-11-27",
+  "direction": "max",
+  "function": "Highest continuous use temperature of an FR-4 laminate (UL 796 RTI, electrical): copper over it ages the resin. power.check: hard trace rise = RTI - [env] temp_max_c. Laminate of the fab not named: JLCPCB lists 'Grade A laminates from suppliers including Nan Ya, KB, Shengyi' (pcb-capabilities, Material); Isola FR406 (Tg 170) is the stand-in until the fab's grade is confirmed.",
+  "sources": [
+   {
+    "url": "https://www.isola-group.com/pcb-laminates-prepreg/fr406-laminate-and-prepreg/",
+    "page": "Typical Values, Relative Thermal Index (RTI), UL 796",
+    "quote": "Relative Thermal Index (RTI) 130 \u00b0C"
+   }
+  ],
+  "notes": "k15 2026-11-27; retrieved by web fetch. Revision note on the page: 'Change MOT to RTI 5/19'.",
+  "unverified": [
+   "the JLCPCB 6-layer laminate grade and its own RTI (Nan Ya / KB / Shengyi FR-4 are typically RTI 130 C)"
+  ]
  }
 }

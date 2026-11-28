@@ -361,6 +361,43 @@ def _neck_tests(run, r, outer, stackup=None):
     return fails
 
 
+RTI_RULE = ("laminate_rti", "fr4")             # k15: limits.json key of the laminate's UL RTI (continuous use temperature)
+
+
+def hard_rise_c(cons):
+    """k15 (owner: realistic limits): the HARD trace temperature rise = the laminate's sourced UL RTI - [env] temp_max_c, with its
+    citation -> (rise C, cite) | None (no sourced RTI or no ambient maximum: nothing is relaxed, the target rise stays the FAIL line)."""
+    from . import limits as LM
+    e = LM.get(*RTI_RULE)
+    tmax = ((cons or {}).get("env") or {}).get("temp_max_c")
+    if not LM.sourced(e) or tmax is None:
+        return None
+    rise = float(e["hard"]) - float(tmax)
+    return (rise, f"{e['hard']:g} C RTI - {float(tmax):g} C ambient; {LM.cite(e)}") if rise > 0 else None
+
+
+def _cont_frac(cons, net):
+    """continuous_ma / max_current_ma of the rail (<= 1; 1 when no continuous figure: the rated current is taken as continuous)."""
+    p = ((cons or {}).get("power") or {}).get(net) or {}
+    try:
+        return min(1.0, float(p["continuous_ma"]) / float(p["max_current_ma"]))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return 1.0
+
+
+def _hard_pass(run, segs, r, outer, stackup, amps_c, rise_h):
+    """The run holds the continuous current at the hard rise: every member is wide enough (IPC-2221 at rise_h), or the members that
+    are not, taken as ONE neck (their summed length at the narrowest width: conservative, the heat grows with length squared),
+    stay within rise_h."""
+    def need(l):
+        return ipc2221_width_mm(amps_c, rise_h, r["oz_outer"], False) if l in outer else ipc2221_width_mm(amps_c, rise_h, r["oz_inner"], True)
+    thin = [segs[i] for i in run["members"] if segs[i]["width"] < need(segs[i]["layer"]) - 1e-6]
+    if not thin or run.get("cred_w", 0.0) >= max(need(l) for l in run["layers"]) - 1e-6:
+        return True
+    ln = sum(math.hypot(g["x2"] - g["x1"], g["y2"] - g["y1"]) for g in thin)
+    return neck_heat_c(amps_c, ln, min(g["width"] for g in thin), _run_oz(run, r, outer, stackup)) <= rise_h + 1e-9
+
+
 def _is_decap(ref):
     return str(ref).upper().startswith("C")
 
@@ -702,7 +739,8 @@ def check(facts, cons, dc=None, board=None, detail=None):
             if s["width"] < need - 1e-6 and not _overlaid(s, net_rows):
                 narrow.append(dict(s, need=need, _row=ri))
         if narrow:                                   # D71da has no pour carve-out: a zone on the net proves no track
-            bad, ok = [], []
+            bad, ok, target = [], [], []
+            hard = hard_rise_c(cons)
             dropf = _net_drop_fail(net, dc, net in has_dc)
             if board and ctx is None:
                 ctx = _board_ctx(board, {n for n, rr in plan_.items() if rr and rr.get("track_mm") is not None}) or False
@@ -740,12 +778,22 @@ def check(facts, cons, dc=None, board=None, detail=None):
                 nr_ = run.get("need_run") or run["need"]
                 run["short_mm"] = run["len"] * max(0.0, 1.0 - run["min_w"] / nr_) if nr_ else 0.0
                 f = _neck_tests(run, rr, outer, facts.get("stackup"))
+                if (f and not dropf and run.get("amps") and hard is not None
+                        and _hard_pass(run, narrow, r, outer, facts.get("stackup"), run["amps"] * _cont_frac(cons, net), hard[0])):
+                    target.append((run, f))          # k15 (realistic limits): over the target only, inside the sourced hard limit
+                    continue
                 (bad if f or dropf else ok).append((run, f))
             if ok:
                 out.append({"level": "INFO", "code": "POWER_NECKDOWN_OK", "refs": [net],
                             "value": sum(x["len"] for x, _f in ok),
                             "msg": f"{net}: {len(ok)} neck-down run(s), {sum(x['len'] for x, _f in ok):.2f} mm total, "
                                    f"proven for {r['current_a']:g} A (length <= {NECK_MAX_MM:g} mm, heat, [[dcdrop]]) (D71da)"})
+            if target:
+                cf = _cont_frac(cons, net)
+                out.append({"level": "WARN", "code": "POWER_WIDTH_TARGET", "refs": [net], "value": round(sum(x["short_mm"] for x, _f in target), 3),
+                            "msg": f"{net}: {len(target)} run(s), {sum(x['len'] for x, _f in target):.1f} mm, under the dT {r['rise_c']:g} C target "
+                                   f"width but inside the hard limit: {cf * 100:.0f} % continuous current at dT {hard[0]:g} C ({hard[1]}): "
+                                   + "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} ({x['amps']:.2f} A target)" for x, _f in target[:4])})
             if bad:
                 tot = sum(x["len"] for x, _f in bad)
                 bad.sort(key=lambda t: -t[0]["len"])

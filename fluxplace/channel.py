@@ -334,6 +334,20 @@ def _graph(board, net, rows, zones=False):
         for pn, _lab, p in pad_nodes:
             if p.IsOnLayer(ul) and p.HitTest(pt, int(TOL * 1e6)):
                 link(u, pn)
+    for k, info in enumerate(seginfo):                   # k15: a track end or via landing on another track's side (T-junction)
+        (a, ax, ay, al), (b, bx, by, _bl) = ends[2 * k], ends[2 * k + 1]
+        L = math.hypot(bx - ax, by - ay)
+        if L <= 2 * TOL:
+            continue
+        lyr = board.GetLayerName(al)
+        full = info["mm"] / info["w"] if zones and info["w"] else info["mm"]
+        pts = [(u, ux, uy, 0.0) for i, (u, ux, uy, ul) in enumerate(ends) if ul == al and i // 2 != k]
+        pts += [(vn, vx, vy, vr) for vn, vx, vy, vr, span, _vi in vnodes if lyr in span]
+        for u, ux, uy, ur in pts:
+            t = ((ux - ax) * (bx - ax) + (uy - ay) * (by - ay)) / (L * L)
+            if TOL / L < t < 1 - TOL / L and abs((ux - ax) * (by - ay) - (uy - ay) * (bx - ax)) / L <= info["w"] / 2 + ur + TOL:
+                link(u, a, full * t, {"kind": "tee", "layer": lyr})
+                link(u, b, full * (1 - t), {"kind": "tee", "layer": lyr})
     for vn, vx, vy, vr, span, _vi in vnodes:
         pt = pcbnew.VECTOR2I(pcbnew.FromMM(vx), pcbnew.FromMM(vy))
         for pn, _lab, p in pad_nodes:
