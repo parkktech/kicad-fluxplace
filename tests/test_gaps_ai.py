@@ -1040,3 +1040,25 @@ def test_packet_builds_one_model_and_memoises_drc(tmp_path, monkeypatch):
     b.write_text("(kicad_pcb )")
     HR.drc_raw(str(b))
     assert n["d"] == 2
+
+
+def test_open_pour_packet_ends_are_the_island_and_its_neighbour(tmp_path, monkeypatch):
+    """k17: DRC gives one anchor point for an open-pour gap; the packet shows the island site and the nearest other fill."""
+    from fluxplace import handroute as HR
+    import types
+    seen = {}
+    r = _conn()
+    r["a"] = dict(r["a"], x=10.0, y=10.0)
+    r["b"] = dict(r["b"], x=10.0, y=10.0)
+    monkeypatch.setattr(GP, "_packet_model", lambda *a: types.SimpleNamespace(b=object()))
+    monkeypatch.setattr(GP, "_pour_ends", lambda b, net: ({"x": 12.0, "y": 11.0, "layer": "F.Cu"}, {"x": 15.0, "y": 15.0, "layer": "F.Cu"}))
+    monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": [r]})
+    monkeypatch.setattr(HR, "window", lambda *a, **k: {"window": [0, 0, 1, 1], "layers": ["F.Cu"], "tracks": [], "vias": []})
+    monkeypatch.setattr(HR, "suggest", lambda b, net, **k: (seen.update(k), {"found": False, "sealed_by": {"limiting_obstacles": [
+        {"id": "t1", "net": "X", "layer": "F.Cu", "locked": True, "border_cells": 3}]}})[1])
+    monkeypatch.setattr(GP, "signal_layers", lambda *a: ["F.Cu"])
+    gap = dict(GAP, kind="open-pour", nets=["SIG2"], net="SIG2")
+    p = GP.gap_packet(str(tmp_path / "in.kicad_pcb"), gap, _ctx(tmp_path))
+    assert (p["conn"]["a"]["x"], p["conn"]["a"]["y"]) == (12.0, 11.0) and (p["conn"]["b"]["x"], p["conn"]["b"]["y"]) == (15.0, 15.0)
+    assert p["conn"]["straight_mm"] == 5.0 and seen["src_pt"] == (12.0, 11.0) and seen["dst_pt"] == (15.0, 15.0)
+    assert p["sealed_by"] and p["sealed_by"][0]["id"] == "t1"

@@ -1707,6 +1707,43 @@ def _island_sites(base, cp, fills, sites):
     return [s for s, k in zip(sites, ins) if k], {"layer": fills[0][1], "bbox": [round(v, 3) for v in bb]}
 
 
+def _pour_ends(b, net):
+    """k17: an open-pour gap's ends are DRC's one zone-anchor point. The real ends: side a = the via site of the first untied
+    pour island of `net` (pourisland.island_groups), side b = the nearest vertex of ANOTHER fill outline of the net on the
+    island's own layer. -> ({x, y, layer}, {x, y, layer}) in mm, or None."""
+    import pcbnew
+    from . import pourisland as P
+    groups = P.island_groups(b, net)
+    if not groups or not groups[0]:
+        return None
+    sx, sy = groups[0][0]
+    site = pcbnew.VECTOR2I(pcbnew.FromMM(sx), pcbnew.FromMM(sy))
+    pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
+    fills = [(z.GetFilledPolysList(lid), lid) for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net
+             for lid in z.GetLayerSet().CuStack()]
+    own = next(((ps, lid, i) for ps, lid in fills for i in range(ps.OutlineCount())
+                if ps.Contains(site, i) and any(p.IsOnLayer(lid) and ps.Contains(p.GetPosition(), i) for p in pads)), None)
+    if own is None:
+        return None
+    best = None
+    for ps, lid in fills:
+        if lid != own[1]:
+            continue
+        for i in range(ps.OutlineCount()):
+            if ps is own[0] and i == own[2]:
+                continue
+            o = ps.Outline(i)
+            for k in range(o.PointCount()):
+                q = o.CPoint(k)
+                d = (q.x - site.x) ** 2 + (q.y - site.y) ** 2
+                if best is None or d < best[0]:
+                    best = (d, q)
+    if best is None:
+        return None
+    lay = b.GetLayerName(own[1])
+    return ({"x": sx, "y": sy, "layer": lay}, {"x": round(pcbnew.ToMM(best[1].x), 4), "y": round(pcbnew.ToMM(best[1].y), 4), "layer": lay})
+
+
 def _write_topology(ai_dir, sid, gap_id):
     """PHASE3H B10: a pair-asym gap with no connection is a topology fault: a proposal row, not an agent packet."""
     os.makedirs(ai_dir, exist_ok=True)
@@ -1779,6 +1816,16 @@ def gap_packet(base, gap, ctx, sid=None):
         ends = lambda p: {k: p.get(k) for k in ("x", "y", "layer", "pin", "id")}
         conn = {"i": i, "a": ends(r["a"]), "b": ends(r["b"]), "straight_mm": r.get("straight_mm"),
                 "rules": r.get("rules")}
+        pour = None
+        if gap.get("kind") == "open-pour" and M is not None and math.hypot(r["a"]["x"] - r["b"]["x"], r["a"]["y"] - r["b"]["y"]) < 0.01:
+            try:                                    # k17: one anchor point for both ends: take the real island and its nearest neighbour
+                pour = _pour_ends(M.b, net)
+            except Exception as e:                  # noqa: BLE001 - the packet keeps DRC's ends
+                print(f"ai: pour ends unavailable for {sid}: {e}", file=sys.stderr)
+            if pour:
+                conn["a"].update(pour[0])
+                conn["b"].update(pour[1])
+                conn["straight_mm"] = round(math.hypot(pour[0]["x"] - pour[1]["x"], pour[0]["y"] - pour[1]["y"]), 3)
         if r.get("closest"):                        # the window frames the islands' closest approach, not the DRC ends
             conn["closest"] = {k: r["closest"].get(k) for k in ("gap_mm", "a", "b", "a_item", "b_item")}
         W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=ai_margin(r), raw=raw, M=M)
@@ -1809,7 +1856,11 @@ def gap_packet(base, gap, ctx, sid=None):
                 pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(AI_POCKET_MM, AI_POCKET_MM), M=M)[1]
             except Exception as e:
                 print(f"ai: pocket view failed for {sid}: {e}", file=sys.stderr)
-        lim = (HR.suggest(base, net, conn=i, constraints=cp, raw=raw, M=M).get("sealed_by") or {}).get("limiting_obstacles") or []
+        if pour:
+            sg = HR.suggest(base, net, src_pt=(pour[0]["x"], pour[0]["y"]), dst_pt=(pour[1]["x"], pour[1]["y"]), constraints=cp, M=M, raw=raw)
+        else:
+            sg = HR.suggest(base, net, conn=i, constraints=cp, raw=raw, M=M)
+        lim = (sg.get("sealed_by") or {}).get("limiting_obstacles") or []
         sealed = [{k: e.get(k) for k in ("id", "net", "layer", "locked", "border_cells")} for e in lim[:8]]
     krt = {"failed": [], "open": []}
     js = ctx.get("krt_last")
