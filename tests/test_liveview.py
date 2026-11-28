@@ -746,3 +746,17 @@ def test_crowding_answer_keep_is_accepted_from_the_floorplan_report(tmp_path, mo
     (W / "b.floorplan.json").write_text(json.dumps({"history": [{"crowding": {"options": [{"key": "a-fill"}]}}]}))
     fb.boundary(generation=0)
     assert json.loads((W / "b.fluxmap.json").read_text())["answers"] == {"crowding": "keep"}
+
+
+def test_last_progress_ignores_heartbeat_narration(tmp_path):
+    """route-10 pairs 2026-11-27: 42 min with only 'Still working' heartbeats looked alive; real progress age must skip them."""
+    import json, time
+    from fluxplace import liveview as LV
+    f = tmp_path / "events.jsonl"
+    now = time.time()
+    rows = [{"ts": now - 1200, "kind": "progress", "step": "pairs: BT2 not-laid"}] + \
+           [{"ts": now - k, "kind": "narration", "text": "Still working"} for k in (600, 300, 5)]
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    age, last = LV.last_progress(str(f))
+    assert 1190 < age < 1300 and last == "pairs: BT2 not-laid"
+    assert LV.last_progress(str(tmp_path / "missing")) == (None, None)

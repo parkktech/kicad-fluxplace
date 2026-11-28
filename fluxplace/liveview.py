@@ -114,6 +114,30 @@ def run_command(stage, fn, a):
         own_stage(stage, f"{stage} {done} after {time.monotonic() - t0:.1f} s.", "end")
 
 
+SILENT_S = float(os.environ.get("FLUXPLACE_SILENT_S", 600))   # no real progress event this long = a "stall" event + narration
+
+
+def last_progress(path, tail=65536):
+    """(seconds since the newest non-narration event in the stream at `path`, its step/phase text); (None, None) when unknown.
+    Narration lines are the heartbeat itself and never count as progress (2026-11-27: 42 silent min hidden behind heartbeats)."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - tail))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except (OSError, TypeError):
+        return None, None
+    for ln in reversed(lines):
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        if d.get("kind") in ("narration", "stall"):
+            continue
+        return time.time() - float(d.get("ts", 0)), str(d.get("step") or d.get("phase") or d.get("note") or d.get("kind"))[:120]
+    return None, None
+
+
 @contextlib.contextmanager
 def watching(stage):
     """Heartbeat for the life of a stage: a "doing" line every NARR_S seconds with the stage's latest phase text, so no stage
@@ -127,8 +151,16 @@ def watching(stage):
     _narr_gen.pop(stage, None)
 
     def beat():
+        warned = 0
         while not _beat_wait(stop, NARR_S):
             text = _narr.get(stage)
+            quiet, last = last_progress(os.environ.get(events.ENV_FILE))
+            if quiet is not None and quiet >= SILENT_S * (warned + 1):      # owner 2026-11-27: silence is a fault, say it
+                warned = int(quiet // SILENT_S)
+                events.emit("stall", stage, silent_s=int(quiet), last=last)
+                narrate(stage, f"NO PROGRESS for {int(quiet // 60)} min in {stage} (last step: {last or 'none'}).", "stalled",
+                        remember=False)
+                continue
             narrate(stage, text or f"Still working on the {stage} stage, {int(time.monotonic() - t0)} s so far.", "doing", remember=False)
 
     th = threading.Thread(target=beat, name="narration-heartbeat", daemon=True)
