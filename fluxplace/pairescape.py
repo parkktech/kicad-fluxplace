@@ -449,13 +449,13 @@ def _pmap_deadline(fn, arglist, workers, deadline):
     """pmap that stops at `deadline` (time.time()): unfinished calls are None. Serial in a threaded process (fork hazard), each call
     started only while time is left."""
     import threading
-    if workers <= 1 or len(arglist) < 2 or threading.current_thread() is not threading.main_thread() or threading.active_count() > 1:
-        return [fn(*a) if time.time() < deadline else None for a in arglist]
+    if threading.current_thread() is not threading.main_thread() or threading.active_count() > 1:
+        return [fn(*a) if time.time() < deadline else None for a in arglist]      # fork hazard: serial, each call only while time is left
     _G.clear()
     _G.update(fn=fn, args=arglist)
     pool, out = None, [None] * len(arglist)
     try:
-        pool = mp.get_context("fork").Pool(min(workers, len(arglist)))
+        pool = mp.get_context("fork").Pool(max(1, min(workers, len(arglist))))     # one worker too: the deadline must be able to stop it
         jobs = [pool.apply_async(_gcall, (i,)) for i in range(len(arglist))]
         for i, j in enumerate(jobs):
             left = deadline - time.time()
@@ -553,7 +553,10 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
             vset = sorted(verification_set(info, rules, key, live, targets, boxes, p["verify_reach"], watch), key=lambda q: pos.get(q, 1e9))
             EV.emit("progress", "pairs", step=f"escape {'/'.join(hood)}: baseline lay of {len(vset)} pair(s) "
                     f"({round(time.time() - t0)} of {round(p['budget_s'])} s)")
-            base = ghost(vset, {}, {})
+            base = pmap(ghost, [(vset, {}, {})], 1, deadline=t0 + p["budget_s"])[0]   # route-11 21:25: one baseline lay ran 10+ min past the budget
+            if base is None:
+                nh["why"].append("escape budget spent (baseline lay)")
+                break
             rep["ghost_runs"] += 1
             okb, whyb = judge(base, set(targets), vset, base, limit)
             if okb:

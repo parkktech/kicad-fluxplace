@@ -168,10 +168,16 @@ def test_twin_receptacle_lays_with_tap_vias_and_passes_the_audit(tmp_path):
 def test_plan_is_cached_by_placement_and_constraints(monkeypatch, tmp_path):
     p0, p1, info, rules, key = fake_world(monkeypatch)
     cons = {"pairlay": {"escape_cache_dir": str(tmp_path)}}
-    n = []
+    calls_f = tmp_path / "ghost_calls"                                         # a file: ghost lays may run in a forked worker
+
+    class _N:
+        def __len__(self):
+            return len(calls_f.read_text()) if calls_f.exists() else 0
+    n = _N()
 
     def ghost(prs, esc, rsv):
-        n.append(1)
+        with open(calls_f, "a") as fh:
+            fh.write("1")
         ok = bool(esc) and not any(v["name"] == "left" for v in esc.values())
         return {q: {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}} for q in prs}
     monkeypatch.setattr(PE, "_variants_of", lambda ctx, t, rule, pr, nmax: [d["var"] for d in two_vars()[(pr, 0)]])
@@ -397,4 +403,12 @@ def test_escape_batch_start_emits_a_progress_event():
     import inspect
     from fluxplace import pairescape as PE
     src = inspect.getsource(PE.plan)
-    assert src.count('EV.emit("progress", "pairs", step=f"escape') >= 2 and src.index("probing") < src.index("got = pmap(") and src.index("baseline lay") < src.index("base = ghost(")
+    assert src.count('EV.emit("progress", "pairs", step=f"escape') >= 2 and src.index("probing") < src.index("got = pmap(") and src.index("baseline lay") < src.index("base = pmap(ghost")
+
+
+def test_pmap_deadline_stops_a_single_call():
+    """route-11 21:25: the escape baseline lay (one call) ran 10+ min past the budget; one call is stoppable too."""
+    import time
+    from fluxplace import pairescape as PE
+    t = time.time()
+    assert PE.pmap(lambda s: (time.sleep(s), s)[1], [(5,)], 1, deadline=time.time() + 0.5) == [None] and time.time() - t < 3
