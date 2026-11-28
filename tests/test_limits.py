@@ -29,8 +29,11 @@ def test_between_target_and_hard_is_a_warn_with_the_citation_and_is_logged(tmp_p
 
 def test_over_the_hard_limit_stays_fail(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    # D71fz (1688af9): USB3 / PCIe hard = 10 % UI = 2.8 mm (physics); the 5 mil vendor figure is guidance, over it is a WARN
+    lvl, txt = LM.regrade("pair_skew", "usb3", "P/N", 3.0, 0.1, "mm", 0.1, False, {}, None)
+    assert lvl == "FAIL" and "2.8" in txt
     lvl, txt = LM.regrade("pair_skew", "usb3", "P/N", 0.3, 0.1, "mm", 0.1, False, {}, None)
-    assert lvl == "FAIL" and "0.127" in txt
+    assert lvl == "WARN" and "0.127" in txt and "2.8" in txt
     assert LM.regrade("pair_skew", "eth", "P/N", 150.0, 1.0, "mm", 0.15, False, {}, None)[0] == "FAIL"
 
 
@@ -44,7 +47,10 @@ def test_eth_over_guidance_inside_physics_hard_is_warn_with_emc_note(tmp_path, m
 
 def test_guidance_gate_is_labelled_and_not_downgraded(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
-    assert LM.get("pair_skew", "pcie")["basis"] == "guidance-gate"
+    # no seed entry is a guidance gate since D71fz (pcie is physics, see above); the basis itself still may not be downgraded
+    e = LM.get("pair_skew", "pcie")
+    assert e["basis"] == "physics" and e["hard"] == 2.8
+    monkeypatch.setattr(LM, "get", lambda rule, iface: dict(e, basis="guidance-gate", hard=0.127))
     assert LM.regrade("pair_skew", "pcie", "P/N", 0.2, 0.1, "mm", 0.1, False, {}, None)[0] == "FAIL"
 
 
