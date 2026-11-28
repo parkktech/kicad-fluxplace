@@ -219,3 +219,36 @@ def test_via_min_budget_writes_verified_prefix_and_marks_remainder(tmp_path):
     assert r["budget_exhausted"] and os.path.exists(out)
     assert [t.GetWidth() for t in pcbnew.LoadBoard(out).GetTracks()] == [mm(0.5), mm(0.4), mm(0.4)]
     assert len(calls) == 3
+
+
+def _stub_board(d):
+    """A1 (2, 0) and A2 (18, 0) on F.Cu, a foreign F.Cu wall at x = 10; A2 carries fan-out stubs with joints every 0.15 mm."""
+    B = Brd()
+    B.edge(-2, -8, 24, 8)
+    _pad(B, "A1", "A", 2, 0, 0.5, 0.5, pcbnew.F_Cu)
+    _pad(B, "A2", "A", 18, 0, 0.5, 0.5, pcbnew.F_Cu)
+    B.track("X", [(10, -7), (10, 7)], layer=pcbnew.F_Cu)
+    B.track("A", [(18, 0), (17.4, 0), (17.25, 0), (17.1, 0), (16.7, 0.04), (16.2, 0.04)], locked=True)
+    return B.save(d)
+
+
+ENDS = [(18, 0), (17.4, 0), (17.25, 0), (17.1, 0), (16.7, 0.04), (16.2, 0.04)]
+
+
+def test_no_via_where_an_existing_own_net_track_would_end_inside_it(tmp_path):
+    """W16 BT4_RF: the path's last via sat on the fan-out stubs of the target island; three of their ends lay inside the via off its
+    centre. The probe said OK, KiCad said track_not_centered_on_via, and the lay guard refused all four candidates."""
+    p = _stub_board(tmp_path)
+    M = H._model(p, None)
+    bad = H.G.parse_path("F.Cu: 2,0 3,0; via 3,0; B.Cu: 3,0 17.2,0; via 17.2,0", M.cu)          # via 0.05 / 0.1 mm off two stub ends
+    pr = H.probe_prims(M, "A", bad)
+    assert any(v["kind"] == "track_not_centered_on_via" and v.get("with") == "existing track end" for v in pr["violations"])
+    R = H.suggest(p, "A", src_pt=(2, 0), dst_pt=(18, 0), pitch=0.05, margin=3.0, M=M)
+    assert R["found"], R.get("reason")
+    vias = [q[1] for q in H.G.parse_path(R["path"], M.cu) if q[0] == "via"]
+    assert vias                                                                                    # the wall forces B.Cu
+    for v in vias:
+        assert not [e for e in ENDS if 0.0005 < math.hypot(e[0] - v[0], e[1] - v[1]) < R["via"][0] / 2], (v, R["path"])
+    out = str(tmp_path / "o.kicad_pcb")
+    res = H.lay(p, "A", R["path"], out=out)
+    assert res["accepted"], res.get("reason")

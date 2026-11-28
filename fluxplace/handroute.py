@@ -718,6 +718,18 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                     d = math.hypot(pt[0] - pn[1][0], pt[1] - pn[1][1])
                     if 0.0005 < d < vd / 2:
                         viol.append({"kind": "track_not_centered_on_via", "i": i, "at": _fmtp(pt), "via_at": _fmtp(pn[1]), "off_mm": round(d, 4)})
+    for i, p in enumerate(prims):                      # an existing own-net track that ends inside a via of the path, off its centre
+        if p[0] != "via":
+            continue
+        c = p[1]
+        for lay in M.cu:
+            for o in in_box((c[0] - vd, c[1] - vd, c[0] + vd, c[1] + vd), lay):
+                if o.kind == "track" and o.net == net and o.id not in skip_ids and not o.extra.get("arc"):
+                    for e in (o.g[1], o.g[2]):
+                        d = math.hypot(e[0] - c[0], e[1] - c[1])
+                        if 0.0005 < d < vd / 2:
+                            viol.append({"kind": "track_not_centered_on_via", "i": i, "at": _fmtp(e), "via_at": _fmtp(c), "off_mm": round(d, 4),
+                                         "with": "existing track end", "fix": "move the via off the track end, or onto it"})
     # dedupe identical violations
     seen, out = set(), []
     for v in viol:
@@ -1839,11 +1851,28 @@ def _via_ends(M, net, pathstr, vd):
             body.pop()
         return list(pts)
 
+    def carry(c, far, r):
+        """The run from via centre `c` carried on to the nearest own-net track end / pad centre outside the via; [c] when none fits."""
+        cand = [e for o in M.obs if o.net == net and o.kind == "track" for e in (o.g[1], o.g[2])]
+        cand += [((o.bb[0] + o.bb[2]) / 2, (o.bb[1] + o.bb[3]) / 2) for o in M.obs if o.net == net and o.kind == "pad"]
+        for t in sorted((t for t in cand if d(t, far) < 2.0 and d(t, c) >= r + 1e-3), key=lambda t: d(t, far)):
+            for leg in _dog(c, t):
+                if all(d(q, c) >= r + 1e-3 for q in leg[1:-1]):
+                    return leg
+        return [c]
+
     for k, run in enumerate(runs):
         if run[0] != "seg":
             continue
         pts = run[2]
         r0, r1 = rad(pts[0], k - 1), rad(pts[-1], k + 1)
+        # a first / last run that never leaves its via (the search stopped at the first island cell): the via itself is the end
+        if k == len(runs) - 1 and r0 and not r1 and all(d(q, pts[0]) < r0 for q in pts[1:]):
+            run[2] = carry(pts[0], pts[-1], r0)
+            continue
+        if k == 0 and r1 and not r0 and all(d(q, pts[-1]) < r1 for q in pts[:-1]):
+            run[2] = carry(pts[-1], pts[0], r1)[::-1]
+            continue
         if r1:
             pts = fix(pts, r1, (pts[0], r0))
         if r0:
@@ -1973,6 +2002,18 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                 for l in lays:
                     free[l] &= (np.hypot(X - ax, Y - ay) > ar)
         viaok = (sv >= vd / 2 + extra - G.EPS) & (sh >= vdr / 2 - G.EPS)
+        # no via where an own-net track would end inside it off its centre (KiCad track_not_centered_on_via; W16 BT4_RF: the via
+        # landed on the fan-out stubs of the target island and every candidate was refused by the lay guard)
+        for o in M.obs:
+            if o.kind == "track" and o.net == net and o.id not in skip_ids and not o.extra.get("arc"):
+                for ex, ey in (o.g[1], o.g[2]):
+                    if bb[0] - vd <= ex <= bb[2] + vd and bb[1] - vd <= ey <= bb[3] + vd:
+                        ix0, ix1 = np.searchsorted(xs, ex - vd / 2), np.searchsorted(xs, ex + vd / 2, side="right")
+                        iy0, iy1 = np.searchsorted(ys, ey - vd / 2), np.searchsorted(ys, ey + vd / 2, side="right")
+                        if ix1 > ix0 and iy1 > iy0:
+                            X, Y = np.meshgrid(xs[ix0:ix1], ys[iy0:iy1])
+                            dd = np.hypot(X - ex, Y - ey)
+                            viaok[iy0:iy1, ix0:ix1] &= ~((dd > 0.0005) & (dd < vd / 2))
 
         def cells_of(index):
             res = {l: np.zeros((H, Wd), bool) for l in lays}

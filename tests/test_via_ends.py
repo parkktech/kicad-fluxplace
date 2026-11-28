@@ -57,6 +57,17 @@ def test_run_ends_on_a_via_are_redrawn_clean():
         assert [p[1] for p in G.parse_path(new, CU) if p[0] == "via"] == [p[1] for p in G.parse_path(path, CU) if p[0] == "via"], name
 
 
+def test_a_last_run_that_never_leaves_its_via_is_dropped():
+    path = "F.Cu: 2.0000,0.0000 9.3000,0.0000; via 9.3,0.0; B.Cu: 9.3000,0.0000 15.9000,0.0000; via 15.9,0.0; F.Cu: 15.9000,0.0000 16.1000,0.0000"
+    new = HR._via_ends(_m(), "N", path, VD)
+    assert not _bad(new, []) and G.parse_path(new, CU)[-1] == ("via", (15.9, 0.0))
+    m = _m()                                             # with an own-net stub ahead the run is carried on to its first end outside the via
+    m.obs.append(NS(kind="track", net="N", g=("s", (16.2, 0.04), (16.7, 0.04))))
+    new = HR._via_ends(m, "N", path, VD)
+    last = G.parse_path(new, CU)[-1]
+    assert not _bad(new, []) and last[0] == "seg" and last[3] == (16.7, 0.04)
+
+
 def test_a_clean_path_and_a_path_without_vias_are_returned_unchanged():
     m = _m()
     for path in ("F.Cu: 10.0000,10.0000 12.0000,12.0000 15.0000,12.0000",
