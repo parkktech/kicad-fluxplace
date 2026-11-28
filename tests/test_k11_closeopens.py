@@ -227,3 +227,23 @@ def test_unseal_net_time_cap(tmp_path, monkeypatch):
     r = GP._r_unseal(b, str(tmp_path / "o.kicad_pcb"), [{"kind": "open-free", "class": "plain", "nets": ["N"]}],
                      {"cons": {"x": 1}, "unseal_net_s": -1})
     assert n["moves"] == 0 and r["stopped"] == ["N"]
+
+
+def test_ai_act_escalates_a_give_up_to_the_next_model(tmp_path, monkeypatch):
+    """k16 (live BT2 pair run: haiku answered give_up, sonnet was never asked): a give_up-only answer goes to the next model; if
+    every model gives up the give_up is kept."""
+    from fluxplace import decider as DC
+    asked = []
+
+    def call(text, cons, m, **kw):
+        asked.append(m)
+        return ('{"actions": [{"do": "give_up", "why": "x"}]}' if m.startswith("cheap")
+                else '{"actions": [{"do": "route", "nets": ["N"], "layers": ["F.Cu"]}]}'), ""
+    monkeypatch.setattr(DC, "call_model", call)
+    monkeypatch.setattr(DC, "_models", lambda cons: ["cheap", "good"])
+    env = DC.act({"gap": "g"}, {}, str(tmp_path / "ai"), "k")
+    assert asked == ["cheap", "good"] and env["actions"][0]["do"] == "route"
+    asked.clear()
+    monkeypatch.setattr(DC, "_models", lambda cons: ["cheap", "cheap2"])
+    env = DC.act({"gap": "g2"}, {}, str(tmp_path / "ai"), "k2")
+    assert asked == ["cheap", "cheap2"] and env["actions"][0]["do"] == "give_up"

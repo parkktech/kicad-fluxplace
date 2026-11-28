@@ -222,6 +222,10 @@ def board_lines(board, d):
         return None
 
 
+def _gave_up(env):
+    return all(a.get("do") == "give_up" for a in env["actions"] if isinstance(a, dict))
+
+
 def act(packet, cons=None, log_dir=None, key=""):
     """The close `ai` rung without a person: the packet (its own `actions` text is the syntax) goes to the model, which
     answers an action envelope {"actions": [...], "why"}.  -> the envelope, or None (no model / nothing usable: the packet
@@ -229,7 +233,7 @@ def act(packet, cons=None, log_dir=None, key=""):
     Logged as id `ai:<key>` in the decision log; cached by packet hash."""
     body = json.dumps(packet, sort_keys=True, default=str)
     h = hashlib.sha1((body + rule(cons)).encode()).hexdigest()[:16]
-    hit = next((r for r in reversed(_log_rows(log_dir)) if r.get("hash") == h and r.get("envelope")), None) if log_dir else None
+    hit = next((r for r in reversed(_log_rows(log_dir)) if r.get("hash") == h and r.get("envelope") and not _gave_up(r["envelope"])), None) if log_dir else None
     if hit:
         env, model, cached = hit["envelope"], hit.get("model"), True
     else:
@@ -249,9 +253,10 @@ def act(packet, cons=None, log_dir=None, key=""):
                          else call_model(text, cons, m))
             if out is None:
                 break
-            env = _first_obj(out, lambda d: isinstance(d.get("actions"), list) and d["actions"])
-            if env:
-                model = m
+            got = _first_obj(out, lambda d: isinstance(d.get("actions"), list) and d["actions"])
+            if got and (env is None or not _gave_up(got)):          # k16: a give_up from the cheap model goes to the next model
+                env, model = got, m
+            if env and not _gave_up(env):
                 break
     if not env:
         return None
