@@ -1036,6 +1036,8 @@ UNSEAL_R_MM = 1.0                               # k11: foreign vias this close t
 UNSEAL_STEPS = (0.1, 0.15, 0.2, 0.3)            # k11: via move distances (mm), away from the end, then sideways
 UNSEAL_SEALED_NODES = 5000                      # k11: a search that expands fewer nodes than this started in a sealed pocket
 UNSEAL_VIAS = 4
+UNSEAL_NET_S = 300.0                            # k16: wall-clock cap per net (HPL_PRI_N took 33 min over 10 legal moves)
+UNSEAL_OPEN_FAILS = 2                           # k16: moves that unsealed the end but found no path: the pocket was not the problem, stop
 
 
 def _move_via(board, out, x, y, nx, ny):
@@ -1094,6 +1096,7 @@ def _r_unseal(base, out, gaps, ctx):
         """Move via `v` to (nx, ny) on a copy of `cur`, then search and lay `rec`; the laid board, or None."""
         mv = f"{out}.unseal{len(tmps)}.kicad_pcb"
         tmps.append(mv)
+        res["tries"] = res.get("tries", 0) + 1
         _sidecars(cur, mv)
         _move_via(cur, mv, v["x"], v["y"], nx, ny)
         M2 = HR._model(mv, cp)
@@ -1106,6 +1109,7 @@ def _r_unseal(base, out, gaps, ctx):
             if not r.get("found"):
                 if _sealed(r):          # still a closed pocket: the next move, not a wider search
                     return None
+                res["open_fails"] = res.get("open_fails", 0) + 1     # k16: unsealed, still no path
                 continue
             lay = f"{out}.unseal{len(tmps)}.kicad_pcb"
             tmps.append(lay)
@@ -1127,7 +1131,11 @@ def _r_unseal(base, out, gaps, ctx):
                 cands = sorted(((math.hypot(v["x"] - ex, v["y"] - ey), v, (ex, ey)) for v in B["vias"] for ex, ey in ends
                                 if v["net"] != net and math.hypot(v["x"] - ex, v["y"] - ey) < UNSEAL_R_MM
                                 and LP.level(v["net"], cons, names) in (LP.FREE, LP.SOFT)), key=lambda t: t[0])[:UNSEAL_VIAS]
+                t_net, res["open_fails"] = time.monotonic(), 0
                 for v, nx, ny in _unseal_moves(cands):
+                    if time.monotonic() - t_net > ctx.get("unseal_net_s", UNSEAL_NET_S) or res["open_fails"] >= UNSEAL_OPEN_FAILS:
+                        res.setdefault("stopped", []).append(net)
+                        break
                     if not _via_probe(M, v, nx, ny):
                         continue
                     lay = _try_move(cur, net, rec, v, nx, ny)

@@ -185,3 +185,45 @@ def test_rip_locked_of_a_soft_protected_net_is_kept_rf_and_gated_are_refused(tmp
     json.dump({"actions": [{"do": "rip_locked", "net": "RF1", "ids": ids}]}, open(act, "w"))
     a = GP.load_ai_action(act, b, protect={"AUD", "RF1"}, soft={"AUD"})
     assert a["refused"] and "rf or gated pair" in str(a["dropped"])
+
+
+def _unseal_world(tmp_path, monkeypatch, search_fn):
+    b = _board(tmp_path)
+    rec = {"net": "N", "a": {"x": 10.0, "y": 10.0}, "b": {"x": 40.0, "y": 40.0}}
+    vias = [{"net": "SOFT", "x": 10.0, "y": 10.5, "d": 0.46, "drill": 0.2}]
+    monkeypatch.setattr(RD, "load", lambda p: {"segs": [], "vias": vias})
+    monkeypatch.setattr(LP, "level", lambda n, cons, names=None: LP.SOFT)
+    monkeypatch.setattr(HR, "_model", lambda board, cons=None, **kw: board)
+    monkeypatch.setattr(HR, "open_nets", lambda board, constraints=None, **kw: {"connections": [rec]})
+    monkeypatch.setattr(GP, "_via_probe", lambda M, v, nx, ny: True)
+    monkeypatch.setattr(GP, "_move_via", lambda board, out, x, y, nx, ny: open(out, "w").write("moved") and 1)
+    monkeypatch.setattr(CR, "search", search_fn)
+    return b
+
+
+def test_unseal_stops_after_moves_that_unseal_but_find_no_path(tmp_path, monkeypatch):
+    """k16 (HPL_PRI_N took 33 min over 10 legal moves): two moves that open the pocket yet find no path end the net's tries."""
+    n = {"moves": 0}
+
+    def search(HRm, board, net, i, cp, layers, avoid, width, r, M, vc):
+        if open(board).read() == "moved":
+            n["moves"] += 1
+            yield {"found": False, "reason": "no grid path (searched 90000 nodes)"}
+        else:
+            yield {"found": False, "reason": "no grid path (searched 280 nodes)"}
+    b = _unseal_world(tmp_path, monkeypatch, search)
+    r = GP._r_unseal(b, str(tmp_path / "o.kicad_pcb"), [{"kind": "open-free", "class": "plain", "nets": ["N"]}], {"cons": {"x": 1}})
+    assert n["moves"] == GP.UNSEAL_OPEN_FAILS and r["status"] == "no change" and r["stopped"] == ["N"]
+
+
+def test_unseal_net_time_cap(tmp_path, monkeypatch):
+    """k16: past the per-net wall-clock cap no further move is tried."""
+    n = {"moves": 0}
+
+    def search(HRm, board, net, i, cp, layers, avoid, width, r, M, vc):
+        n["moves"] += open(board).read() == "moved"
+        yield {"found": False, "reason": "no grid path (searched 280 nodes)"}
+    b = _unseal_world(tmp_path, monkeypatch, search)
+    r = GP._r_unseal(b, str(tmp_path / "o.kicad_pcb"), [{"kind": "open-free", "class": "plain", "nets": ["N"]}],
+                     {"cons": {"x": 1}, "unseal_net_s": -1})
+    assert n["moves"] == 0 and r["stopped"] == ["N"]
