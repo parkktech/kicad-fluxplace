@@ -110,6 +110,70 @@ def pair_corridors(board, B, cons, spec):
     return [c for e in res["pairs"] for s in e["sections"] for c in s.get("corridor", [])]
 
 
+def _out_dir(p, cx, cy):
+    """Unit vector a pad leaves its part by: along its long axis (a square pad: its larger offset), away from the pad centroid."""
+    dx, dy = p["x"] - cx, p["y"] - cy
+    horiz = (p["ex"] > p["ey"]) if abs(p["ex"] - p["ey"]) > 0.25 * max(p["ex"], p["ey"]) else abs(dx) >= abs(dy)
+    return ((1 if dx >= 0 else -1), 0) if horiz else (0, (1 if dy >= 0 else -1))
+
+
+def pair_aprons(B, cls, clr, via):
+    """Pair escape aprons: the copper-free room in front of the two pins of a controlled pair on one part, without which the coupled
+    pair cannot leave them (it can neither turn nor drop its via pair).  One per pair and part, for SMD pins that leave on the same
+    side: {ref, nets, pins, dir, side (0 left / 1 top / 2 right / 3 bottom), layers, rows, depth, edge, rect, allow}.
+      depth = clearance + rows x (via + clearance): one via row for a lone pair; two (staggered) rows when another pair's pins
+              stand within one via pitch on the same side (pin pitch below via pitch: neighbouring via pairs cannot share a row)
+      rect  = from the pads' outer edge `depth` outward, as wide as the two pads (a pad beside it does not stop a straight exit)
+      allow = parts with a pad on either net (series / ESD / choke parts belong to the pair)
+    A pair whose apron holds another pad of its own part (inner rows) has none: it leaves through the part's own field.
+    Calibration (W16 U300, 0.5 mm pitch, four USB pairs in a row, via 0.46 / clearance 0.127): pairs --plan-only fails all three
+    open pairs at 0.70 mm of room, one at 1.00 mm, none at 1.30 mm (two rows = 1.30)."""
+    on = {}
+    for p in B["pads"]:
+        if p["net"]:
+            on.setdefault(p["net"], set()).add(p["ref"])
+    pv, out = via + clr, []
+    for ref, part in sorted(B["parts"].items()):
+        pads = [p for p in part["pads"] if not p.get("np")]
+        if EP.is_mech(ref) or len({p["num"] for p in pads}) < 6:
+            continue
+        cx, cy = sum(p["x"] for p in pads) / len(pads), sum(p["y"] for p in pads) / len(pads)
+        legs = [(p, _out_dir(p, cx, cy)) for p in pads if not p["tht"] and (cls.get(p["net"]) or {}).get("class") == "pair"
+                and (cls[p["net"]].get("partner"))]
+        recs, seen = [], set()
+        for p, d in legs:
+            mate = cls[p["net"]]["partner"]
+            lat = (lambda q: q["y"]) if d[0] else (lambda q: q["x"])
+            dep = (lambda q: q["x"] * d[0]) if d[0] else (lambda q: q["y"] * d[1])
+            qs = [q for q, e in legs if q["net"] == mate and e == d and q["layers"] == p["layers"] and abs(dep(q) - dep(p)) <= 0.3]
+            if not qs:
+                continue
+            q = min(qs, key=lambda q: abs(lat(q) - lat(p)))
+            key = frozenset((p["num"], q["num"]))
+            if key in seen or abs(lat(q) - lat(p)) > 4 * (p["ey"] + q["ey"] if d[0] else p["ex"] + q["ex"]) + 1.0:
+                continue
+            seen.add(key)
+            half = (lambda t: t["ey"]) if d[0] else (lambda t: t["ex"])
+            ext = (lambda t: t["ex"]) if d[0] else (lambda t: t["ey"])
+            recs.append({"ref": ref, "nets": sorted((p["net"], q["net"])), "pins": sorted((p["num"], q["num"])), "dir": d,
+                         "side": (2 if d[0] > 0 else 0) if d[0] else (3 if d[1] > 0 else 1), "layers": set(p["layers"]),
+                         "lo": min(lat(t) - half(t) for t in (p, q)), "hi": max(lat(t) + half(t) for t in (p, q)),
+                         "edge": max(dep(t) + ext(t) for t in (p, q)), "allow": (on.get(p["net"], set()) | on.get(q["net"], set())) - {ref}})
+        for r in recs:
+            near = any(o is not r and o["dir"] == r["dir"] and o["layers"] & r["layers"] and abs(o["edge"] - r["edge"]) <= 0.3
+                       and max(o["lo"], r["lo"]) - min(o["hi"], r["hi"]) < pv for o in recs)
+            r["rows"] = 2 if near else 1
+            r["depth"] = clr + r["rows"] * pv
+            d, e = r["dir"], r["edge"]
+            a, b = sorted((e * (d[0] or d[1]), (e + r["depth"]) * (d[0] or d[1])))
+            r["rect"] = (a, r["lo"], b, r["hi"]) if d[0] else (r["lo"], a, r["hi"], b)
+            own = [t for t in pads if t["num"] not in r["pins"] and t["layers"] & r["layers"] and GM.overlap(
+                r["rect"], (t["x"] - t["ex"], t["y"] - t["ey"], t["x"] + t["ex"], t["y"] + t["ey"]))]
+            if not own:
+                out.append(r)
+    return out
+
+
 def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None, pins=None):
     P = params(cons)
     out = {"rects": [], "inflate": {}}
@@ -151,6 +215,17 @@ def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None
             if soft > 0:
                 out["rects"].append({"rect": _band_rect(part["court"], k, lo, hi, hard, hard + soft), "sides": sd, "hard": False, "cost": P["cost"],
                                      "owner": ref, "why": f"escape rows of {ref}"})
+    if "cls" not in cache:                               # class and partner of a net do not depend on the poses
+        from . import netclass as NC
+        try:
+            cache["cls"] = NC.classify(B, cons, spec)
+        except Exception:                                # noqa: BLE001 - the bands above still hold; the gate (preroute) reports the apron
+            cache["cls"] = {}
+    for a in pair_aprons(B, cache["cls"], clr, via):     # a pair's apron in front of a part that stays put: hard, except for the pair's own parts
+        if a["ref"] not in movable:
+            out["rects"].append({"rect": a["rect"], "sides": {"F" if l == "F.Cu" else "B" for l in a["layers"] if l in ("F.Cu", "B.Cu")}, "hard": True,
+                                 "cost": None, "owner": a["ref"], "allow": sorted(a["allow"]),
+                                 "why": f"pair escape apron of {a['ref']} ({'/'.join(a['nets'])})"})
     if P["pins"] and pins is not False:
         out["rects"] += pin_sites(B, cons, spec, movable, P["cost"])
     if corridors is None and P["pairs"] and pins is not False:
@@ -193,7 +268,7 @@ def crowding(B, reserve):
             continue
         sd = _sides(part)
         for r in reserve["rects"]:
-            if r["owner"] != ref and sd & r["sides"] and GM.overlap(part["court"], r["rect"]):
+            if r["owner"] != ref and ref not in r.get("allow", ()) and sd & r["sides"] and GM.overlap(part["court"], r["rect"]):
                 out.append((ref, ("HARD " if r["hard"] else "soft ") + r["why"]))
                 break
     return out

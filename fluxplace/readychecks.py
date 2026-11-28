@@ -3,7 +3,7 @@
   stage_table / stage_lines             every flow stage on or off with the reason; a stage off only because a key is unset is FAIL
   budget_need / budget_lines            stage wall budgets against the work (pairs x per-pair search cap vs [pairlay] budget_min)
 Board-agnostic: the board's intent is read from the constraints and the board only."""
-PLACE_CODES = ("NET_OVER_BUDGET", "SUPPORT_PART_FAR", "PLACE_ESCAPE_UNRESERVED", "CONGESTION", "PLACEMENT_ILLEGAL", "KEEPOUT_TRAPPED")
+PLACE_CODES = ("NET_OVER_BUDGET", "SUPPORT_PART_FAR", "PLACE_ESCAPE_UNRESERVED", "PAIR_ESCAPE_BLOCKED", "CONGESTION", "PLACEMENT_ILLEGAL", "KEEPOUT_TRAPPED")
 COLLISION_CODE = "PLACEMENT_COLLISION"
 
 # stage -> (constraints table, what turns it on). A stage here is optional: it runs only when its table says so.

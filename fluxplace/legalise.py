@@ -168,7 +168,7 @@ class _Model:
             if sd & ks and (part["tht"] or mh is None):
                 out.append((name, _grow(r, self.ko_margin)))
         for r in self.reserve["rects"]:                  # the first escape row of another part: hard
-            if r["hard"] and r["owner"] != ref and sd & r["sides"]:
+            if r["hard"] and r["owner"] != ref and ref not in r.get("allow", ()) and sd & r["sides"]:
                 out.append((r["why"], r["rect"]))
         # track-forbidding rule areas: nothing can be routed to a pad inside one (the
         # area's own part, e.g. the antenna it is named after, is exempt)

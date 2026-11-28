@@ -31,6 +31,7 @@ _X = {
     "PLACEMENT_ILLEGAL": ("clearance", "floorplan"),
     "COLLISION": ("clearance", "floorplan"),
     "PIN_ESCAPE_BLOCKED": ("pin-escape", "floorplan"),
+    "PAIR_ESCAPE_BLOCKED": ("pin-escape", "floorplan"),
     "PLACE_ESCAPE_UNRESERVED": ("pin-escape", "floorplan"),
     "FANOUT_PIN_UNROUTED": ("pin-escape", "floorplan"),
     "CONGESTION": ("ghost-hot", "placetour"),

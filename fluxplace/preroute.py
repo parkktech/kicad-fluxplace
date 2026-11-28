@@ -9,6 +9,8 @@ exactly like review findings (same matcher).
   ANCHOR_MISORIENTED   FAIL  an anchor > 15 % worse than its best rotation (anchors.py)
   PIN_ESCAPE_BLOCKED   FAIL  fine-pitch pin with a foreign obstacle in its outward
                              lane within track + clearance
+  PAIR_ESCAPE_BLOCKED  FAIL  a foreign pad stands in the escape apron of a controlled pair's two pins
+                             (escreserve.pair_aprons: one or two via rows deep): the coupled pair cannot leave the part
   KEEPOUT_TRAPPED      FAIL  pad inside a track-forbidding rule area
   CONGESTION           FAIL  coarse global route: demand > capacity (2 mm cells)
   RATSNEST_CROSSINGS   WARN  crossings between MST edges of different signal nets
@@ -43,7 +45,7 @@ from . import legality as LGL
 from . import placechecks as PCK
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
-CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED",
+CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
          "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED",
          "COLLISION"]
@@ -259,6 +261,50 @@ def pin_escape_blocked(B, only_nets=None, partners=None, skip_escaped=False):
                    refs=[ref], value=n, limit=0)
             f["pins"] = sorted(f"{ref}.{x}" for v in hits.values() for x in v)     # PHASE3I F6: "REF.pad" of the blocked pins
             out.append(f)
+    return out
+
+
+def pair_escape_blocked(B, cls, cons=None):
+    """A controlled pair whose two pins on a part have a foreign pad in their escape apron (escreserve.pair_aprons; parts on the
+    pair's own nets are no blockers). One FAIL per part: pairs, the room each has against the room it needs, the part to move
+    and by how much. Placement only: copper is the pairs stage's business."""
+    from . import escreserve as ES, routerules as RR
+    R = RR.rules(cons, None, B=B)
+    clr, via = max(R["clearance"], B["clearance"]), R["via"]
+    pads = GM.Hash(2.0)
+    for i, q in enumerate(B["pads"]):
+        pads.add(i, (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"]), "x")
+    by = defaultdict(list)
+    for a in ES.pair_aprons(B, cls, clr, via):
+        d, room, who = a["dir"], None, None
+        for k in pads.hits(a["rect"], "x"):
+            q = B["pads"][k]
+            if q["ref"] == a["ref"] or q["ref"] in a["allow"] or q.get("np") or not (q["tht"] or q["layers"] & a["layers"]):
+                continue
+            box = (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"])
+            if not GM.overlap(a["rect"], box):
+                continue
+            near = (box[0] if d[0] > 0 else -box[2]) if d[0] else (box[1] if d[1] > 0 else -box[3])
+            r = max(0.0, near - a["edge"])
+            if room is None or r < room:
+                room, who = r, q
+        if who is not None and a["depth"] - room > 0.005:
+            by[a["ref"]].append((a, room, who))
+    out = []
+    for ref, hits in sorted(by.items()):
+        side = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}
+        need = defaultdict(float)
+        for a, room, q in hits:
+            need[(q["ref"], side[a["dir"]])] = max(need[(q["ref"], side[a["dir"]])], a["depth"] - room)
+        f = _f(FAIL, "PAIR_ESCAPE_BLOCKED",
+               f"{ref}: {len(hits)} controlled pair(s) cannot leave their pins: "
+               + "; ".join(f"{'/'.join(a['nets'])} (pins {','.join(a['pins'])}) has {room:.2f} mm to pad {q['ref']}.{q['num']}, needs "
+                           f"{a['depth']:.2f} ({a['rows']} via row(s))" for a, room, q in hits[:4])
+               + " -> " + ", ".join(f"move {r} >= {v:.2f} mm {s_}" for (r, s_), v in sorted(need.items())),
+               refs=[ref] + sorted({q["ref"] for _a, _r, q in hits}), value=len(hits), limit=0, cls="pair")
+        f["pins"] = sorted(f"{ref}.{n}" for a, _r, _q in hits for n in a["pins"])
+        f["moves"] = [{"ref": r, "dir": s_, "mm": round(v, 3)} for (r, s_), v in sorted(need.items())]
+        out.append(f)
     return out
 
 
@@ -588,6 +634,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
     if anchors:
         f += AN.findings(B, cons, spec, cls)
     f += pin_escape_blocked(B)
+    f += pair_escape_blocked(B, cls, cons)
     f += keepout_trapped(B)
     f += waived_pin_findings(B, cons)
     if surface is not None:                       # (pins, routed) from surface_pins(board): SURFACE_ONLY pins are listed / checked
@@ -659,7 +706,7 @@ def score(findings, card):
              + 20  x mm over budget of rf/switch_node/bypass/pair nets      (HARD)
              +  3  x mm over budget of other nets                           (soft)
              +  5  x mm support parts sit beyond their limit
-             + 500 x (PIN_ESCAPE_BLOCKED + KEEPOUT_TRAPPED + CONNECTOR_BLOCKED + HEIGHT_REGION FAILs + each PLACEMENT_ILLEGAL violation)
+             + 500 x (PIN_ESCAPE_BLOCKED + PAIR_ESCAPE_BLOCKED + KEEPOUT_TRAPPED + CONNECTOR_BLOCKED + HEIGHT_REGION FAILs + each PLACEMENT_ILLEGAL violation)
              + 25  x congestion overflow (track-cells)
              + 0.05 x ratsnest crossings
              + 300 x ANCHOR_MISORIENTED
@@ -675,7 +722,7 @@ def score(findings, card):
             t += W_SUPPORT * over
         elif c == "PLACEMENT_ILLEGAL":
             t += W_STRUCT * (x["value"] or 1)
-        elif c in ("PIN_ESCAPE_BLOCKED", "KEEPOUT_TRAPPED", "CONNECTOR_BLOCKED") or (
+        elif c in ("PIN_ESCAPE_BLOCKED", "PAIR_ESCAPE_BLOCKED", "KEEPOUT_TRAPPED", "CONNECTOR_BLOCKED") or (
                 c == "HEIGHT_REGION" and x["level"] == FAIL):
             t += W_STRUCT
         elif c == "ANCHOR_MISORIENTED":
