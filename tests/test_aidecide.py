@@ -259,3 +259,17 @@ def test_live_gate_decided_without_waiting(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
     r = LV._ai_gate("route", "PASS", g, "stop", stub({}), str(tmp_path / "x"))
     assert r["action"] == "stop" and r["by"] == "default" and not r["reasoned"]
+
+
+def test_k21_act_passes_effort_and_survives_text_tokens(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(text, cons, m, **kw):
+        seen.update(kw)
+        return '{"actions":[{"do":"path"}],"tokens":"open-pour stitch"}', ""
+    monkeypatch.setattr(DC, "call_model", fake)
+    env = DC.act({"board": None}, {"ai": {"tools": False}}, str(tmp_path), "k")
+    assert env["tokens"] == 0 and seen["effort"] == "medium"
+    monkeypatch.setattr(DC, "call_model", lambda *a, **k: (seen.update(k) or ('{"actions":[{"do":"path"}]}', "")))
+    DC.act({"board": None, "x": 1}, {"ai": {"tools": False, "effort": "low"}}, str(tmp_path), "k2")
+    assert seen["effort"] == "low"

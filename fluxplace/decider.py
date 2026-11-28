@@ -69,7 +69,7 @@ def _cmd(cons):
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
 
 
-def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None, budget_usd=None):
+def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None, budget_usd=None, effort=None):
     """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped.
     tools: the built-in tools the model may use ("Read" for page pictures in `cwd`, "WebSearch,WebFetch" to find documents; default
     none), run without session or project settings; info: a dict that receives cost_usd (the CLI's total_cost_usd);
@@ -84,6 +84,8 @@ def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None,
         if tools is not None:
             cmd[cmd.index("--tools") + 1] = tools
             cmd += ["--no-session-persistence", "--setting-sources", ""] + (["--allowedTools", tools] if tools else [])   # -p asks for no permission
+        if effort:
+            cmd += ["--effort", str(effort)]
         if budget_usd:
             cmd += ["--max-budget-usd", str(budget_usd)]
     try:
@@ -192,6 +194,11 @@ def _ai_tools(cons):
     return bool(((cons or {}).get("ai") or {}).get("tools", True))
 
 
+def _ai_effort(cons):
+    """[ai] effort for the act() call (k21: sonnet 21 s -> 12 s, 0.066 -> 0.024 USD, same answer on the open-pour packet); "" = CLI default."""
+    return str(((cons or {}).get("ai") or {}).get("effort", "medium")) or None
+
+
 def _ai_timeout(cons):
     return float(((cons or {}).get("ai") or {}).get("timeout_s", 600))
 
@@ -249,8 +256,8 @@ def act(packet, cons=None, log_dir=None, key=""):
                 + "Answer with ONLY the JSON action envelope.\nPacket:\n" + body[:12000])
         env, model, cached = None, None, False
         for m in _models(cons):
-            out, _why = (call_model(text, cons, m, tools=TOOLS, cwd=log_dir, timeout=_ai_timeout(cons)) if geo
-                         else call_model(text, cons, m))
+            out, _why = (call_model(text, cons, m, tools=TOOLS, cwd=log_dir, timeout=_ai_timeout(cons), effort=_ai_effort(cons)) if geo
+                         else call_model(text, cons, m, effort=_ai_effort(cons)))
             if out is None:
                 break
             got = _first_obj(out, lambda d: isinstance(d.get("actions"), list) and d["actions"])
@@ -261,7 +268,10 @@ def act(packet, cons=None, log_dir=None, key=""):
     if not env:
         return None
     env.setdefault("why", "")
-    env["tokens"] = int(env.get("tokens") or 0)
+    try:
+        env["tokens"] = int(env.get("tokens") or 0)
+    except (TypeError, ValueError):                       # k21: a model answered "tokens": "<text>" and crashed the rung
+        env["tokens"] = 0
     if log_dir:
         _write(log_dir, {"id": "ai:" + str(key), "hash": h, "choice": ",".join(str(a.get("do")) for a in env["actions"])[:80],
                          "by": "cache" if cached else "ai", "reasoned": True, "cached": cached, "model": model,
