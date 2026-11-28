@@ -267,3 +267,11 @@ def test_try_order_is_canonical_across_runs(tmp_path, monkeypatch):
     assert len(r1) == 9 * len(CR.SEARCH) and r1 == r2 == r3                         # k11: every search step per connection
     r1 = r1[::len(CR.SEARCH)]
     assert r1[:6] == sorted(r1[:6], key=lambda t: t[1])                              # by endpoint coordinates within a net
+
+
+def test_apply_emits_a_progress_event_per_connection():
+    """route-10 critroute 2026-11-27: 11+ min with no event fired the stall alarm; each connection try is a progress event."""
+    import inspect
+    from fluxplace import critroute as CR
+    src = inspect.getsource(CR.apply)
+    assert 'EV.emit("progress", "critroute"' in src and src.index('EV.emit("progress", "critroute"') < src.index("for r in search(")

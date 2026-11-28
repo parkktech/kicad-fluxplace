@@ -238,6 +238,8 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             i, rec = todo[0]
             tried.add(_key(rec))
             n_try += 1
+            from . import events as EV
+            EV.emit("progress", "critroute", step=f"critroute: {net} connection {n_try} (search + lay)")   # no silent minutes (stall watch)
             t0 = time.time()
             result, why, whys = "no-path", "", []
             for r in search(HR, cur, net, i, cons_path, layers, avoid, width, rec, M, RF_VIA_COST if net in rf_w else 2.0):
