@@ -1079,15 +1079,30 @@ def test_fill_cache_second_round_loads_instead_of_refilling(tmp_path, monkeypatc
     from fluxplace import handroute as HR
     import types
     calls = []
-    monkeypatch.setattr(GP, "_PACKET_MODEL", {})
-    monkeypatch.setattr(HR, "_model", lambda path, cp, refill=True: (calls.append((os.path.basename(path), refill)),
-                                                                     types.SimpleNamespace(b=object()))[1])
+    monkeypatch.setattr(HR.G, "Model", lambda path, cp=None, refill=True: (calls.append((os.path.basename(path), refill)),
+                                                                          types.SimpleNamespace(b=object()))[1])
     import pcbnew
     monkeypatch.setattr(pcbnew, "SaveBoard", lambda p, b: open(p, "w").write("(kicad_pcb)"))
     b = tmp_path / "in.kicad_pcb"
     b.write_text("(kicad_pcb)")
-    d = str(tmp_path / "fc")
-    GP._packet_model(str(b), None, d)
-    GP._PACKET_MODEL.clear()                         # a new process
-    GP._packet_model(str(b), None, d)
-    assert [r for _, r in calls] == [True, False] and len(os.listdir(d)) == 1
+    (tmp_path / "in.kicad_pro").write_text("{}")
+    monkeypatch.setattr(HR, "FILL_CACHE_DIR", str(tmp_path / "fc"))
+    HR._model(str(b), None)
+    HR._model(str(b), None)                          # same content: loaded, not refilled
+    assert [r for _, r in calls] == [True, False] and sorted(os.listdir(tmp_path / "fc")) == [
+        calls[1][0], calls[1][0][:-3] + "pro"]
+    b.write_text("(kicad_pcb )")                     # new content: refilled and cached again
+    HR._model(str(b), None)
+    assert [r for _, r in calls] == [True, False, True]
+
+
+def test_snap_memoised_by_content(tmp_path, monkeypatch):
+    from fluxplace import handroute as HR, audit as AU
+    n = []
+    monkeypatch.setattr(HR, "_SNAP_MEMO", {})
+    monkeypatch.setattr(AU, "snapshot", lambda p, checks=False, project=None: (n.append(1), {"nets": {}})[1])
+    b = tmp_path / "a.kicad_pcb"
+    b.write_text("x")
+    s1 = HR._snap(str(b))
+    s1["nets"]["z"] = 1                              # a caller's edit never reaches the memo
+    assert HR._snap(str(b)) == {"nets": {}} and len(n) == 1

@@ -12,6 +12,7 @@ engineer does (docs/AI-FINISH.md). Small, deterministic, JSON out; the decisions
 Rules of record: the floors come from the board's own design rules, raised by `--constraints` ([route] and the [fab]
 profile); nothing is ever laid below them. Locked copper changes only by explicit guarded commands. Measurement is
 kicad-cli DRC with zones refilled, the project file beside the board."""
+import glob
 import heapq
 import copy
 import json
@@ -181,10 +182,50 @@ def _resolve(M, ident):
     return hits
 
 
+FILL_CACHE_DIR = None                            # k17: set by close's ai rung (<ai_dir>/fillcache): refilled boards by content sha
+FILL_CACHE_KEEP = 3
+
+
 def _model(board, constraints=None, refill=True):
     if not os.path.exists(os.path.splitext(board)[0] + ".kicad_pro"):
         print(f"warning: no {os.path.splitext(os.path.basename(board))[0]}.kicad_pro beside the board: default rules apply", file=sys.stderr)
+    if refill and FILL_CACHE_DIR:
+        return _cached_filled_model(board, constraints)
     return G.Model(board, constraints, refill=refill)
+
+
+def _cached_filled_model(board, constraints):
+    """G.Model with the zones refilled, the refill kept on disk by board+rules sha: the same content (a session start, a probe
+    of it, the close guard's start model: 3-5 refills of ONE board, 10-12 s each) loads the saved fills instead. A model is a
+    fresh pcbnew board each time, so callers may mutate it. The fills round-trip exactly (fill sizes and areas compared)."""
+    import pcbnew
+    d = FILL_CACHE_DIR
+    sha = board_sha(board)
+    hit = os.path.join(d, sha + ".kicad_pcb")
+    if os.path.exists(hit):
+        try:
+            return G.Model(hit, constraints, refill=False)
+        except Exception as e:                      # noqa: BLE001 - a bad cache entry is a miss
+            print(f"fill cache unusable ({e})", file=sys.stderr)
+    M = G.Model(board, constraints)
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = hit + ".tmp.kicad_pcb"
+        pcbnew.SaveBoard(tmp, M.b)
+        os.replace(tmp, hit)
+        for ext in (".kicad_pro", ".kicad_dru"):
+            for q in (tmp[:-len(".kicad_pcb")] + ext,):
+                _unlink_quiet(q)
+            src = os.path.splitext(board)[0] + ext
+            if os.path.exists(src):
+                shutil.copyfile(src, hit[:-len(".kicad_pcb")] + ext)
+        old = sorted(glob.glob(os.path.join(d, "*.kicad_pcb")), key=os.path.getmtime)
+        for q in old[:max(0, len(old) - FILL_CACHE_KEEP)]:
+            for e in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+                _unlink_quiet(q[:-len(".kicad_pcb")] + e)
+    except Exception as e:                          # noqa: BLE001 - the cache is an optimisation only
+        print(f"fill cache not written ({e})", file=sys.stderr)
+    return M
 
 
 def _item_desc(it):
@@ -855,9 +896,18 @@ def session_begin(board, work, kicad_cli="kicad-cli"):
     return {"work": work, "session": S.dir, "unconnected": sm["unconnected"], "errors": sm["errors"]}
 
 
+_SNAP_MEMO = {}
+
+
 def _snap(path):
+    """audit.snapshot of a board (a 4-5 s parse), memoised by content sha: session_commit snapshots the start board twice."""
     from . import audit as AU
-    return AU.snapshot(path, checks=False, project=os.path.splitext(path)[0] + ".kicad_pro")
+    key = board_sha(path)
+    if key not in _SNAP_MEMO:
+        while len(_SNAP_MEMO) >= 4:
+            _SNAP_MEMO.pop(next(iter(_SNAP_MEMO)))
+        _SNAP_MEMO[key] = AU.snapshot(path, checks=False, project=os.path.splitext(path)[0] + ".kicad_pro")
+    return copy.deepcopy(_SNAP_MEMO[key])
 
 
 def _copper_sig(M, locked_only=False):
@@ -1600,7 +1650,7 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="rep
         why6 = _r6_refusal(start, S.work, cons, kicad_cli, protect)     # PHASE3I F5 (R11): on copies
         if why6:
             reasons.append(why6)
-    Ma, Mb = G.Model(start), G.Model(S.work)
+    Ma, Mb = _model(start), _model(S.work)
     reescapes = _active_locked_reescapes(S)
     reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}
     for net in sorted({x["net"] for ent in reescapes for x in ent["removed_locked"] if x.get("level") == "soft"}):
