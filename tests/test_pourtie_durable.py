@@ -107,6 +107,40 @@ def test_pad_with_no_via_site_is_fragile_and_a_sealed_island_is_found_after_rout
     _ring(b, 2.0)
     rep = PT.repair_in_memory(b, rec)
     assert rep["lost"] == 1 and "sealed by routing" in rep["unrepaired"][0]["reason"]
+    assert [(f["ref"], f["state"]) for f in rep["fragile"]] == [("C1", "sealed")]
+
+
+def _fragile_c1(tmp_path):
+    src = board(str(tmp_path / "c.kicad_pcb"), novia=True)
+    rec = PT.run(src, str(tmp_path / "c.out.kicad_pcb"), str(tmp_path))
+    assert [f["ref"] for f in rec["fragile"]] == ["C1"]
+    return pcbnew.LoadBoard(str(tmp_path / "c.out.kicad_pcb")), rec
+
+
+def test_a_fragile_pad_gets_its_via_after_routing_when_a_site_is_legal_then(tmp_path):
+    """W16 route-11: 7 pads had no site at pour-tie time; the re-check only looked for a sealed island and never tried again."""
+    b, rec = _fragile_c1(tmp_path)
+    for z in [z for z in b.Zones() if z.GetIsRuleArea()]:                         # what kept the site (an apron, a keep-out) is gone
+        b.Delete(z)
+    rep = PT.repair_in_memory(b, rec)
+    assert rep["repaired"] == 1 and not rep["unrepaired"]
+    assert rep["fragile"][0]["state"] == "via" and rep["fragile"][0]["via"]
+    pm = PT.pour_map(b)
+    assert PT.tie_status(b, "GND", _pad(b), PT.tie_layers(pm["GND"], PT.solid_lids(b)))[0] == "via"
+
+
+def test_a_fragile_pad_with_no_site_but_a_via_in_its_pour_island_is_reported_pour(tmp_path):
+    b, rec = _fragile_c1(tmp_path)
+    v = pcbnew.PCB_VIA(b)
+    v.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(20)))
+    v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+    v.SetWidth(pcbnew.F_Cu, pcbnew.FromMM(0.6))
+    v.SetDrill(pcbnew.FromMM(0.3))
+    b.Add(v)
+    v.SetNet(b.FindNet("GND"))
+    rep = PT.repair_in_memory(b, rec)
+    assert rep["lost"] == 0 and rep["repaired"] == 0 and not rep["unrepaired"]
+    assert rep["fragile"][0]["state"] == "pour" and "holds a via" in rep["fragile"][0]["reason"]
 
 
 def test_board_without_a_plane_keeps_the_pour_on_the_pads_layer_as_the_tie(tmp_path):

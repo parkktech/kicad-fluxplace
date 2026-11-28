@@ -1948,9 +1948,10 @@ def _auto_endpoints(M, net, isl):
 
 def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, width=None, via=None, pitch=0.05, margin=2.0,
             via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False,
-            include_locked=False, rec=None):
+            include_locked=False, rec=None, copper_only=False):
     """Grid A* between two islands of `net`: sources = the island of the item nearest src_pt, targets = the island nearest dst_pt (or the
-    connection's two islands). A proposal as a path string, already probed; reports the measured reason when none exists."""
+    connection's two islands). A proposal as a path string, already probed; reports the measured reason when none exists.
+    copper_only: islands of pads / tracks / vias alone, so two items joined only by a pour of the net can be given a track."""
     import numpy as np
     M = M or _model(board, constraints)
     if rec is None and conn is not None:
@@ -1963,7 +1964,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
     rule = M.net_rule(net)
     w = width or rule["width"]
     vd, vdr = via or (rule["via_dia"], rule["via_drill"])
-    isl, omap = M.islands(net)
+    isl, omap = M.islands(net, fills=not copper_only)
     if rec is not None:
         ia, ib = rec["a"].get("island"), rec["b"].get("island")
         pa = rec["closest"]["a"] if rec.get("closest") else (rec["a"]["x"], rec["a"]["y"])
@@ -2206,7 +2207,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                 last = {"violations": [{"kind": "degenerate"}]}
                 continue
             pr = probe_prims(M, net, prims, w, (vd, vdr), any_angle, skip_ids)
-            if pr["ok"] and _endpoints_join(pr, ia, ib):
+            if pr["ok"] and (_endpoints_join(pr, None, None) if copper_only else _endpoints_join(pr, ia, ib)):
                 return {"found": True, "path": cand, "length_mm": round(sum(it.get("len", 0) for it in pr["items"]), 3), "vias": sum(1 for p in prims if p[0] == "via"),
                         "width": w, "via": [vd, vdr], "probe": "OK", "grid_margin_extra": extra, "pitch": pit, "expanded": pops}
             if pr["ok"]:

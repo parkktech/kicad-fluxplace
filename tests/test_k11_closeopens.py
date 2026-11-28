@@ -75,7 +75,7 @@ def test_pourisland_ties_every_island_of_the_net_in_one_rung(tmp_path, monkeypat
     from fluxplace import pourisland as P
     n = {"k": 0}
 
-    def repair(cur, tmp, net, constraints=None):
+    def repair(cur, tmp, net, constraints=None, budget=None):
         if n["k"] < 3:
             n["k"] += 1
             open(tmp, "w").write(f"tied {n['k']}")

@@ -648,6 +648,7 @@ def _r_joingaps(base, out, gaps, ctx):
 
 
 POUR_ISLANDS_MAX = 12                          # k11: stitching vias one pourisland rung lays per net
+ISLAND_S = 300.0                               # seconds one island repair may spend before it stops starting guarded edits
 
 
 def _r_pourisland(base, out, gaps, ctx):
@@ -656,11 +657,12 @@ def _r_pourisland(base, out, gaps, ctx):
     try:
         for i, net in enumerate(_nets(gaps)):
             for k in range(POUR_ISLANDS_MAX):       # k11: repair ties one island per call; every untied island of the net gets its via
+                left = _left(ctx, ISLAND_S) if ctx.get("deadline") is not None or ctx.get("budget_s") else ISLAND_S
                 tmp = os.path.join(ctx["work"], f"pi-{i}-{k}.kicad_pcb")
                 tmps.append(tmp)
                 _rm(tmp)
                 _sidecars(cur, tmp)
-                ripped |= set((P.repair(cur, tmp, net, constraints=ctx["cons_path"]) or {}).get("ripped") or ())
+                ripped |= set((P.repair(cur, tmp, net, constraints=ctx["cons_path"], budget=left) or {}).get("ripped") or ())
                 if not os.path.exists(tmp):
                     break
                 cur, wrote = tmp, True

@@ -12,7 +12,7 @@ def test_pourisland_rung_relays_the_nets_a_rip_and_lay_opened(tmp_path, monkeypa
     open(b, "w").write("(kicad_pcb)")
     n = {"k": 0}
 
-    def repair(cur, tmp, net, constraints=None):
+    def repair(cur, tmp, net, constraints=None, budget=None):
         if n["k"] < 1:
             n["k"] += 1
             open(tmp, "w").write("tied")

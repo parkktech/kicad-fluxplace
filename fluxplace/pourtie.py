@@ -749,18 +749,41 @@ def repair_in_memory(board, rec):
                 repaired += 1
             else:
                 unrepaired += [dict(u, reason="lost after routing; " + u["reason"]) for u in untied]
-    for t in rec.get("fragile", []):                     # surface-pour pads: tied while their fill island still holds a via / drilled pad
+    # fragile pads (surface pour only at pour-tie time): after routing each one is tried again for its own via into the plane
+    # (the pair aprons that kept sites free are spent, so no keep-free rect applies); one that still has no site is `pour` while
+    # its fill island holds a via / drilled pad, else `sealed` (unrepaired: an open for close's pourisland rung)
+    fragile, todo, solid = [], {}, solid_lids(board)
+    for t in rec.get("fragile", []):
         pad = _pad_at(board, t["net"], t["at"])
-        if pad is None or not pm.get(t["net"]) or island_tied(board, t["net"], pad):
+        if pad is None or not pm.get(t["net"]):
             continue
-        lost.append(t)
-        tied, untied = _tie_pads(board, t["net"], [pad], pm[t["net"]], rec.get("rules"), solid_lids(board), ())
-        if tied:
-            repaired += 1
+        row = {k: t.get(k) for k in ("net", "ref", "pad", "at")}
+        fragile.append(row)
+        if tie_status(board, t["net"], pad, tie_layers(pm[t["net"]], solid))[0]:
+            row.update(state="via", how="tied into the plane already")
         else:
-            unrepaired += [dict(u, reason="surface pour sealed by routing; " + u["reason"]) for u in untied]
+            row["sealed"] = not island_tied(board, t["net"], pad)
+            todo.setdefault(t["net"], []).append((pad, row, t))
+    for net, rows in todo.items():
+        tied, untied = _tie_pads(board, net, [pad for pad, _row, _t in rows], pm[net], rec.get("rules"), solid, ())
+        why = {tuple(u["at"]): u["reason"] for u in untied}
+        got = {tuple(u["at"]): u["via"] for u in tied}
+        for pad, row, t in rows:
+            at, sealed = tuple(_mm_at(pad)), row.pop("sealed")
+            if sealed:
+                lost.append(t)
+            if at in got:
+                repaired += 1
+                row.update(state="via", how="via laid after routing", via=got[at])
+            elif not sealed:
+                row.update(state="pour", reason="its surface pour island holds a via; " + why.get(at, "no via site"))
+            else:
+                row.update(state="sealed", reason=why.get(at, "no via site"))
+                unrepaired.append({"net": net, "ref": t.get("ref"), "pad": t.get("pad"), "at": t["at"],
+                                   "reason": "surface pour sealed by routing; " + why.get(at, "no via site")})
     PL.refill(board)
-    return {"checked": len(rec["tied"]) + len(rec.get("fragile", [])), "lost": len(lost), "repaired": repaired, "unrepaired": unrepaired}
+    return {"checked": len(rec["tied"]) + len(rec.get("fragile", [])), "lost": len(lost), "repaired": repaired, "unrepaired": unrepaired,
+            "fragile": fragile}
 
 
 def island_tied(board, net, pad):

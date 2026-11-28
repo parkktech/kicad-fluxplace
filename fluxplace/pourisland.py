@@ -2,6 +2,7 @@
 import math
 import os
 import re
+import time
 
 from . import handroute as H, planes as PL, pourtie as PTF, routerules as RR
 
@@ -31,15 +32,21 @@ def outline_index(b, net):
     return rows
 
 
-def island_sites(b, net, step=0.4, per_island=12):
-    """Via sites inside the untied pour islands of `net` -> [(x, y)] in mm (island_groups, flat)."""
-    return [s for g in island_groups(b, net, step, per_island) for s in g]
+def _one_layer_pads(M, net):
+    """(ref.number, layer) of the pads of `net` whose copper island (handroute model: pads, tracks, vias and the fills they touch)
+    lives on ONE copper layer. A pad not in here reaches another layer through a track, so its fill outline is tied even with no
+    via inside the outline."""
+    isl, omap = M.islands(net)
+    single = {g["id"] for g in isl if len({l for o in g["items"] for l in o.layers} | {l for _z, l, _f in g["zones"]}) == 1}
+    return {(o.ref, l) for o in M.obs if o.kind == "pad" and o.net == net and omap.get(o.id) in single for l in o.layers}
 
 
-def _untied(b, net):
-    """The untied pour islands of `net`: a fill outline that holds a pad of the net but no via and no through-hole pad of it.
+def _untied(b, net, M=None):
+    """The untied pour islands of `net`: a fill outline that holds a pad of the net but no via and no through-hole pad of it and,
+    with the copper model `M`, no pad that a track ties to another layer.
     -> yields (layer id, filled poly set, outline index, [pads of the net inside it])."""
     import pcbnew
+    single = _one_layer_pads(M, net) if M is not None else None
     vias = [t.GetPosition() for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
     pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
     for z in b.Zones():
@@ -51,17 +58,20 @@ def _untied(b, net):
                 if any(ps.Contains(v, i) for v in vias) or any(p.HasHole() and ps.Contains(p.GetPosition(), i) for p in pads):
                     continue
                 own = [p for p in pads if p.IsOnLayer(lid) and ps.Contains(p.GetPosition(), i)]
+                if single is not None and any((f"{p.GetParentFootprint().GetReference()}.{p.GetNumber()}", b.GetLayerName(lid))
+                                              not in single for p in own):
+                    continue
                 if own:
                     yield lid, ps, i, own
 
 
-def island_groups(b, net, step=0.4, per_island=12):
+def island_groups(b, net, step=0.4, per_island=12, M=None):
     """Via sites inside the untied pour islands of `net` (_untied): such an island has no path to the other layers. KiCad reports
     the open at the zone's anchor corner, not at the island, so the sites are taken from the fill itself: grid points inside the
     outline, nearest its pads first. -> [[(x, y)] per island] in mm."""
     import pcbnew
     out = []
-    for _lid, ps, i, pads in _untied(b, net):
+    for _lid, ps, i, pads in _untied(b, net, M):
         own = [p.GetPosition() for p in pads]
         bb = ps.Outline(i).BBox()
         st = pcbnew.FromMM(step)
@@ -85,14 +95,14 @@ STUB_R = (0.6, 0.9, 1.3)            # k11: via distance (mm) from an island pad 
 STUB_PER_ISLAND = 16
 
 
-def island_stubs(b, net):
+def island_stubs(b, net, M=None):
     """k11: an island too small (or too crowded) for a via inside it is tied by a short track from one of its pads to a via
     outside it that lands on the net's pour on another layer. -> [(island index in _untied order, path string)] (handroute path
     syntax), nearest first."""
     import pcbnew
     lids = {lid for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net for lid in z.GetLayerSet().CuStack()}
     out = []
-    for k, (lid, _ps, _i, own) in enumerate(_untied(b, net)):
+    for k, (lid, _ps, _i, own) in enumerate(_untied(b, net, M)):
         rows = []
         for p in own:
             c = p.GetPosition()
@@ -110,52 +120,124 @@ LINK_TARGETS = 3                    # nearest tied vias / through pads of the ne
 LINK_REACH = 4.0                    # mm: farthest tied via / through pad a link is routed to
 
 
+def _tied_points(b, net):
+    """Positions of the vias and through-hole pads of `net` (copper that has its layer change)."""
+    import pcbnew
+    return ([t.GetPosition() for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
+            + [p.GetPosition() for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net and p.HasHole()])
+
+
+def _link(b, board, net, pad, lid, tied, constraints, M, rip=None, copper_only=False):
+    """One track on layer `lid` from `pad` to the nearest of the `tied` points within LINK_REACH (handroute.suggest; it ends on
+    whatever copper of the target's island it meets first). rip = (names, cons): when only unlocked tracks of other nets are in the
+    way, the relaxed search names them and the link is routed without them. -> (path, ids to rip first) or None."""
+    import pcbnew
+    c = pad.GetPosition()
+    src = (pcbnew.ToMM(c.x), pcbnew.ToMM(c.y))
+    kw = dict(constraints=constraints, layers=[b.GetLayerName(lid)], M=M, margin=1.0, copper_only=copper_only)
+    for d, vx, vy in sorted((math.hypot(v.x - c.x, v.y - c.y), v.x, v.y) for v in tied)[:LINK_TARGETS]:
+        if d > pcbnew.FromMM(LINK_REACH):
+            break
+        dst = (pcbnew.ToMM(vx), pcbnew.ToMM(vy))
+        r = H.suggest(board, net, src, dst, **kw)
+        ids = set()
+        if not r.get("found") and rip:
+            soft = H.suggest(board, net, src, dst, relax=True, **kw)
+            short = {x["id"] for x in soft.get("blockers") or ()}
+            hits = [o for o in M.obs if o.id and o.kind in ("track", "via") and H._sid(o.id, M) in short]
+            ids = _rip_ids(M, hits, *rip) if soft.get("found") and hits else None
+            r = H.suggest(board, net, src, dst, skip_ids=tuple(ids), **kw) if ids else {}
+        if r.get("found"):
+            return r["path"], frozenset(ids)
+    return None
+
+
 def island_links(b, board, net, constraints, M, names, cons, skip=()):
     """A sealed island (no via site in it, none beside its pads) is tied on its OWN layer by a routed track from one of its pads to
-    copper of the net that already has its layer change: the nearest existing vias / through pads (handroute.suggest on that one
-    layer; it ends on whatever tied copper of the net it meets first). When only unlocked tracks of other nets are in the way, the
-    relaxed search names them and the link is routed without them. One candidate per island pad; the islands in `skip` (indices)
-    are left out. -> [(island index, path, ids)]: ids = the tracks to rip first (empty: the link is free)."""
-    import pcbnew
-    tied = [t.GetPosition() for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
-    tied += [p.GetPosition() for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net and p.HasHole()]
-    reach = pcbnew.FromMM(LINK_REACH)
+    copper of the net that already has its layer change: the nearest existing vias / through pads (_link, rips allowed). One
+    candidate per island pad; the islands in `skip` (indices) are left out.
+    -> [(island index, path, ids)]: ids = the tracks to rip first (empty: the link is free)."""
+    tied = _tied_points(b, net)
     out = []
-    for k, (lid, _ps, _i, own) in enumerate(_untied(b, net)):
+    for k, (lid, _ps, _i, own) in enumerate(_untied(b, net, M)):
         for p in own if k not in skip else ():
-            c = p.GetPosition()
-            src = (pcbnew.ToMM(c.x), pcbnew.ToMM(c.y))
-            near = sorted((math.hypot(v.x - c.x, v.y - c.y), v.x, v.y) for v in tied)
-            for d, vx, vy in near[:LINK_TARGETS]:
-                if d > reach:
-                    break
-                kw = dict(constraints=constraints, layers=[b.GetLayerName(lid)], M=M, margin=1.0)
-                dst = (pcbnew.ToMM(vx), pcbnew.ToMM(vy))
-                r = H.suggest(board, net, src, dst, **kw)
-                ids = set()
-                if not r.get("found"):
-                    soft = H.suggest(board, net, src, dst, relax=True, **kw)
-                    short = {x["id"] for x in soft.get("blockers") or ()}
-                    hits = [o for o in M.obs if o.id and o.kind in ("track", "via") and H._sid(o.id, M) in short]
-                    ids = _rip_ids(M, hits, names, cons) if soft.get("found") and hits else None
-                    r = H.suggest(board, net, src, dst, skip_ids=tuple(ids), **kw) if ids else {}
-                if r.get("found"):
-                    out.append((k, r["path"], frozenset(ids)))
-                    break
+            hit = _link(b, board, net, p, lid, tied, constraints, M, (names, cons))
+            if hit:
+                out.append((k, *hit))
     return out
 
 
-def repair(board, out, net, constraints=None, at=None, max_sites=24):
-    """Join an open same-net pour island with one guarded via. Writes `out` only when its open count falls."""
+def link_pads(board, out, pads, constraints=None):
+    """Pads that reach their plane only through a surface pour (pourtie's `pour` state: no via site of their own) get a track on
+    their layer to the nearest via / through pad of the net (_link, nothing ripped), each one a guarded edit (no new DRC error,
+    no net opened). `pads` = [{net, ref, pad, at [x, y] mm}]. Writes `out` when at least one link is laid.
+    -> [{net, ref, pad, at, state: "link" | "pour", path | reason}]."""
+    import pcbnew
+    from . import pourtie as PT
+    keep, cur, rows = H.FILL_CACHE_DIR, board, []
+    if keep is None:
+        H.FILL_CACHE_DIR = out + ".fill"
+    tmp = os.path.splitext(out)[0] + ".link.kicad_pcb"
+    try:
+        for t in pads:
+            M = H._model(cur, constraints)
+            pad = PT._pad_at(M.b, t["net"], t["at"])
+            row = {k: t.get(k) for k in ("net", "ref", "pad", "at")}
+            rows.append(row)
+            lids = [lid for lid in M.b.GetEnabledLayers().CuStack() if pad is not None and pad.IsOnLayer(lid)]
+            hit = _link(M.b, cur, t["net"], pad, lids[0], _tied_points(M.b, t["net"]), constraints, M, copper_only=True) if lids else None
+            if not hit:
+                row.update(state="pour", reason=f"no free track on its layer to a via of {t['net']} within {LINK_REACH:g} mm")
+                continue
+            rule = M.net_rule(t["net"])
+            res = _guarded(cur, tmp, t["net"], hit[0], constraints, (rule["via_dia"], rule["via_drill"]), close=False)[1]
+            if res["accepted"]:
+                os.replace(tmp, out)
+                pro = os.path.splitext(board)[0] + ".kicad_pro"
+                if os.path.exists(pro) and os.path.abspath(board) != os.path.abspath(out):
+                    import shutil
+                    shutil.copyfile(pro, os.path.splitext(out)[0] + ".kicad_pro")
+                cur = out
+                row.update(state="link", path=hit[0])
+            else:
+                row.update(state="pour", reason="link refused: " + str(res.get("reason"))[:160])
+    finally:
+        for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro", tmp + ".session", out + ".session"):
+            _drop(f)
+        if keep is None:
+            _drop(H.FILL_CACHE_DIR)
+            H.FILL_CACHE_DIR = None
+    return rows
+
+
+def repair(board, out, net, constraints=None, at=None, max_sites=24, budget=None):
+    """Join an open same-net pour island with one guarded via, stub or link. Writes `out` only when its open count falls.
+    budget: seconds this call may spend; no further guarded edit starts after it (the result says so)."""
+    keep = H.FILL_CACHE_DIR
+    if keep is None:                                  # every model of one board content in this call shares one zone refill
+        H.FILL_CACHE_DIR = out + ".fill"
+    try:
+        return _repair(board, out, net, constraints, at, max_sites, None if budget is None else time.monotonic() + budget)
+    finally:
+        if keep is None:
+            _drop(H.FILL_CACHE_DIR)
+            H.FILL_CACHE_DIR = None
+
+
+def _late(stop):
+    return stop is not None and time.monotonic() > stop
+
+
+def _repair(board, out, net, constraints, at, max_sites, stop):
     import pcbnew
     R = RR.rules(constraints and __import__("fluxplace.constraints", fromlist=["load"]).load(constraints), board)
     via = (R["via"], R["drill"])
-    b = pcbnew.LoadBoard(board)
-    PL.refill(b)
+    M = H._model(board, constraints)                 # k11: one refilled copper model (and its board) for every probe of this call
+    b = M.b
     pours = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net]
     if not pours:
         return {"accepted": False, "net": net, "reason": f"net {net!r} has no copper pour"}
-    records = H.open_nets(board, constraints)["connections"]
+    records = H.open_nets(board, constraints, M=M)["connections"]
     if at is None and not any(r["net"] == net for r in records):   # the rung calls until nothing is left: not an error
         return {"accepted": False, "net": net, "reason": f"net {net!r} has no open connection"}
     x, y = _start(records, net, at)
@@ -163,17 +245,18 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
     for radius in (0.3, 0.6, 1.0, 1.5):
         sites += [(None, x + radius * math.cos(k * math.pi / 4), y + radius * math.sin(k * math.pi / 4)) for k in range(8)]
     if at is None:
-        inside = [(k, ix, iy) for k, g in enumerate(island_groups(b, net)) for ix, iy in g]
+        inside = [(k, ix, iy) for k, g in enumerate(island_groups(b, net, M=M)) for ix, iy in g]
         sites = inside + sites
         max_sites += len(inside)
     reasons, futile = [], set()
-    M = H._model(board, constraints)                 # k11: one copper model for every probe of this call (was one per site)
 
     def free(k, path, action, where):
         """Probe and lay one candidate that rips nothing -> the accepted result, or None (the refusal is noted for _rip_lay)."""
         probe = H.probe(board, net, path, constraints, via=via, M=M)
         if not probe["ok"]:
             reasons.append(dict(where, island=k, reason="probe: " + str(probe["violations"][:1])))
+            return None
+        if _late(stop):
             return None
         result = H.lay(board, net, path, out=out, constraints=constraints, via=via)
         if result["accepted"]:
@@ -195,7 +278,7 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
         hit = free(k, f"via {cx:.4f},{cy:.4f}", "via", {"at": [round(cx, 4), round(cy, 4)]})
         if hit:
             return hit
-    for k, path in (island_stubs(b, net) if at is None else []):   # k11: no via site inside: a pad stub to a via outside the island
+    for k, path in (island_stubs(b, net, M) if at is None else []):   # k11: no via site inside: a pad stub to a via outside the island
         hit = None if k in futile else free(k, path, "stub+via", {"path": path})
         if hit:
             return hit
@@ -210,9 +293,11 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
             if hit:
                 return hit
         # k15: every free site is blocked: rip the blocking unlocked track, then lay
-        hit = _rip_lay(board, out, net, constraints, via, M, reasons, opens0, [l for l in links if l[2]], futile)
+        hit = _rip_lay(board, out, net, constraints, via, M, reasons, opens0, [l for l in links if l[2]], futile, stop)
         if hit:
             return hit
+    if _late(stop):
+        return {"accepted": False, "net": net, "reason": "out of time before a guarded repair was found", "attempts": reasons}
     return {"accepted": False, "net": net, "reason": "no legal guarded stitching-via site joins the island", "attempts": reasons}
 
 
@@ -290,9 +375,10 @@ def _strip_ids(board, dst, ids):
     return cut, wide
 
 
-def _guarded(board, out, net, path, constraints, via, ids=(), width=None, close=True, any_angle=False):
-    """Rip `ids` and lay `path` (at `width`, else the net's rule width) in ONE guarded edit of `board`: refused when any net opens or a
-    DRC error appears (handroute._edit), and, with `close`, when no open of `net` closes. -> ({net: ripped count}, lay result)."""
+def _guarded(board, out, net, path, constraints, via, ids=(), width=None, close=True, any_angle=False, may_open=False):
+    """Rip `ids` and lay `path` (at `width`, else the net's rule width) in ONE guarded edit of `board`: refused when a DRC error
+    appears, when any net opens (unless `may_open`: the caller re-lays and re-counts) and, with `close`, when no open of `net`
+    closes (handroute._edit). -> ({net: ripped count}, lay result)."""
     cut = {}
 
     def mutate(b, M):
@@ -306,33 +392,34 @@ def _guarded(board, out, net, path, constraints, via, ids=(), width=None, close=
             raise ValueError("probe failed: " + str(pr["violations"][:2]))
         H._apply_prims(b, M, net, prims, width or M.net_rule(net)["width"], via)
         return {"ripped": dict(cut)}
-    return cut, H._edit(board, out, mutate, "lay", net, path, constraints, False, close)
+    return cut, H._edit(board, out, mutate, "shove" if may_open else "lay", net, path, constraints, False, close)
 
 
-def _relay(board, nets, wide, constraints, cons, layers):
+def _relay(board, nets, wide, opens0, constraints, cons, layers):
     """Re-lay in place what a rip opened: each open connection of `nets` gets a searched path (handroute.suggest on `layers`, the
-    signal layers of the board before the rip: a re-laid track never slots a plane) laid
-    as wide as the copper the rip took from that net (a [power] rail: no wider than its rail width), one guarded edit each. The link
-    laid before it holds the island's channel, so this is where a ripped net's layer change moves off the island.
-    -> {net: open connections} of the whole board afterwards."""
+    signal layers of the board before the rip: a re-laid track never slots a plane) laid as wide as the copper the rip took from
+    that net (a [power] rail: no wider than its rail width), one guarded edit each. The link laid before it holds the island's
+    channel, so this is where a ripped net's layer change moves off the island. Nothing is searched while none of `nets` has more
+    opens than `opens0`. -> {net: open connections} of the whole board afterwards (kicad-cli DRC)."""
     from . import power as PW
     wide = {n: min(w, PW.track_width_mm(cons, n) or w) for n, w in wide.items()}
     tmp = os.path.splitext(board)[0] + ".relay.kicad_pcb"
     dead, count = set(), {}
     try:
         for rnd in range(RELAY_ROUNDS + 1):
-            recs = H.open_nets(board, constraints)["connections"]
-            count = {}
-            for r in recs:
-                count[r["net"]] = count.get(r["net"], 0) + 1
+            count = dict(H.summarize_drc(H.drc_raw(board))["unc_by_net"])
+            if rnd == RELAY_ROUNDS or not any(count.get(n, 0) > opens0.get(n, 0) for n in nets):
+                break
+            M = H._model(board, constraints)
+            recs = H.open_nets(board, constraints, M=M)["connections"]
             todo = [r for r in recs if r["net"] in nets and (r["net"], r["a"]["x"], r["a"]["y"], r["b"]["x"], r["b"]["y"]) not in dead]
-            if not todo or rnd == RELAY_ROUNDS:
+            if not todo:
                 break
             r = todo[0]
             done = False
             for free_angle in (False, True):          # a stub too short for the 45-degree grid (ends that all but touch) is laid straight
                 found = H.suggest(board, r["net"], rec=r, constraints=constraints, width=wide.get(r["net"]), layers=layers,
-                                  any_angle=free_angle)
+                                  any_angle=free_angle, M=M)
                 done = found.get("found") and _guarded(board, tmp, r["net"], found["path"], constraints, tuple(found["via"]),
                                                        width=found["width"], any_angle=free_angle)[1]["accepted"]
                 if done or "exact probe" not in str(found.get("reason")):
@@ -347,7 +434,42 @@ def _relay(board, nets, wide, constraints, cons, layers):
     return count
 
 
-def _rip_lay(board, out, net, constraints, via, M, reasons, opens0=None, links=(), futile=()):
+def _prune(board, nets):
+    """Delete in place the copper of `nets` that connects nothing (launder.dead_copper): what a rip and re-lay of them left behind
+    (the old run beyond the new join), and pull a free track end back to the last point another track of the net joins it (a
+    re-lay that starts mid-track leaves the rest of that track as a stub). -> pieces removed or trimmed."""
+    import pcbnew
+    from . import launder as LA
+    b = pcbnew.LoadBoard(board)
+    dead = LA.dead_copper(b, {t.GetNetname() for t in b.GetTracks()} - set(nets)) if nets else []
+    for t in dead:
+        b.Remove(t)
+    if dead:
+        b.BuildConnectivity()
+    conn, n = b.GetConnectivity(), len(dead)
+    for t in [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T and t.GetNetname() in nets and not t.IsLocked()]:
+        a, c = t.GetStart(), t.GetEnd()
+        d = math.hypot(c.x - a.x, c.y - a.y)
+        others = list(conn.GetConnectedTracks(t)) + list(conn.GetConnectedPads(t))
+        if not d or not others or any(o.Type() == pcbnew.PCB_PAD_T for o in others):
+            continue
+        ends = [p for o in others for p in ((o.GetPosition(),) if o.Type() == pcbnew.PCB_VIA_T else (o.GetStart(), o.GetEnd())) if t.HitTest(p)]
+        par = sorted(((p.x - a.x) * (c.x - a.x) + (p.y - a.y) * (c.y - a.y)) / (d * d) for p in ends)
+        used = [any(o.HitTest(e) for o in others) for e in (a, c)]
+        if len(par) < 1 or used[0] == used[1]:
+            continue
+        cut = max(par) if used[0] else min(par)       # the free end moves to the outermost join
+        if (1.0 - cut if used[0] else cut) * d < pcbnew.FromMM(0.01) or not 0.0 < cut < 1.0:
+            continue
+        at = pcbnew.VECTOR2I(int(round(a.x + (c.x - a.x) * cut)), int(round(a.y + (c.y - a.y) * cut)))
+        t.SetEnd(at) if used[0] else t.SetStart(at)
+        n += 1
+    if n:
+        pcbnew.SaveBoard(board, b)
+    return n
+
+
+def _rip_lay(board, out, net, constraints, via, M, reasons, opens0=None, links=(), futile=(), stop=None):
     """k15 (sealed pour islands): a via site / pad stub refused only by unlocked tracks of other (non-hard) nets, or a link to tied
     copper of the net routed through such tracks (`links` [(island, path, ids)]), is laid after those tracks are ripped (links first:
     a track holds the island's channel where a freed pour would be walled in again; then fewest rips; a rail's copper last) and
@@ -370,40 +492,50 @@ def _rip_lay(board, out, net, constraints, via, M, reasons, opens0=None, links=(
     seen = set()
     for link, path, ids, k in sorted(cands, key=lambda c: (any(nets_of.get(i) in rails for i in c[2]), not c[0], len(c[2]))):
         key = (frozenset(ids), link)
-        if key in seen or len(seen) >= RIP_TRIES or k in futile:
+        if key in seen or len(seen) >= RIP_TRIES or k in futile or _late(stop):
             continue
         seen.add(key)
-        rail = any(nets_of.get(i) in rails for i in ids)
-        cut, result = _guarded(board, out, net, path, constraints, via, ids) if rail else ({}, {"accepted": False})
-        if not result["accepted"]:                    # a rip that opens its net: lay on the stripped board, then re-lay the ripped nets
+        rail, relay = any(nets_of.get(i) in rails for i in ids), True
+        if link:                                      # ONE guarded edit: rip + link (laid even when the rip alone frees the pour)
+            cut, result = _guarded(board, out, net, path, constraints, via, ids, close=False, may_open=True)
+            wide = {}
+            for o in M.obs:
+                if o.id in ids and o.kind == "track":
+                    wide[o.net] = max(wide.get(o.net, 0.0), 2 * o.g[3])
+        else:
+            cut, result = _guarded(board, out, net, path, constraints, via, ids) if rail else ({}, {"accepted": False})
+            relay = not result["accepted"]
+        if not link and relay:                        # a rip that opens its net: lay on the stripped board, then re-lay the ripped nets
             _drop(out)
             tmp = out + ".rip.kicad_pcb"
             cut, wide = _strip_ids(board, tmp, ids)
             try:
-                if link:                              # the link is laid even when the rip alone let the pour reach the island
-                    result = _guarded(tmp, out, net, path, constraints, via, close=False)[1]
+                result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
+                m = _STILL.search(str(result.get("reason") or ""))
+                if not result["accepted"] and m and int(m.group(1)) < opens0.get(net, 0):
+                    import shutil                        # the rip alone let the net's own pour reach the island: the stripped board is the repair
+                    shutil.copyfile(tmp, out)
+                    path, result = "rip only", {"accepted": True}
                 else:
-                    result = H.lay(tmp, net, path, out=out, constraints=constraints, via=via)
-                    m = _STILL.search(str(result.get("reason") or ""))
-                    if not result["accepted"] and m and int(m.group(1)) < opens0.get(net, 0):
-                        import shutil                    # the rip alone let the net's own pour reach the island: the stripped board is the repair
-                        shutil.copyfile(tmp, out)
-                        path, result = "rip only", {"accepted": True}
-                    else:
-                        _note_futile(futile, k, result)
+                    _note_futile(futile, k, result)
             finally:
                 for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro"):
                     _drop(f)
-            if result["accepted"]:
-                count = _relay(out, set(cut), wide, constraints, cons, layers)
-                left = sorted(n for n in set(cut) & rails if count.get(n, 0) > opens0.get(n, 0))
-                if left:                                 # k15: a rail is never left open for a later router
-                    result = {"accepted": False, "reason": "rip opened rail(s) the re-lay could not close: " + ", ".join(left)}
-                elif count.get(net, 0) >= opens0.get(net, 0):
-                    result = {"accepted": False, "reason": f"target not closed: open connections of {net} {opens0.get(net, 0)} -> {count.get(net, 0)}"}
-                    _note_futile(futile, k, result)
-                if not result["accepted"]:
-                    _drop(out)
+        if relay and result["accepted"]:
+            count = _relay(out, set(cut), wide, opens0, constraints, cons, layers)
+            left = sorted(n for n in set(cut) & rails if count.get(n, 0) > opens0.get(n, 0))
+            other = sorted(n for n in count if n not in cut and n != net and count[n] > opens0.get(n, 0))
+            if left:                                     # k15: a rail is never left open for a later router
+                result = {"accepted": False, "reason": "rip opened rail(s) the re-lay could not close: " + ", ".join(left)}
+            elif other:
+                result = {"accepted": False, "reason": "lay opened connection(s): " + ", ".join(other)}
+            elif count.get(net, 0) >= opens0.get(net, 0):
+                result = {"accepted": False, "reason": f"target not closed: open connections of {net} {opens0.get(net, 0)} -> {count.get(net, 0)}"}
+                _note_futile(futile, k, result)
+            if not result["accepted"]:
+                _drop(out)
+            else:                                        # a re-laid net keeps no free end of its old run
+                _prune(out, {n for n in cut if count.get(n, 0) <= opens0.get(n, 0)})
         if result["accepted"]:
             kind = "rip" if path == "rip only" else "rip+" + ("link" if link else "via" if path.startswith("via") else "stub+via")
             return {"accepted": True, "action": kind, "net": net, "path": path,

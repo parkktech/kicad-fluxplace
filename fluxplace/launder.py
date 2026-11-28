@@ -17,6 +17,7 @@ only if violations went DOWN and unconnected did not go UP. Iterate:
 deleting a stub can orphan its neighbour into the next report.
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -384,8 +385,16 @@ def dead_copper(b, protect=()):
             if m is None or not m["alive"]:
                 continue
             hit = [e for e, pt in ((0.0, a), (1.0, c)) if m["o"].HitTest(pt)]
-            out += hit or [par(pt) for pt in {(m["a"].x, m["a"].y): m["a"], (m["c"].x, m["c"].y): m["c"]}.values()
-                           if n["o"].HitTest(pt)] or [0.5]
+            if len(hit) == 2 and (a.x, a.y) != (c.x, c.y):
+                # a track shorter than its neighbour is wide is covered at both ends: it attaches at the end nearer the
+                # neighbour's middle (W16 BT_INT_M: 0.025 / 0.035 mm end stubs of a ripped run were never seen as free)
+                mx, my = (m["a"].x + m["c"].x) / 2.0, (m["a"].y + m["c"].y) / 2.0
+                da, dc = math.hypot(a.x - mx, a.y - my), math.hypot(c.x - mx, c.y - my)
+                hit = [0.0] if da < dc else [1.0] if dc < da else hit
+            ends = list({(m["a"].x, m["a"].y): m["a"], (m["c"].x, m["c"].y): m["c"]}.values())
+            mid = ((a.x + c.x) / 2.0, (a.y + c.y) / 2.0)   # bodies overlap, no end on the other: where its nearer end projects
+            out += hit or [par(pt) for pt in ends if n["o"].HitTest(pt)] \
+                or [par(min(ends, key=lambda pt: math.hypot(pt.x - mid[0], pt.y - mid[1])))]
         return out
 
     changed = True
@@ -395,8 +404,12 @@ def dead_copper(b, protect=()):
             if not n["alive"] or n["o"].IsLocked():
                 continue
             if n["via"]:
-                k = len(n["pads"]) + sum(1 for y in n["nb"] if y in N and N[y]["alive"])
-                free = k <= 1 and not n["pads"]
+                live = [y for y in n["nb"] if y in N and N[y]["alive"]]
+                # no layer change left: at most one connection, or tracks of ONE layer that also touch each other (a short end
+                # piece and the next one both sit on the via's pad; W16 BT_INT_M's old via after its far side was re-laid)
+                free = not n["pads"] and (len(live) <= 1 or (
+                    len({N[y]["o"].GetLayer() for y in live}) == 1 and all(not N[y]["via"] for y in live)
+                    and all(any(z in N[y]["nb"] for z in live if z != y) for y in live)))
             else:
                 s = spots(n)
                 free = not s or max(s) - min(s) < 1e-6

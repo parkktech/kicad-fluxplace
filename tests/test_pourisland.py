@@ -194,3 +194,56 @@ def test_k15_a_rip_that_alone_lets_the_pour_reach_the_island_is_the_repair(tmp_p
     result = PI.repair(src, out, "GND", constraints=_cons(tmp_path))
     assert result["accepted"] and result["action"] == "rip" and result["ripped"] == {"SIG": 1}
     assert os.path.exists(out) and "SIG" in open(out).read() and vias(out) == 0
+
+
+def test_a_track_tied_to_the_fill_by_its_body_only_is_one_island_as_in_drc(tmp_path):
+    """W16 U418.3: a stub ended just outside the fill edge with its body in the fill. DRC calls that connected; the copper model
+    looked at centre-line ends only, called the island untied and the rung spent its tries on it."""
+    src = _sealed(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    tr = pcbnew.PCB_TRACK(b)
+    tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(12.06), pcbnew.FromMM(11)))    # fill edge at x = 12: the end is 0.06 mm outside it
+    tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(13.9), pcbnew.FromMM(11)))
+    tr.SetWidth(pcbnew.FromMM(0.2))
+    tr.SetLayer(b.GetLayerID("F.Cu"))
+    tr.SetNet(b.FindNet("GND"))
+    b.Add(tr)
+    tr2 = pcbnew.PCB_TRACK(b)
+    tr2.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(13.9), pcbnew.FromMM(11)))
+    tr2.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(13.9), pcbnew.FromMM(10)))
+    tr2.SetWidth(pcbnew.FromMM(0.2))
+    tr2.SetLayer(b.GetLayerID("F.Cu"))
+    tr2.SetNet(b.FindNet("GND"))
+    b.Add(tr2)
+    pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+    b.Save(src)
+    assert not [r for r in H.open_nets(src)["connections"] if r["net"] == "GND"]
+    M = H._model(src)
+    isl, omap = M.islands("GND")
+    pad = next(o for o in M.obs if o.kind == "pad" and o.net == "GND")
+    via = next(o for o in M.obs if o.kind == "via" and o.net == "GND")
+    assert omap[pad.id] == omap[via.id]
+    assert list(PI._untied(M.b, "GND")) and not list(PI._untied(M.b, "GND", M))   # no via in the outline, yet tied
+
+
+def test_a_pad_tied_only_by_its_surface_pour_gets_a_track_to_an_existing_via(tmp_path):
+    """W16 fragile pads (pourtie state `pour`): no via site of their own, the pour joins them to a via; link_pads adds the track."""
+    src = _sealed(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    for z in b.Zones():                                  # the F.Cu pour now reaches the via: the pad is tied, by the pour alone
+        if z.GetLayerName() == "F.Cu":
+            z.Outline().RemoveAllContours()
+            z.Outline().NewOutline()
+            for x, y in ((8, 8), (15, 8), (15, 12), (8, 12)):
+                z.Outline().Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+    b.Save(src)
+    assert not [r for r in H.open_nets(src)["connections"] if r["net"] == "GND"]
+    out = str(tmp_path / "out.kicad_pcb")
+    rows = PI.link_pads(src, out, [{"net": "GND", "ref": "", "pad": "1", "at": [10.0, 10.0]}], _cons(tmp_path))
+    assert rows[0]["state"] == "link" and os.path.exists(out), rows
+    M = H._model(out)
+    isl, omap = M.islands("GND", fills=False)            # pad and via are one island with the pours taken away
+    pad = next(o for o in M.obs if o.kind == "pad" and o.net == "GND")
+    via = next(o for o in M.obs if o.kind == "via" and o.net == "GND")
+    assert omap[pad.id] == omap[via.id] and H.open_nets(out)["open"] == H.open_nets(src)["open"]

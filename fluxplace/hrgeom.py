@@ -462,10 +462,12 @@ class Model:
         return False
 
     # -- same-net islands (pads, tracks, vias, zone fill) --
-    def islands(self, net):
-        """-> (list of island dicts {id, items:[Ob], zones:[(zone idx, layer)]}, map ob id -> island idx)."""
-        if net in self._isl:
-            return self._isl[net]
+    def islands(self, net, fills=True):
+        """-> (list of island dicts {id, items:[Ob], zones:[(zone idx, layer)]}, map ob id -> island idx).
+        fills=False: pads, tracks and vias only (what stays connected when the net's pours are gone)."""
+        ck = net if fills else (net, False)
+        if ck in self._isl:
+            return self._isl[ck]
         items = [o for o in self.obs if o.net == net and o.kind in ("pad", "track", "via")]
         nodes = list(range(len(items)))
         par = list(nodes)
@@ -491,27 +493,34 @@ class Model:
                     union(i, j)
         zpar = {}
         for zi, z in enumerate(self.zones):
-            if z["net"] != net:
+            if z["net"] != net or not fills:
                 continue
             for l in z["layers"]:
                 for fi, fpoly in enumerate(z["fills"].get(l) or []):
                     zpar[(zi, l, fi)] = len(par)
                     par.append(len(par))
         if zpar:
-            anchors = [(k, _anchors(o)) for k, o in enumerate(items)]
-            for (zi, l, fi), node in zpar.items():
-                fpoly = self.zones[zi]["fills"][l][fi]
-                bx0, by0, bx1, by1 = fpoly["bb"]
-                cand = [(k, a) for k, a in anchors if l in items[k].layers and items[k].bb[2] >= bx0 and items[k].bb[0] <= bx1 and items[k].bb[3] >= by0 and items[k].bb[1] <= by1]
-                if not cand:
-                    continue
-                P = np.array([pt for k, a in cand for pt in a])
-                ins = in_fill(P, fpoly)
-                pos = 0
-                for k, a in cand:
-                    if ins[pos:pos + len(a)].any():
-                        union(k, node)
-                    pos += len(a)
+            hit = set()
+
+            def tie(anchors):
+                for (zi, l, fi), node in zpar.items():
+                    fpoly = self.zones[zi]["fills"][l][fi]
+                    bx0, by0, bx1, by1 = fpoly["bb"]
+                    cand = [(k, a) for k, a in anchors if l in items[k].layers and items[k].bb[2] >= bx0 and items[k].bb[0] <= bx1 and items[k].bb[3] >= by0 and items[k].bb[1] <= by1]
+                    if not cand:
+                        continue
+                    P = np.array([pt for k, a in cand for pt in a])
+                    ins = in_fill(P, fpoly)
+                    pos = 0
+                    for k, a in cand:
+                        if ins[pos:pos + len(a)].any():
+                            union(k, node)
+                            hit.add(k)
+                        pos += len(a)
+            tie([(k, _anchors(o)) for k, o in enumerate(items)])
+            # KiCad ties a track or via to a fill when their copper overlaps, not only when a centre-line end lies in it (W16
+            # U418.3: a stub ending 0.03 mm outside the fill edge, its body in it, was a separate island here and tied in DRC)
+            tie([(k, _body(o)) for k, o in enumerate(items) if k not in hit and o.g[0] == "seg"])
         groups = {}
         for i in range(len(items)):
             groups.setdefault(find(i), {"items": [], "zones": []})["items"].append(items[i])
@@ -524,8 +533,8 @@ class Model:
         for g in isl:
             for o in g["items"]:
                 omap.setdefault(o.id, g["id"])
-        self._isl[net] = (isl, omap)
-        return self._isl[net]
+        self._isl[ck] = (isl, omap)
+        return self._isl[ck]
 
 
 def _anchors(o):
@@ -534,6 +543,13 @@ def _anchors(o):
     if g[0] == "seg":
         return [g[1], g[2]]
     return [_anchor(o)] + list(g[1][:: max(1, len(g[1]) // 8)])
+
+
+def _body(o):
+    """Probe points on the copper of a track / via just inside its edge (5 stations along it, 8 round each)."""
+    (ax, ay), (bx, by), r = o.g[1], o.g[2], o.g[3] * 0.95
+    ring = [(r * math.cos(k * math.pi / 4), r * math.sin(k * math.pi / 4)) for k in range(8)]
+    return [(ax + (bx - ax) * t / 4 + dx, ay + (by - ay) * t / 4 + dy) for t in range(5) for dx, dy in ring]
 
 
 def _anchor(o):

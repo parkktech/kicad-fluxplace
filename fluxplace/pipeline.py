@@ -758,6 +758,14 @@ def _st_route(c, n, board):
         pour_rec = PTI.repair(best, os.path.join(d, "pour_repaired.kicad_pcb"), ptd, workdir=d)
         shutil.copy(pour_rec["board"], best)
         _sidecar(board, best)
+        pour_only = [f for f in pour_rec.get("fragile", []) if f.get("state") == "pour"]
+        if pour_only:                                  # no via site of their own: a track to the nearest via of the net (guarded)
+            from . import pourisland as PIL
+            linked = os.path.join(d, "pour_linked.kicad_pcb")
+            pour_rec["links"] = PIL.link_pads(best, linked, pour_only, c.cons_path)
+            if os.path.exists(linked):
+                shutil.copy(linked, best)
+                _sidecar(board, best)
     with open(os.path.join(d, "planetie.txt"), "w") as fh:
         fh.write("\n".join(PT.lines(ptr)) + "\n")
     # D71cj D: rail corridor pours before the final measurement, so opens / verdict / owners describe the poured board
