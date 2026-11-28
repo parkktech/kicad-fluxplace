@@ -48,6 +48,7 @@ def params(cons):
             "rip_stubs": e.get("rip_fanout_stubs", True) is not False, "fb_trials": int(e.get("fallback_trials", 12)),
             "tight": e.get("tight_geometry", False) is True,
             "budget_s": float(e.get("budget_min", 20.0)) * 60,       # B11: wall budget of plan + fallback ladder ([pairlay] budget_min, 0 = off)
+            "trial": e.get("_trial") is True,                        # a fallback-ladder trial (pairfb._trial stamps it)
             "deadline": e.get("_deadline")}                         # B11: epoch run() stamps into the cons it hands to plan and to every trial
 
 
@@ -1256,7 +1257,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     best = one_pass(order0)
     if not plan_only:                                        # a plan claims no copper: nothing a retry or a rip could change
         _repair(best, info, rules, key, P, mk_ctx, near, plan_only, log)
-    if live:                                                 # B5 repair: only when a pair failed its plain lay, never upfront (+790 s on W16 for no gain)
+    if live and not P["trial"]:                              # B5 repair: only when a pair failed its plain lay, never upfront (+790 s on W16 for no gain);
+        # not in a ladder trial either: the main pass already asked the planner, each trial asked again for ~900 s per part (W16: 2700 s, no candidate)
         best = _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pass, cache, neg, _lay_pair, _apply, log)
     tried = {tuple(best["order"])}
     for _ in range(max(0, P["passes"])):
@@ -1307,6 +1309,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 if PL.check(new, [pc], net, clr, ())[0] < clr - 1e-6:
                     res["kill"].append((kind, o))
     res["escape"] = best.get("escape_report")
+    res["repair_warn"] = best.get("repair_warn", [])
     res["order"] = ["/".join(pr) for pr in best["order"]]
     res["secs"] = round(time.time() - t0, 1)
     return res
@@ -1316,20 +1319,34 @@ def _bad(c):
     return not (c["full"] or c["e"]["status"] == "kept")
 
 
+def _quality(c, limit):
+    """(vias, skew class) of a laid pair: class 0 = skew within the pair's limit, 1 = over it."""
+    e = c["e"]
+    return (sum(x.get("vias") or 0 for x in e.get("sections", [])), int((c.get("skew") or 0.0) > limit(e["pair"][0]) + 1e-9))
+
+
 def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
     """End-of-pass repair of the pairs the pass left unlaid, on the pass's own result (the pairs that are fine are not searched again).
-    Per round, the failed pairs F and the laid pairs S their failures name (same or a lower tier only; else: copper beside their
-    terminals) are taken off together; F is laid first, S after it, on a state without presets and reservations (all are released
-    at the end of a pass).  A trial is kept only when every ripped pair is complete again and at least one failed pair is laid,
-    so a round never leaves fewer pairs than it found.  When the joint trial is not kept, each failed pair is tried alone with its
-    own blockers.  Rounds repeat while one gains ([pairlay] repair_rounds, 0 = off); the stage deadline stops it."""
+    A trial takes the failed pairs F and a set S of laid pairs off together (same or a lower tier only), lays F first and S after
+    it on a state without presets and reservations (all are released at the end of a pass).  It is valid only when every ripped
+    pair is complete again and at least one failed pair is laid, so a round never leaves fewer pairs than it found.
+    S is tried smallest cause first: the pairs the failures NAME, then those plus the pairs whose copper runs beside the failed
+    terminals; when no joint trial is valid, each failed pair alone with the same two sets.
+    Quality guard: a ripped pair should not end worse than its first-pass lay (more vias, or skew over its limit when it was
+    within).  A valid trial without such a loss is kept at once; otherwise the next S is tried and the valid trial with the
+    smallest loss is kept, each loss logged as a WARN with its delta (a complete pair beats an open one).
+    Rounds repeat while one gains ([pairlay] repair_rounds, 0 = off); the stage deadline stops it."""
     import re
     dl = P.get("deadline")
     over = lambda: bool(dl and time.time() > dl)
     nfail = [1]
+    limit = None
+    first = {}                                               # pair -> quality of its first-pass lay
 
     def state(skip):
+        nonlocal limit
         ctx = mk_ctx()
+        limit = limit or ctx.get("limit") or (lambda net: 0.0)
         ctx["preset"], ctx["reserve"], ctx["left"] = {}, {}, lambda: 2 * max(1, nfail[0])
         for q in st["order"]:
             if q not in skip and not _bad(st["res"][q]):       # a half-laid pair's copper is never written: no obstacle here
@@ -1338,43 +1355,76 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
         return ctx
 
     def blockers(f):
+        """-> (the laid pairs the failure names, those + the ones beside the failed pair's terminals), each capped at repair_rip_max"""
         e = st["res"][f]["e"]
         txt = " | ".join([e.get("blocked_by", "")] + list(e.get("blockers", [])))
         cand = [g for g in st["order"] if g != f and st["res"][g]["full"] and st["res"][g]["nok"] and key[g][:2] >= key[f][:2]]
         hit = [g for g in cand if any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)]
         rest = sorted((g for g in cand if g not in hit and near(st["res"][g], f) <= P["near_mm"]), key=lambda g: near(st["res"][g], f))
-        return (hit + rest)[:max(0, P["rip_max"])]
+        n = max(0, P["rip_max"])
+        return hit[:n], (hit + rest)[:n]
 
     def trial(F, S, tag):
-        """F then S on the state without both -> True when kept"""
+        """F then S on the state without both -> {pair: result} when valid, else None"""
         ctx, new = state(set(F) | set(S)), {}
         for q in list(F) + list(S):
             if over():
-                return False
+                return None
             c = new[q] = _lay_pair(ctx, q, info[q], rules[q], plan_only)
             log(_lay_line(q, c, tag))
             if q in S and not c["full"]:
-                return False
+                return None
             if c["full"]:                                    # a half-laid pair's copper is never written
                 _apply(ctx, q, c, plan_only)
-        if not any(new[f]["full"] for f in F):
+        return new if any(new[f]["full"] for f in F) else None
+
+    def losses(new, S):
+        out = []
+        for g in S:
+            a = first.setdefault(g, _quality(st["res"][g], limit))
+            b = _quality(new[g], limit)
+            if b[0] > a[0] or b[1] > a[1]:
+                out.append((g, a, b))
+        return out
+
+    def attempt(F, sets, rnd):
+        """the rip sets in order; the first valid trial without a quality loss is kept, else the valid one with the smallest loss"""
+        best, seen = None, []
+        for S in sets:
+            S = [g for g in st["order"] if g in S]
+            if S in seen:
+                continue
+            seen.append(S)
+            new = trial(F, S, f"repair {rnd} " + (f"rip [{' '.join(g[0] for g in S)}] " if S else "retry "))
+            if new is None:
+                continue
+            ls = losses(new, S)
+            rank = (len(ls), sum(b[0] - a[0] for _g, a, b in ls))
+            if best is None or rank < best[0]:
+                best = (rank, new, ls)
+            if not ls:
+                break
+        if best is None:
             return False
-        st["res"].update(new)
+        for g, a, b in best[2]:
+            log(f"pairs: WARN repair {rnd}: {g[0]}/{g[1]} re-laid worse than its first lay: vias {a[0]} -> {b[0]}"
+                + (", skew now over its limit" if b[1] > a[1] else "") + " (kept: it completes " + ", ".join(f[0] for f in F if best[1][f]["full"]) + ")")
+        st["res"].update(best[1])
+        st.setdefault("repair_warn", []).extend({"pair": list(g), "vias": [a[0], b[0]], "skew_over": [a[1], b[1]]} for g, a, b in best[2])
         return True
 
     changed = False
-    for rnd in range(max(0, P["repair_rounds"])):
+    for rnd in range(1, max(0, P["repair_rounds"]) + 1):
         failed = [f for f in st["order"] if _bad(st["res"][f]) and info[f][2]]
         if not failed or over():
             break
         nfail[0] = len(failed)
         rip = {f: blockers(f) for f in failed}
-        S = [g for g in st["order"] if any(g in v for v in rip.values())]
-        tag = f"repair {rnd + 1} "
-        gained = trial(failed, S, tag + (f"rip [{' '.join(g[0] for g in S)}] " if S else "retry "))
-        if not gained and S and len(failed) > 1:               # the joint trial lost a ripped pair: one failed pair at a time
+        union = lambda k: [g for g in st["order"] if any(g in v[k] for v in rip.values())]
+        gained = attempt(failed, [union(0), union(1)], rnd)
+        if not gained and len(failed) > 1:                     # no joint trial is valid: one failed pair at a time
             for f in failed:
-                gained = trial([f], rip[f], tag + (f"rip [{' '.join(g[0] for g in rip[f])}] " if rip[f] else "retry ")) or gained
+                gained = attempt([f], list(rip[f]), rnd) or gained
         changed = changed or gained
         if not gained:
             break
@@ -1579,6 +1629,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     res = plan(board, cons_plan, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
            "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"), "escape": res.get("escape"),
+           "repair_warn": res.get("repair_warn", []),
            "plane_layers": res["plane_layers"], "pairs": []}
     B2 = res["B"]
     if out and not plan_only:

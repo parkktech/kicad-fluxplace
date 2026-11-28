@@ -240,6 +240,7 @@ def _trial(rep, out, cons_v, spec, run_fn, tag, state, log, src=None, victims=()
             r.setdefault("tried", []).append(f"{state}:memo")
         rep.setdefault("memo_skips", []).append(tag)
         return 0
+    cons_v = variant(cons_v, _trial=True)                     # pairs.plan: no escape planner in a trial (the main pass asked it)
     if dl_stage:
         cons_v = variant(cons_v, _deadline=trial_deadline(rep, {"deadline": dl_stage}))
     trial = os.path.join(d, f"fb-{tag}.kicad_pcb")
