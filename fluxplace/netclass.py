@@ -309,8 +309,9 @@ def protected_set(cons, names):
     names = sorted(names)
     nopair = C.not_pairs(cons)
     rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
-    try:
-        pairs = set(krtchain.pair_nets(cons, names, None))
+    try:                                                # `names` is every net of the board: a P/N tail with no partner is an active-low
+        from . import budget                            # plain signal (X_WAKE_N, X_LED_ACT_N under a [pairs.X_] prefix), never a leg
+        pairs = set(krtchain.pair_nets(cons, names, None)) & budget.pair_legs(names, cons, complete=True)
     except Exception:                                   # noqa: BLE001
         pairs = set()
     try:

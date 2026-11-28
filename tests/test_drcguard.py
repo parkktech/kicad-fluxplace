@@ -371,3 +371,10 @@ def test_drc_json_retries_once_when_kicad_cli_writes_no_report(tmp_path):
     cli.write_text("#!/bin/sh\nexit 3\n")
     with pytest.raises(RuntimeError, match=r"exited 3 with no report \(2 tries\)"):
         DG.drc_json(str(b), str(cli), 30)
+
+
+def test_protected_nets_active_low_net_without_a_partner_is_not_a_pair_leg():
+    """ledger 2026-11-28: PCIE_WAKE_N / ETH_LED_ACT_N under a [pairs.X_] prefix were R5-protected as pair legs (no _P net exists)."""
+    cons = {"pairs": {"PCIE_": {"skew_mm": 0.1}}}
+    names = ["PCIE_TX_P", "PCIE_TX_N", "PCIE_WAKE_N", "PCIE_CLKREQ_N", "GND"]
+    assert DG.protected_nets(cons, names) == {"PCIE_TX_P", "PCIE_TX_N"}

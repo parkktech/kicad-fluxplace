@@ -1273,9 +1273,73 @@ def _r_powerwiden(base, out, gaps, ctx):
     """PHASE3G G4.1: narrow rail copper widened in place (power.widen); no output when nothing widened."""
     from . import power as PW
     r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps), protect=set(ctx.get("protect") or ()))
+    dis = _widen_displace(out if os.path.exists(out) else base, out, gaps, ctx) if r["left_mm"] > 0 else None
     return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"],
-            "skipped": r["skipped"], "necks": len(r.get("necks") or []),
+            "skipped": r["skipped"], "necks": len(r.get("necks") or []), **({"displace": dis} if dis else {}),
             "unreached": {n: len(v) for n, v in (r.get("unreached") or {}).items()}}
+
+
+def _widen_displace(src, out, gaps, ctx):
+    """Narrow rail copper that widen left because signal copper of other nets sits against it (ledger 2026-11-28, W16 VBATT_IN):
+    power.displace removes exactly those unlocked tracks / vias (protected nets, rails and zone nets never), the rail is widened
+    into the room, the dangling remains of the removed runs are dropped and KRT re-routes the removed nets.  Tried at each
+    power.DISPLACE_FRACS width, widest first; a trial is kept only when no net is open that was not open before (the rung guard
+    then judges the board).  -> record | None (nothing to displace / no router)."""
+    from . import power as PW, railbranch as RB
+    if _krt_cmd(src, out, ["x"], ctx) is None:
+        return None
+    cp, nets, protect = ctx.get("cons_path"), _nets(gaps), set(ctx.get("protect") or ())
+    keep = protect | _zone_nets(src) | set(_rail_widths(src, ctx["cons"], signal_layers(src), 0.0))
+    before = _krt_open(src, cp)
+    rec = {"status": "nothing to displace", "tried": []}
+    tmps = [f"{out}.dis{k}.kicad_pcb" for k in range(3)]
+    try:
+        for frac in PW.DISPLACE_FRACS:
+            if _left(ctx) < 2 * ROUTER_FIXED_S or CX.expired(ctx.get("deadline")):
+                rec["status"] = "budget"
+                break
+            for t in tmps:
+                _clean_board(t)
+            d = PW.displace(src, ctx["cons"], tmps[0], nets=nets, frac=frac, keep=keep)
+            if not d["ripped"]:
+                continue
+            cur = tmps[0]
+            w = PW.widen(cur, ctx["cons"], tmps[1], nets=nets, protect=protect)
+            if os.path.exists(tmps[1]):
+                cur = tmps[1]
+            for n in d["ripped"]:
+                RB.drop_dangling(cur, n)
+            row = {"frac": frac, "ripped": d["ripped"], "widened_mm": w["widened_mm"]}
+            rec["tried"].append(row)
+            cmd = _krt_cmd(cur, tmps[2], sorted(d["ripped"]), ctx)
+            try:
+                with CX.phase(ctx.get("phase_file"), "router"):
+                    _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900), cwd=ctx["work"])
+            except subprocess.TimeoutExpired:
+                row["result"] = "krt timeout"
+                continue
+            if not os.path.exists(tmps[2]):
+                row["result"] = "krt no output"
+                continue
+            opened = sorted(_krt_open(tmps[2], cp) - before)
+            if opened:
+                row["result"] = "opens: " + ", ".join(opened[:6])
+                continue
+            row["result"] = "kept"
+            cur = tmps[2]
+            _clean_board(tmps[1])                          # the re-routed nets left the corridor: widen into the room they left
+            w2 = PW.widen(cur, ctx["cons"], tmps[1], nets=nets, protect=protect)
+            if os.path.exists(tmps[1]) and not (_krt_open(tmps[1], cp) - before):
+                cur, row["widened_mm"] = tmps[1], round(row["widened_mm"] + w2["widened_mm"], 3)
+            _copy(cur, out)
+            if src != out:
+                _sidecars(src, out)
+            rec["status"] = "ran"
+            break
+    finally:
+        for t in tmps:
+            _clean_board(t)
+    return rec
 
 
 def _r_padvias(base, out, gaps, ctx):

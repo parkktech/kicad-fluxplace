@@ -408,6 +408,17 @@ def run(c, n, board, runner=run_step):
         steps.append(("rails-pour", lambda s0, o0: lambda s, o: _rails_ladder(a, c, base, rails, pour_rail_nets, sig, s, o, xtra, ladder_rec, runner, spath)))
     if other_rail_nets:
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
+    early_widen = {}
+    if rail_nets:
+        def _rails_widen(s, o):                              # ledger 2026-11-28 (W16 VBATT_IN): a rail the ladder laid under its need is widened NOW,
+            try:                                             # while the corridor is free; after the plain step signal tracks sit against it
+                early_widen.update(PWR.widen_guarded(s, c.cons, o, nets=set(rail_nets)))
+            except Exception as e:                           # noqa: BLE001 - the laid rails stand as they are
+                early_widen["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+            if not os.path.exists(o):
+                shutil_copy(s, o)
+            return 0
+        steps.append(("rails-widen", lambda s, o: _rails_widen))
     from . import railbranch as RB                           # W46: rail branches at each connection's D71da width; the plain step skips rail nets
     try:
         branch_nets = [x for x in RB.branch_nets(c.cons, {x for x, _l in planes}) if in_scope(x)]
@@ -628,7 +639,7 @@ def run(c, n, board, runner=run_step):
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the re-cut
         mask["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
-                 "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets), "branch": branch_rec, "flow": flow_rec}
+                 "pour": pour, "widen": wid, "early_widen": early_widen, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets), "branch": branch_rec, "flow": flow_rec}
     left = RC.open_by_net(best)
     if rf_nets:
         from . import rfroute as RFR

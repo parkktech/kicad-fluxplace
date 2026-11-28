@@ -2002,7 +2002,7 @@ def _apply_lock_at(a, work, board):
     return out
 
 
-_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE", "FLUXPLACE_NESTED")
+_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE", "FLUXPLACE_NESTED", "FLUXPLACE_ROUTER_DIR", "FLUXPLACE_ROUTER_PY")
 
 
 def _ev_call(fn, *args, **kw):
@@ -2443,6 +2443,9 @@ def _run(a):
         try:
             router = RL.resolve(getattr(a, "router_dir", None), getattr(a, "router_py", None))
             a.router_dir, a.router_py = router["dir"], router["py"]
+            # the gate / close rungs resolve the router from the environment (routerloc.resolve()): without this a --router-dir run
+            # routed with the flagged router and repaired with the newest install (W16 route-11: route 0.24.1, gate rungs 0.23.9)
+            os.environ[RL.ENV_DIR], os.environ[RL.ENV_PY] = router["dir"], router["py"]
         except RuntimeError as e:
             if a.router_name != "freerouting":
                 raise SystemExit(f"pipeline: {e}")

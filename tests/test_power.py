@@ -502,3 +502,72 @@ def test_widen_repeats_until_the_per_run_targets_stop_moving(monkeypatch, tmp_pa
     rec = PW.widen("in", {}, out)
     assert calls == ["in", out, out], calls
     assert rec["passes"] == 2 and rec["widened_mm"] == 2.0, rec
+
+
+# ---- ledger 2026-11-28 (W16 VBATT_IN): widths between the ladder rungs, displaced neighbours ----------------------------------
+def test_widest_between_finds_the_grid_width_under_the_refused_rung():
+    assert PW._widest_between(lambda w: w <= 1.37, 1.0, 1.3825) == pytest.approx(1.35)
+    assert PW._widest_between(lambda w: False, 1.0, 1.3825) is None
+    assert PW._widest_between(lambda w: True, 1.0, 1.04) is None          # no grid width strictly between
+
+
+def test_widen_takes_a_width_between_the_rungs_when_half_the_need_does_not_fit(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    need = _g4_need()
+    d = 0.2 * need + 0.075 + 0.2                             # a foreign track that leaves room for 0.4 need: under the 0.5 rung
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 6 + d, 18, 6 + d, "SIG")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    w = min(w for w, *_ in _g4_tracks(out, "VBAT"))
+    assert 0.15 + 1e-6 < 0.4 * need - 0.06 <= w <= 0.4 * need + 1e-6
+
+
+def test_displace_removes_only_unlocked_foreign_copper_that_blocks_the_rail(tmp_path):
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    from test_routerules_syn import _board
+    need = _g4_need()
+    d = 0.2 * need + 0.075 + 0.2
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 6 + d, 18, 6 + d, "SIG"), (2, 11, 18, 11, "FAR")])
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.displace(src, G4_CONS, out, nets=["VBAT"])
+    assert rec["ripped"] == {"SIG": 1} and rec["segs"] == 1
+    assert not _g4_tracks(out, "SIG") and _g4_tracks(out, "FAR") and _g4_tracks(out, "VBAT")
+    PW.widen(out, G4_CONS, str(tmp_path / "w.kicad_pcb"))
+    assert min(w for w, *_ in _g4_tracks(str(tmp_path / "w.kicad_pcb"), "VBAT")) == pytest.approx(round(need, 4), abs=1e-3)
+    out2 = str(tmp_path / "out2.kicad_pcb")                  # a net the caller keeps (protected / rail / zone net) is never removed
+    assert PW.displace(src, G4_CONS, out2, nets=["VBAT"], keep={"SIG"})["ripped"] == {} and not os.path.exists(out2)
+    b = P.LoadBoard(src)                                     # nor is locked copper
+    [t.SetLocked(True) for t in b.GetTracks() if t.GetNetname() == "SIG"]
+    lk = str(tmp_path / "lk.kicad_pcb"); P.SaveBoard(lk, b)
+    import shutil; shutil.copy(src[:-10] + ".kicad_pro", lk[:-10] + ".kicad_pro")
+    out3 = str(tmp_path / "out3.kicad_pcb")
+    assert PW.displace(lk, G4_CONS, out3, nets=["VBAT"])["ripped"] == {} and not os.path.exists(out3)
+
+
+def test_widen_splits_a_long_track_at_a_blocker_near_one_end(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    need = _g4_need()
+    d = 0.2 * need + 0.075 + 0.2                             # a short foreign track beside the first millimetre only
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 6 + d, 3, 6 + d, "SIG")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    trs = _g4_tracks(out, "VBAT")
+    wide = [t for t in trs if abs(t[0] - round(need, 4)) < 1e-3]
+    assert len(trs) >= 2 and len(wide) == 1 and abs(wide[0][3] - wide[0][1]) >= 8.0      # at least half the track at the full width
+    assert min(t[0] for t in trs) < need - 1e-6
+    assert PW._clear_span([{"at": [6.0, 6.0]}, {"at": [12.0, 6.0]}], (2, 6), (18, 6), need) is None     # blocked along its length
+    assert PW._clear_span([{"at": [3.0, 6.0]}, {"kind": "angle_not_45_90"}], (2, 6), (18, 6), need) is None
+    d0, d1 = PW._clear_span([{"at": [2.5, 6.0]}, {"at": [17.5, 6.0]}], (2, 6), (18, 6), need)          # a blocker at each end: the middle
+    assert 0.5 < d0 < 3 and 13 < d1 < 15.5
+
+
+def test_widen_gives_a_track_shorter_than_the_pad_neck_the_pad_width(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), pads=[("U1", 2, 6, "VBAT")], tracks=[(2, 6, 2.7, 6, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert [t[0] for t in _g4_tracks(out, "VBAT")] == [pytest.approx(0.25)]              # pad 0.25 x 0.25: the stub takes 0.25, not 0.15

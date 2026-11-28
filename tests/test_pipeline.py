@@ -620,3 +620,14 @@ def test_go_limit_exceeded_or_unnamed_kind_keeps_the_gate_closed(tmp_path, monke
     seen = _stub_flow(monkeypatch, tmp_path, {})                    # no [go.route] key: the gate's own verdict, as before
     _gate_left(monkeypatch, tmp_path, [row(1)])
     assert PL.run(_args(tmp_path, _board(tmp_path), to_stage="close")) == 1 and seen[-1] == "route"
+
+
+def test_router_flag_reaches_the_gate_rungs_through_the_environment(tmp_path, monkeypatch):
+    """ledger 2026-11-28: --router-dir routed with the flagged router, the gate's rungs (routerloc.resolve()) took the newest install."""
+    seen = {}
+    monkeypatch.delenv("FLUXPLACE_ROUTER_DIR", raising=False)
+    _stub_flow(monkeypatch, tmp_path, {})
+    monkeypatch.setitem(PL.FUNCS, "route", lambda c, n, b: seen.update(d=os.environ.get("FLUXPLACE_ROUTER_DIR")) or {"verdict": "pass", "board": b, "line": "stub"})
+    a = _args(tmp_path, _board(tmp_path))
+    assert PL.run(a) == 0 and seen["d"] == os.path.abspath(a.router_dir)
+    assert "FLUXPLACE_ROUTER_DIR" not in os.environ                 # restored after the run

@@ -1271,6 +1271,13 @@ def _widen_once(board, cons, out, nets=None, protect=()):
         split = None
         if near is not None:                             # necked: the near part (step long) is the pad neck
             if L < step + 0.05:
+                # the whole track is the pad neck: it takes the pad's width where the probe accepts it (W16 J3: 1.84 mm at 1.0 on a 1.5 mm pad)
+                if (not locked and near_w > cur + 1e-6 and not _covered_by_twin(b, t, near_w)
+                        and _widen_ok(HR, M, net, lay, a, z, near_w, cur, t.m_Uuid.AsString())):
+                    t.SetWidth(pcbnew.FromMM(near_w))
+                    tot(net)["widened_mm"] += L
+                    rec["widened_mm"] += L
+                    changed += 1
                 tot(net)["left_mm"] += L
                 rec["left_mm"] += L
                 continue
@@ -1280,6 +1287,45 @@ def _widen_once(board, cons, out, nets=None, protect=()):
             lo, hi = split, far
         else:
             lo, hi = a, z
+            if not locked and L >= SPLIT_MIN_MM:         # what stops a wider track sits at its end(s): only the end(s) stay narrow
+                uid = t.m_Uuid.AsString()
+                for f in WIDEN_FRACS:
+                    Wt = round(need * f, 4)
+                    if Wt <= cur + 1e-6:
+                        break
+                    u = ((z[0] - a[0]) / L, (z[1] - a[1]) / L)
+                    pt = lambda d: (round(a[0] + u[0] * d, 4), round(a[1] + u[1] * d, 4))
+                    span, found, whole = (0.0, L), False, False
+                    for _ in range(4):                   # a finding names one point of its blocker: step past it until the part is clear
+                        m0, m1 = pt(span[0]), pt(span[1])
+                        if _widen_ok(HR, M, net, lay, m0, m1, Wt, cur, uid):
+                            found, whole = span != (0.0, L), span == (0.0, L)
+                            break
+                        sp = _clear_span(HR.probe_prims(M, net, [("seg", lay, m0, m1)], width=Wt, skip_ids=(uid,)).get("violations") or (),
+                                         m0, m1, Wt)
+                        if sp is None:
+                            break
+                        span = (span[0] + sp[0], span[0] + sp[1])
+                    if whole:                            # the whole track takes Wt (the ladder below finds it) ...
+                        break
+                    if not found:                        # ... or no clear part at this width: the next, narrower one
+                        continue
+                    for p0, p1 in ((a, m0), (m1, z)):    # the end pieces: their own tracks at the old width
+                        if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 1e-3:
+                            continue
+                        et = pcbnew.PCB_TRACK(b)
+                        et.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(p0[0]), pcbnew.FromMM(p0[1])))
+                        et.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(p1[0]), pcbnew.FromMM(p1[1])))
+                        et.SetWidth(t.GetWidth())
+                        et.SetLayer(t.GetLayer())
+                        et.SetNetCode(t.GetNetCode())
+                        b.Add(et)
+                        tot(net)["left_mm"] += math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+                        rec["left_mm"] += math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+                    t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(m0[0]), pcbnew.FromMM(m0[1])))
+                    t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(m1[0]), pcbnew.FromMM(m1[1])))
+                    lo, hi = m0, m1
+                    break
         ladder = [round(need * f, 4) for f in WIDEN_FRACS]
         run = cand.get(t.m_Uuid.AsString())
         wn = None
@@ -1295,6 +1341,9 @@ def _widen_once(board, cons, out, nets=None, protect=()):
             if _widen_ok(HR, M, net, lay, lo, hi, W, cur, t.m_Uuid.AsString()):
                 chosen = W
                 break
+        if chosen is None:                               # between the rungs: the widest WIDEN_STEP_MM multiple the probe accepts
+            chosen = _widest_between(lambda W: _widen_ok(HR, M, net, lay, lo, hi, W, cur, t.m_Uuid.AsString()),
+                                     cur, max((W for W in ladder if W > cur + 1e-6), default=cur))
         if chosen is None:
             tot(net)["left_mm"] += L
             rec["left_mm"] += L
@@ -1358,6 +1407,113 @@ def _widen_once(board, cons, out, nets=None, protect=()):
     return rec
 
 
+WIDEN_STEP_MM = 0.05
+SPLIT_MIN_MM = 3.0                    # a track at least this long is split when its blockers sit at one end
+SPLIT_REACH_MM = 0.6                  # room kept past the last blocker, beyond half the full width
+
+
+def _clear_span(viol, a, z, W):
+    """Ledger 2026-11-28 (W16 VBATT_IN: 8.6 mm stayed at 1.43 mm for a pad at its start and a via at its end): `viol` = what the probe
+    finds at width W on the track a-z.  -> (d0, d1) mm along the track, the part clear of every finding (each kept SPLIT_REACH_MM
+    plus half of W away), when that part is at least 2 mm and a third of the track; None when the track is blocked along its
+    length or a finding has no position (a geometry finding)."""
+    L = math.hypot(z[0] - a[0], z[1] - a[1])
+    if not viol or L <= 0 or any(not v.get("at") for v in viol):
+        return None
+    u = ((z[0] - a[0]) / L, (z[1] - a[1]) / L)
+    ts = [(v["at"][0] - a[0]) * u[0] + (v["at"][1] - a[1]) * u[1] for v in viol]
+    reach = W / 2 + SPLIT_REACH_MM
+    d0 = max([0.0] + [t + reach for t in ts if t <= L / 2])
+    d1 = min([L] + [t - reach for t in ts if t > L / 2])
+    return (round(d0, 3), round(d1, 3)) if d1 - d0 >= max(2.0, L / 3) else None
+
+
+def _widest_between(ok, cur, top):
+    """The widest width on the WIDEN_STEP_MM grid strictly between `cur` and `top` that `ok` accepts, None when there is none.
+    Ledger 2026-11-28 (W16 VBATT_IN): the ladder had three rungs (need, 0.75, 0.5 of it), so a 1.0 mm run that fitted 1.35 beside
+    its neighbours stayed at 1.0 because 1.38 did not fit.  Bisection: a wider track never has more room."""
+    n = int(math.floor((top - cur) / WIDEN_STEP_MM - 1e-9))
+    if n < 1:
+        return None
+    w = lambda k: round(cur + k * WIDEN_STEP_MM, 4)
+    lo, hi = 0, n                                        # lo: accepted (0 = the current width), hi + 1: refused (top was)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if ok(w(mid)):
+            lo = mid
+        else:
+            hi = mid - 1
+    return w(lo) if lo else None
+
+
+DISPLACE_FRACS = (1.0, 0.75, 0.5)    # widths (fractions of the run's need) the displace step clears room for, widest first
+
+
+def displace(board, cons, out, nets=None, frac=1.0, keep=()):
+    """Ledger 2026-11-28 (W16 VBATT_IN, 5 A): the plain router lays signal tracks against a rail that was laid narrow, so no later
+    widen has room (38.7 mm stayed at 1.0-1.38 mm of 2.77 beside CAN2_L / ETH_LED_ACT_N).  For every rail track of `nets` under its
+    need (the run's own solved need, as widen): when the ONLY things that stop it at `frac` x need are unlocked tracks / vias of
+    other nets (never a net in `keep`, a pad, a locked item, an edge or a keep-out), those items are removed.  The caller widens
+    and re-routes the removed nets (gaps._r_powerwiden); nothing here is kept unless its guard accepts the result.
+    Writes `out` only when something was removed. -> {"ripped": {net: items removed}, "segs": rail tracks given room}."""
+    import pcbnew
+    from . import gaps as GP, handroute as HR
+    rec = {"ripped": {}, "segs": 0, "frac": frac}
+    rails = _rails_on(board, cons, nets)
+    if not rails:
+        return rec
+    keep = set(keep or ()) | set(rails)
+    b = pcbnew.LoadBoard(board)
+    M = HR._model(board)
+    tg = _run_targets(board, cons)
+    key = lambda v: (v.get("kind"), v.get("item"), tuple(round(x, 1) for x in (v.get("at") or ())))
+    kill = {}
+    for t in b.GetTracks():
+        r = rails.get(t.GetNetname())
+        if t.GetClass() != "PCB_TRACK" or r is None:
+            continue
+        net, lay = t.GetNetname(), b.GetLayerName(t.GetLayer())
+        need, cur = _need_on(r, lay), pcbnew.ToMM(t.GetWidth())
+        s, e = t.GetStart(), t.GetEnd()
+        a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
+        own = tg.get((lay, round(a[0], 2), round(a[1], 2), round(z[0], 2), round(z[1], 2)))
+        if own is not None:
+            if own["cleared"]:
+                continue
+            need = own["need"]
+        W = round(need * frac, 4)
+        if W <= cur + 1e-6:
+            continue
+        uid, prim = t.m_Uuid.AsString(), [("seg", lay, a, z)]
+        old = {key(v) for v in HR.probe_prims(M, net, prim, width=cur, skip_ids=(uid,)).get("violations") or ()}
+        movable = lambda v: (v.get("kind") in ("clearance", "crossing") and v.get("id") and not v.get("locked") and v.get("net")
+                             and v["net"] not in keep and str(v.get("item", "")).split(" ")[0] in ("track", "via"))
+
+        def blockers(w):                                 # what stops width w and is not there at the current width
+            return [v for v in HR.probe_prims(M, net, prim, width=w, skip_ids=(uid,)).get("violations") or () if key(v) not in old]
+        new = blockers(W)
+        if new and not all(movable(v) for v in new):     # a pad / locked item / rail is in the way at W: the widest width only movable copper stops
+            W = _widest_between(lambda w: all(movable(v) for v in blockers(w)), cur, W)
+            new = blockers(W) if W else []
+        if not new:
+            continue
+        rec["segs"] += 1
+        for v in new:
+            kill[v["id"]] = v["net"]
+    if not kill:
+        return rec
+    for t in list(b.GetTracks()):
+        u = t.m_Uuid.AsString()
+        n = next((n for i, n in kill.items() if u.startswith(i)), None)
+        if n is not None and not t.IsLocked() and t.GetNetname() == n:
+            rec["ripped"][n] = rec["ripped"].get(n, 0) + 1
+            b.Delete(t)
+    if rec["ripped"]:
+        pcbnew.SaveBoard(out, b)
+        GP._sidecars(board, out)
+    return rec
+
+
 WIDEN_PASSES = 4
 
 
@@ -1378,7 +1534,8 @@ def widen(board, cons, out, nets=None, protect=()):
             for net, v in keep["by_net"].items():
                 d = rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
                 d["widened_mm"] = round(d["widened_mm"] + v["widened_mm"], 3)
-            rec["necks"] = keep["necks"] + [x for x in rec["necks"] if x not in keep["necks"]]
+            nk = lambda x: (x["net"], x["layer"], tuple(x["at"]))      # a neck a later pass widened again is one neck, at its last width
+            rec["necks"] = [x for x in keep["necks"] if nk(x) not in {nk(y) for y in rec["necks"]}] + rec["necks"]
         if not moved:
             break
         n += 1
