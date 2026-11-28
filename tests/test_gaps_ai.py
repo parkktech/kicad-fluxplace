@@ -1062,3 +1062,32 @@ def test_open_pour_packet_ends_are_the_island_and_its_neighbour(tmp_path, monkey
     assert (p["conn"]["a"]["x"], p["conn"]["a"]["y"]) == (12.0, 11.0) and (p["conn"]["b"]["x"], p["conn"]["b"]["y"]) == (15.0, 15.0)
     assert p["conn"]["straight_mm"] == 5.0 and seen["src_pt"] == (12.0, 11.0) and seen["dst_pt"] == (15.0, 15.0)
     assert p["sealed_by"] and p["sealed_by"][0]["id"] == "t1"
+
+
+def test_drc_raw_reuses_the_close_rounds_measure(tmp_path, monkeypatch):
+    """k17: a packet's DRC is the DRC drcguard.measure already ran on this board content, not a second kicad-cli."""
+    from fluxplace import handroute as HR, drcguard as DG
+    b = tmp_path / "in.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    monkeypatch.setattr(HR, "_DRC_MEMO", {})
+    monkeypatch.setattr(HR, "_drc_raw", lambda *a, **k: (_ for _ in ()).throw(AssertionError("second DRC")))
+    monkeypatch.setitem(DG._CACHE, (DG.content_sha(str(b)), DG.rules_sha(str(b)), "kicad-cli"), {"drc": {"violations": [], "unconnected_items": []}})
+    assert HR.drc_raw(str(b)) == {"violations": [], "unconnected_items": []}
+
+
+def test_fill_cache_second_round_loads_instead_of_refilling(tmp_path, monkeypatch):
+    from fluxplace import handroute as HR
+    import types
+    calls = []
+    monkeypatch.setattr(GP, "_PACKET_MODEL", {})
+    monkeypatch.setattr(HR, "_model", lambda path, cp, refill=True: (calls.append((os.path.basename(path), refill)),
+                                                                     types.SimpleNamespace(b=object()))[1])
+    import pcbnew
+    monkeypatch.setattr(pcbnew, "SaveBoard", lambda p, b: open(p, "w").write("(kicad_pcb)"))
+    b = tmp_path / "in.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    d = str(tmp_path / "fc")
+    GP._packet_model(str(b), None, d)
+    GP._PACKET_MODEL.clear()                         # a new process
+    GP._packet_model(str(b), None, d)
+    assert [r for _, r in calls] == [True, False] and len(os.listdir(d)) == 1

@@ -81,6 +81,11 @@ def drc_raw(board, kicad_cli="kicad-cli", timeout=600):
     key = (kicad_cli, board_sha(board))
     if key in _DRC_MEMO:
         return copy.deepcopy(_DRC_MEMO[key])
+    from . import drcguard as DG                    # k17: the close round's own DRC of this board (same refilled, completed run)
+    p = os.path.abspath(board)
+    hit = DG._CACHE.get((DG.content_sha(p), DG.rules_sha(p), kicad_cli))
+    if hit and hit.get("drc") is not None:
+        return copy.deepcopy(hit["drc"])
     raw = _drc_raw(board, kicad_cli, timeout)
     while len(_DRC_MEMO) >= 2:
         _DRC_MEMO.pop(next(iter(_DRC_MEMO)))

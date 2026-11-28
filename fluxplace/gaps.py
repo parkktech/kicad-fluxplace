@@ -1767,16 +1767,43 @@ def _feed(do, target, ok, why, before, after):
 
 
 _PACKET_MODEL = {}
+FILL_CACHE_KEEP = 2
 
 
-def _packet_model(base, cp):
-    """The refilled handroute model of `base`, kept for the packets of one round (key: board+rules sha, constraints path)."""
+def _packet_model(base, cp, cache_dir=None):
+    """The refilled handroute model of `base`, kept for the packets of one round (key: board+rules sha, constraints path).
+    k17: with `cache_dir` the refilled board is also saved there (<sha>.kicad_pcb + sidecars), so the next round on the same
+    board (a rung child is a new process) loads the fills instead of refilling the zones (10-12 s); the fills round-trip
+    exactly (fill sizes and areas compared on W16/k11)."""
+    import pcbnew
     from . import handroute as HR
-    key = (HR.board_sha(base), cp)
-    if key not in _PACKET_MODEL:
-        _PACKET_MODEL.clear()
-        _PACKET_MODEL[key] = HR._model(base, cp)
-    return _PACKET_MODEL[key]
+    sha = HR.board_sha(base)
+    key = (sha, cp)
+    if key in _PACKET_MODEL:
+        return _PACKET_MODEL[key]
+    _PACKET_MODEL.clear()
+    hit = os.path.join(cache_dir, sha + ".kicad_pcb") if cache_dir else None
+    if hit and os.path.exists(hit):
+        try:
+            _PACKET_MODEL[key] = HR._model(hit, cp, refill=False)
+            return _PACKET_MODEL[key]
+        except Exception as e:                      # noqa: BLE001 - a bad cache entry is a miss
+            print(f"ai: fill cache unusable ({e})", file=sys.stderr)
+    M = _PACKET_MODEL[key] = HR._model(base, cp)
+    if hit:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            tmp = hit + ".tmp.kicad_pcb"
+            pcbnew.SaveBoard(tmp, M.b)
+            os.replace(tmp, hit)
+            _clean_board(tmp)                       # SaveBoard also wrote a project beside the temp name
+            _sidecars(base, hit)
+            old = sorted(glob.glob(os.path.join(cache_dir, "*.kicad_pcb")), key=os.path.getmtime)
+            for q in old[:max(0, len(old) - FILL_CACHE_KEEP)]:
+                _clean_board(q)
+        except Exception as e:                      # noqa: BLE001 - the cache is an optimisation only
+            print(f"ai: fill cache not written ({e})", file=sys.stderr)
+    return M
 
 
 def gap_packet(base, gap, ctx, sid=None):
@@ -1801,7 +1828,7 @@ def gap_packet(base, gap, ctx, sid=None):
         except Exception:
             raw = None
         try:
-            M = _packet_model(base, cp)             # ONE refilled model for open_nets, both windows and suggest
+            M = _packet_model(base, cp, os.path.join(ai_dir, "fillcache") if ai_dir else None)             # ONE refilled model for open_nets, both windows and suggest
         except Exception as e:                      # noqa: BLE001 - unreadable board: each call then reports its own failure
             print(f"ai: packet model unavailable: {e}", file=sys.stderr)
         conns = HR.open_nets(base, constraints=cp, raw=raw, M=M)["connections"]
