@@ -390,3 +390,11 @@ def test_pmap_deadline_returns_none_for_unfinished_calls_and_never_reruns():
 def test_escape_cross_diagnostic_is_off_by_default():
     from fluxplace import pairescape as PE
     assert PE.params({})["cross"] is False and PE.params({"pairlay": {"escape_cross": True}})["cross"] is True
+
+
+def test_escape_batch_start_emits_a_progress_event():
+    """2026-11-27: a probe batch can run minutes; its start is a progress event so the stall watch sees work, not silence."""
+    import inspect
+    from fluxplace import pairescape as PE
+    src = inspect.getsource(PE.plan)
+    assert 'EV.emit("progress", "pairs", step=f"escape' in src and src.index("probing") < src.index("got = pmap(")

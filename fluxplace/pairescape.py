@@ -569,6 +569,8 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     break
                 batch = cands[b0:b0 + W]
                 escs = [_escape_of(asg, info) for asg in batch]
+                EV.emit("progress", "pairs", step=f"escape {'/'.join(hood)}: probing {len(batch)} candidate(s) {b0 + 1}-{b0 + len(batch)} of "
+                        f"{len(cands)} ({round(time.time() - t0)} of {round(p['budget_s'])} s)")
                 got = pmap(ghost, [(vset, esc, rsv) for esc, rsv in escs], W, deadline=t0 + p["budget_s"])
                 for asg, (esc, rsv), res in zip(batch, escs, got):
                     if res is None or time.time() - t0 > p["budget_s"]:
