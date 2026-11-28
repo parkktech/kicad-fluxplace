@@ -4,7 +4,7 @@
   "confidence": "high",
   "date": "2026-11-27",
   "direction": "min",
-  "function": "Retrieved 2026-11-27. The general row says '\u22670.20mm'. For 2 oz multilayer the page says '0.254 mm or above'.",
+  "function": "Retrieved 2026-11-27. The general row says '≧0.20mm'. For 2 oz multilayer the page says '0.254 mm or above'.",
   "hard": 0.15,
   "interface": "jlcpcb-6l",
   "rule": "fab_pth_annular_min",
@@ -24,14 +24,14 @@
   "confidence": "medium",
   "date": "2026-11-27",
   "direction": "min",
-  "function": "Retrieved 2026-11-27. The Standard table has no separate value for PTH or component holes; its only annular ring row covers vias. The value used is the Advanced table's Normal (no-surcharge) tier for 35um copper. 18um copper gives Normal \u22658mil (0.203) and Medium \u22656mil (0.152). Medium 35um \u22658mil (0.2",
+  "function": "Retrieved 2026-11-27. The Standard table has no separate value for PTH or component holes; its only annular ring row covers vias. The value used is the Advanced table's Normal (no-surcharge) tier for 35um copper. 18um copper gives Normal ≥8mil (0.203) and Medium ≥6mil (0.152). Medium 35um ≥8mil (0.2",
   "hard": null,
   "interface": "pcbway-6l",
   "rule": "fab_pth_annular_min",
   "sources": [
    {
     "page": "Advanced PCB table, row 17 'Minimum weld ring (outer layer)', 35um copper, compo",
-    "quote": "component hole Normal \"\u226510mil\"; Medium \"\u22658mil\"",
+    "quote": "component hole Normal \"≥10mil\"; Medium \"≥8mil\"",
     "url": "https://www.pcbway.com/capabilities.html"
    }
   ],
@@ -64,7 +64,7 @@
   "confidence": "high",
   "date": "2026-11-27",
   "direction": "min",
-  "function": "Retrieved 2026-11-27. Advanced table, Normal tier, 35um copper: inner '\u22654/5 mil' (0.127 mm space), outer '\u22655/6 mil' (0.152 mm space). Medium tier inner 35um is '\u22654/4 mil'. The tier wording suggests these extra limits apply under the advanced process, not standard orders.",
+  "function": "Retrieved 2026-11-27. Advanced table, Normal tier, 35um copper: inner '≥4/5 mil' (0.127 mm space), outer '≥5/6 mil' (0.152 mm space). Medium tier inner 35um is '≥4/4 mil'. The tier wording suggests these extra limits apply under the advanced process, not standard orders.",
   "hard": 0.1,
   "interface": "pcbway-6l",
   "rule": "fab_space_min",
@@ -104,7 +104,7 @@
   "confidence": "high",
   "date": "2026-11-27",
   "direction": "min",
-  "function": "Retrieved 2026-11-27. The Standard table gives one value for all layers. The Advanced table, Normal (no-surcharge) tier, splits by layer, before compensation: inner 35um copper '\u22654/5 mil', i.e. 0.1 mm track; outer 35um copper '\u22655/6 mil', i.e. 0.127 mm track. So outer layers on 1oz copper can be take",
+  "function": "Retrieved 2026-11-27. The Standard table gives one value for all layers. The Advanced table, Normal (no-surcharge) tier, splits by layer, before compensation: inner 35um copper '≥4/5 mil', i.e. 0.1 mm track; outer 35um copper '≥5/6 mil', i.e. 0.127 mm track. So outer layers on 1oz copper can be take",
   "hard": 0.1,
   "interface": "pcbway-6l",
   "rule": "fab_track_min",
@@ -150,7 +150,7 @@
   "confidence": "medium",
   "date": "2026-11-27",
   "direction": "min",
-  "function": "Retrieved 2026-11-27. Advanced table, row 17 'Minimum weld ring (outer layer)', 35um copper, via hole: Normal '\u22655mil' (0.127), Medium '\u22654mil' (0.102). The Standard table value (0.15) is the binding one for standard orders.",
+  "function": "Retrieved 2026-11-27. Advanced table, row 17 'Minimum weld ring (outer layer)', 35um copper, via hole: Normal '≥5mil' (0.127), Medium '≥4mil' (0.102). The Standard table value (0.15) is the binding one for standard orders.",
   "hard": 0.127,
   "interface": "pcbway-6l",
   "notes": "hard = Advanced table Normal tier (5 mil, no extra charge, == fabcaps via_annular_min); recommended = Standard table headline 0.15 mm (6 mil). Standard-table 0.15 is what the house prints as its minimum for standard orders.",
@@ -229,20 +229,39 @@
   "unit": "mm"
  },
  "pair_skew:pcie": {
-  "basis": "guidance-gate",
-  "confidence": "high",
+  "basis": "physics",
+  "confidence": "low",
   "date": "2026-11-27",
-  "emc_note": "PRACTICAL GATE: every primary vendor source says 5 mil; no spec-break figure found. Label: guidance used as the hard gate.",
-  "function": "Intra-pair within 5 mil, whole-route budget; PCI-SIG has no public PCB number.",
+  "emc_note": "Over the 5 mil vendor guidance but inside the hard limit: eye/jitter margin shrinks and P/N mismatch converts to common mode (EMC); tune when routing allows.",
+  "function": "Gen2 5 GT/s, UI 200 ps: P/N skew is deterministic jitter + mode conversion; receiver eye margin is the limit. All vendor 5 mil figures are guidance (TARGET-class), not a spec break.",
   "guidance": [
    0.127,
    0.127
   ],
-  "hard": 0.127,
+  "hard": 2.8,
   "interface": "pcie",
-  "notes": "",
+  "notes": "hard = 10 % UI physics assumption (no sourced spec break); 5 mil = vendor guidance/target",
   "rule": "pair_skew",
+  "physics": {
+   "fraction": 0.1,
+   "fraction_is": "ASSUMPTION (lead 2026-11-27): hard skew = 10 % of one UI; no PCI-SIG/USB-IF public PCB intra-pair number found",
+   "ps_per_mm": 7.1,
+   "ps_per_mm_from": "TI SLLA500 p.5: 150 ps/in microstrip, 180 ps/in stripline FR4 -> 5.9..7.1 ps/mm; slowest used = fewest mm",
+   "result": "0.10 x 200 ps = 20 ps / 7.1 ps/mm = 2.8 mm",
+   "symbol_from": "PCIe Gen2 5 GT/s -> UI 200 ps",
+   "symbol_ns": 0.2
+  },
   "sources": [
+   {
+    "page": "sec 4 p.5",
+    "quote": "typical propagation delay numbers for a microstrip in FR4 of 150 ps/in (a stripline of 180 ps/in)",
+    "url": "https://www.ti.com/lit/pdf/slla500"
+   },
+   {
+    "page": "sec 2.2 item 3",
+    "quote": "Make sure intra-pair skew is within 5 mils for the PCIe standard. There is no need to match inter-pair skew.",
+    "url": "https://www.ti.com/document-viewer/lit/html/SLAAE45/GUID-AF76C6A7-3558-4E3F-9A94-6024A608B382"
+   },
    {
     "page": "sec 13-14 p.7",
     "quote": "has to be kept within 5 mils",
@@ -252,6 +271,11 @@
     "page": "sec 2.3.1 p.8",
     "quote": "ideally within 0.1 mm",
     "url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf"
+   },
+   {
+    "page": "sec 3.3.2 Table 3-11",
+    "quote": "These parameters are recommendations only, intended to get the design close to success prior to simulation.",
+    "url": "https://www.ti.com/document-viewer/lit/html/SPRACP4A/GUID-883F4793-C7A5-4396-B006-50B3094FE550"
    }
   ],
   "target": 0.1,
@@ -306,20 +330,34 @@
   "unit": "mm"
  },
  "pair_skew:usb3": {
-  "basis": "guidance-gate",
-  "confidence": "high",
+  "basis": "physics",
+  "confidence": "low",
   "date": "2026-11-27",
-  "emc_note": "PRACTICAL GATE: every primary vendor source says 5 mil; no spec-break figure found. Label: guidance used as the hard gate.",
-  "function": "5 Gb/s, 200 ps UI: every primary vendor source gives 5 mil.",
+  "emc_note": "Over the 5 mil vendor guidance but inside the hard limit: eye/jitter margin shrinks and P/N mismatch converts to common mode (EMC); tune when routing allows.",
+  "function": "5 Gb/s, UI 200 ps: same physics as PCIe Gen2; USB-IF publishes no PCB intra-pair number. 5 mil = vendor guidance/target.",
   "guidance": [
    0.127,
    0.127
   ],
-  "hard": 0.127,
+  "hard": 2.8,
   "interface": "usb3",
-  "notes": "",
+  "notes": "hard = 10 % UI physics assumption (no sourced spec break); 5 mil = vendor guidance/target",
   "rule": "pair_skew",
+  "physics": {
+   "fraction": 0.1,
+   "fraction_is": "ASSUMPTION (lead 2026-11-27): hard skew = 10 % of one UI; no PCI-SIG/USB-IF public PCB intra-pair number found",
+   "ps_per_mm": 7.1,
+   "ps_per_mm_from": "TI SLLA500 p.5: 150 ps/in microstrip, 180 ps/in stripline FR4 -> 5.9..7.1 ps/mm; slowest used = fewest mm",
+   "result": "0.10 x 200 ps = 20 ps / 7.1 ps/mm = 2.8 mm",
+   "symbol_from": "USB 3.0 Gen1 5 Gb/s -> UI 200 ps",
+   "symbol_ns": 0.2
+  },
   "sources": [
+   {
+    "page": "sec 4 p.5",
+    "quote": "typical propagation delay numbers for a microstrip in FR4 of 150 ps/in (a stripline of 180 ps/in)",
+    "url": "https://www.ti.com/lit/pdf/slla500"
+   },
    {
     "page": "sec 5.4 p.19",
     "quote": "5 mil intra-pair",
@@ -354,12 +392,55 @@
    {
     "url": "https://www.isola-group.com/pcb-laminates-prepreg/fr406-laminate-and-prepreg/",
     "page": "Typical Values, Relative Thermal Index (RTI), UL 796",
-    "quote": "Relative Thermal Index (RTI) 130 \u00b0C"
+    "quote": "Relative Thermal Index (RTI) 130 °C"
    }
   ],
   "notes": "k15 2026-11-27; retrieved by web fetch. Revision note on the page: 'Change MOT to RTI 5/19'.",
   "unverified": [
    "the JLCPCB 6-layer laminate grade and its own RTI (Nan Ya / KB / Shengyi FR-4 are typically RTI 130 C)"
   ]
+ },
+ "pair_skew:pcie_refclk": {
+  "basis": "physics",
+  "confidence": "low",
+  "date": "2026-11-27",
+  "emc_note": "Over the 5 mil vendor guidance but inside the hard limit: eye/jitter margin shrinks and P/N mismatch converts to common mode (EMC); tune when routing allows.",
+  "function": "100 MHz HCSL REFCLK: skew is a small fraction of the 10 ns period and breaks nothing at 20 ps; no source gives a REFCLK-specific limit, so the data-pair physics value is used (conservative).",
+  "guidance": [
+   0.127,
+   0.127
+  ],
+  "hard": 2.8,
+  "interface": "pcie_refclk",
+  "notes": "same as pcie data pair; REFCLK-specific number not found",
+  "rule": "pair_skew",
+  "physics": {
+   "fraction": 0.1,
+   "fraction_is": "ASSUMPTION (lead 2026-11-27): hard skew = 10 % of one UI; no PCI-SIG/USB-IF public PCB intra-pair number found",
+   "ps_per_mm": 7.1,
+   "ps_per_mm_from": "TI SLLA500 p.5: 150 ps/in microstrip, 180 ps/in stripline FR4 -> 5.9..7.1 ps/mm; slowest used = fewest mm",
+   "result": "0.10 x 200 ps = 20 ps / 7.1 ps/mm = 2.8 mm",
+   "symbol_from": "REFCLK 100 MHz HCSL (10 ns period); gated like the 5 GT/s data pair UI 200 ps because TI TUSB73x0 applies the data-link routing rules to REFCLK",
+   "symbol_ns": 0.2
+  },
+  "sources": [
+   {
+    "page": "sec 4 p.5",
+    "quote": "typical propagation delay numbers for a microstrip in FR4 of 150 ps/in (a stripline of 180 ps/in)",
+    "url": "https://www.ti.com/lit/pdf/slla500"
+   },
+   {
+    "page": "sec PCI Express Reference Clock Input",
+    "quote": "reference clock routing rules match the 5 Gb/s link routing rules",
+    "url": "https://www.ti.com/document-viewer/lit/html/SLLU149E/pci-express-reference-clock-input-sllu1495850"
+   },
+   {
+    "page": "sec 2.2 item 3",
+    "quote": "Make sure intra-pair skew is within 5 mils for the PCIe standard. There is no need to match inter-pair skew.",
+    "url": "https://www.ti.com/document-viewer/lit/html/SLAAE45/GUID-AF76C6A7-3558-4E3F-9A94-6024A608B382"
+   }
+  ],
+  "target": 0.127,
+  "unit": "mm"
  }
 }
