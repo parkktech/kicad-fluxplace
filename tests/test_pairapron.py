@@ -55,7 +55,7 @@ def test_part_in_front_of_two_neighbouring_pairs_fails_the_placement_gate_with_t
     assert [x["code"] for x in f] == ["PAIR_ESCAPE_BLOCKED"] and f[0]["level"] == "FAIL" and f[0]["refs"] == ["U1", "Y1"]
     assert f[0]["value"] == 2 and f[0]["pins"] == ["U1.1", "U1.2", "U1.3", "U1.4"]
     need = ES.pair_aprons(B, NC.classify(B, {}, None), CLR, VIA)[0]["depth"]
-    assert abs(need - D2) < 1e-6                                   # two staggered via rows
+    assert abs(need - D2) < 1e-6                                   # two pairs in the chain: a via row each
     assert f[0]["moves"] == [{"ref": "Y1", "dir": "S", "mm": 0.6}]
     all_f, card = PR.run(B, {}, None)                              # the gate carries it, and the score counts it
     assert any(x["code"] == "PAIR_ESCAPE_BLOCKED" for x in all_f) and card["counts"]["PAIR_ESCAPE_BLOCKED"] == 1
@@ -75,6 +75,16 @@ def test_lone_pair_needs_one_via_row(tmp_path):
 def test_part_of_the_pair_itself_and_a_part_beside_the_pins_are_no_blockers(tmp_path):
     assert findings(tmp_path, hub(PAIRS1) + xtal(0.3, n1="USB1_DM", n2="OUT", ref="R1"))[1] == []      # series part on the pair
     assert findings(tmp_path, hub(PAIRS1) + xtal(0.3, x=51.5))[1] == []                               # in front of plain pins
+
+
+def test_each_pair_of_a_chain_adds_a_via_row(tmp_path):
+    nets = ["USB1_DM", "USB1_DP", "USB2_DM", "USB2_DP", "USB3_DM", "USB3_DP", "S6", "S7"]
+    body = hub(nets) + G.two("U4", 20, 30, "USB3_DM", "USB3_DP")
+    B = RD.load(G.board(tmp_path, body))
+    ap = ES.pair_aprons(B, NC.classify(B, {}, None), CLR, VIA)
+    assert [(a["nets"][0], a["rows"]) for a in ap] == [("USB1_DM", 3), ("USB2_DM", 3), ("USB3_DM", 3)]
+    assert all(abs(a["depth"] - (CLR + 3 * (VIA + CLR))) < 1e-6 for a in ap)
+    assert findings(tmp_path, body + xtal(D2 + 0.05))[1] != [] and findings(tmp_path, body + xtal(CLR + 3 * (VIA + CLR) + 0.01))[1] == []
 
 
 def test_ready_and_gapmap_own_the_code():

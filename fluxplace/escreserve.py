@@ -121,13 +121,13 @@ def pair_aprons(B, cls, clr, via):
     """Pair escape aprons: the copper-free room in front of the two pins of a controlled pair on one part, without which the coupled
     pair cannot leave them (it can neither turn nor drop its via pair).  One per pair and part, for SMD pins that leave on the same
     side: {ref, nets, pins, dir, side (0 left / 1 top / 2 right / 3 bottom), layers, rows, depth, edge, rect, allow}.
-      depth = clearance + rows x (via + clearance): one via row for a lone pair; two (staggered) rows when another pair's pins
-              stand within one via pitch on the same side (pin pitch below via pitch: neighbouring via pairs cannot share a row)
+      depth = clearance + rows x (via + clearance); rows = the pairs standing in one chain on that side, each less than a
+              via pair's width (two via pitches) from the next: their via pairs cannot share a row, each pair gets its own
       rect  = from the pads' outer edge `depth` outward, as wide as the two pads (a pad beside it does not stop a straight exit)
       allow = parts with a pad on either net (series / ESD / choke parts belong to the pair)
     A pair whose apron holds another pad of its own part (inner rows) has none: it leaves through the part's own field.
-    Calibration (W16 U300, 0.5 mm pitch, four USB pairs in a row, via 0.46 / clearance 0.127): pairs --plan-only fails all three
-    open pairs at 0.70 mm of room, one at 1.00 mm, none at 1.30 mm (two rows = 1.30)."""
+    Calibration (W16 U300, 0.5 mm pitch, four USB pairs in a row, one laid, via 0.46 / clearance 0.127 -> depth 2.48): the pairs
+    stage lays 0 of the 3 open pairs at 0.70 mm of room, 1 at 1.35, 2 at 1.70 and 1.90, all 3 at 2.50 and with the apron empty."""
     on = {}
     for p in B["pads"]:
         if p["net"]:
@@ -159,10 +159,17 @@ def pair_aprons(B, cls, clr, via):
                          "side": (2 if d[0] > 0 else 0) if d[0] else (3 if d[1] > 0 else 1), "layers": set(p["layers"]),
                          "lo": min(lat(t) - half(t) for t in (p, q)), "hi": max(lat(t) + half(t) for t in (p, q)),
                          "edge": max(dep(t) + ext(t) for t in (p, q)), "allow": (on.get(p["net"], set()) | on.get(q["net"], set())) - {ref}})
-        for r in recs:
-            near = any(o is not r and o["dir"] == r["dir"] and o["layers"] & r["layers"] and abs(o["edge"] - r["edge"]) <= 0.3
-                       and max(o["lo"], r["lo"]) - min(o["hi"], r["hi"]) < pv for o in recs)
-            r["rows"] = 2 if near else 1
+        for r in recs:                                   # the chain of pairs on this side with less than a via pair's width between neighbours
+            chain, grew = [r], True
+            while grew:
+                grew = False
+                for o in recs:
+                    if not any(o is c for c in chain) and any(
+                            o["dir"] == c["dir"] and o["layers"] & c["layers"] and abs(o["edge"] - c["edge"]) <= 0.3
+                            and max(o["lo"], c["lo"]) - min(o["hi"], c["hi"]) < 2 * pv for c in chain):
+                        chain.append(o)
+                        grew = True
+            r["rows"] = len(chain)
             r["depth"] = clr + r["rows"] * pv
             d, e = r["dir"], r["edge"]
             a, b = sorted((e * (d[0] or d[1]), (e + r["depth"]) * (d[0] or d[1])))
