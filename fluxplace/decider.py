@@ -208,9 +208,9 @@ def board_lines(board, d):
             return path
         B = RD.load(board)
         rows = [{"kind": "seg", "net": x["net"], "layer": x["layer"], "a": [round(v, 4) for v in x["a"]], "b": [round(v, 4) for v in x["b"]],
-                 "w": x["w"], "locked": x.get("locked", False), "id": x.get("id")} for x in B["segs"]]
+                 "w": x["w"], "locked": x.get("locked", False), "id": (x.get("uuid") or "")[:8] or None} for x in B["segs"]]
         rows += [{"kind": "via", "net": x["net"], "at": [round(x["x"], 4), round(x["y"], 4)], "d": x["d"], "drill": x["drill"],
-                  "locked": x.get("locked", False)} for x in B["vias"]]
+                  "locked": x.get("locked", False), "id": (x.get("uuid") or "")[:8] or None} for x in B["vias"]]
         rows += [{"kind": "pad", "ref": x.get("ref"), "num": x.get("num"), "net": x.get("net"), "at": [round(x["x"], 4), round(x["y"], 4)],
                   "half": [x.get("ex"), x.get("ey")], "layers": sorted(x.get("layers") or ())} for x in B["pads"]]
         os.makedirs(d, exist_ok=True)

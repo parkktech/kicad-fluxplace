@@ -278,14 +278,16 @@ def load(path, track=None, clearance=None, project=None):
             x, y = _f(n, "at")
             vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0], "drill": _f(n, "drill", 1)[0],
                          "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n),
-                         "td": _teardrop_flags(n)[0], "rm_unused": _teardrop_flags(n)[1]})
+                         "td": _teardrop_flags(n)[0], "rm_unused": _teardrop_flags(n)[1],
+                         "uuid": (BF._atoms(BF._first(n, "uuid")) or [""])[0]})
         else:
             sx, sy = _f(n, "start")
             ex, ey = _f(n, "end")
             segs.append({"net": net, "a": (sx, sy), "b": (ex, ey),
                          "w": _f(n, "width", 1)[0],
                          "mid": tuple(_f(n, "mid")) if n[0] == "arc" else None,
-                         "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0], "locked": _locked(n)})
+                         "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0], "locked": _locked(n),
+                         "uuid": (BF._atoms(BF._first(n, "uuid")) or [""])[0]})
 
     xs, ys, edge = [], [], []
     for g in root:

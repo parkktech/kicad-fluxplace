@@ -1,4 +1,5 @@
 """k11 (W16 route-9 close, 12 opens): the rung changes that closed them on the stored board, unit-tested with stubs."""
+import json
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fluxplace import critroute as CR, gaps as GP, handroute as HR, routediag as RD, lockpolicy as LP  # noqa: E402
@@ -247,3 +248,15 @@ def test_ai_act_escalates_a_give_up_to_the_next_model(tmp_path, monkeypatch):
     monkeypatch.setattr(DC, "_models", lambda cons: ["cheap", "cheap2"])
     env = DC.act({"gap": "g2"}, {}, str(tmp_path / "ai"), "k2")
     assert asked == ["cheap", "cheap2"] and env["actions"][0]["do"] == "give_up"
+
+
+def test_board_lines_rows_carry_item_ids(tmp_path):
+    """k16 (live BT2 run: sonnet gave up because every segment had id null, rip needs ids): the copper dump carries the 8-hex
+    id the packet and rip use."""
+    from fluxplace import decider as DC
+    b = str(tmp_path / "b.kicad_pcb")
+    open(b, "w").write('(kicad_pcb (version 20240108) (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) (net 0 "") (net 1 "N")'
+                       ' (segment (start 1 1) (end 2 2) (width 0.15) (layer "F.Cu") (net 1) (uuid "abcdef12-0000-0000-0000-000000000000"))'
+                       ' (via (at 3 3) (size 0.46) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "12345678-0000-0000-0000-000000000000")))')
+    rows = [json.loads(l) for l in open(DC.board_lines(b, str(tmp_path / "d")))]
+    assert {r["kind"]: r["id"] for r in rows if r["kind"] in ("seg", "via")} == {"seg": "abcdef12", "via": "12345678"}
