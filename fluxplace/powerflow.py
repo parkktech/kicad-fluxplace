@@ -111,6 +111,9 @@ def build(segs, vias, pads, zones=()):
                 d = abs(-(u["x"] - g["x1"]) * uy + (u["y"] - g["y1"]) * ux)
                 if TOUCH_MM < s < L - TOUCH_MM and d <= half:
                     cuts.append((s, j))
+                elif u["kind"] == "end" and math.hypot(u["x"] - (g["x1"] if s <= TOUCH_MM else g["x2"]),
+                                                      u["y"] - (g["y1"] if s <= TOUCH_MM else g["y2"])) <= half:
+                    uf.union(u["node"], T[a if s <= TOUCH_MM else z]["node"])   # k15: an end inside this track's end copper is joined (KiCad does)
             for k in pad_t:                             # a pad whose centre sits on the track side
                 u = T[k]
                 if not _layers_ok({g["layer"]}, u["layers"]):

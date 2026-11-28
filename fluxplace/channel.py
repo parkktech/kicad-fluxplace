@@ -324,9 +324,9 @@ def _graph(board, net, rows, zones=False):
         vnodes.append((new(), pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y), v.GetWidth() / 2e6, span,
                        {"top": top, "bottom": bot, "x": pcbnew.ToMM(pos.x), "y": pcbnew.ToMM(pos.y), "drill": v.GetDrill() / 1e6}))
     for i, (u, ux, uy, ul) in enumerate(ends):
-        for w, wx, wy, wl in ends[:i]:
-            if ul == wl and math.hypot(ux - wx, uy - wy) <= TOL:
-                link(u, w)
+        for j, (w, wx, wy, wl) in enumerate(ends[:i]):
+            if ul == wl and math.hypot(ux - wx, uy - wy) <= max(TOL, min(seginfo[i // 2]["w"], seginfo[j // 2]["w"]) / 2):
+                link(u, w)              # k15: an end inside the other end's copper is joined (KiCad does; powerflow.build too)
         for vn, vx, vy, vr, span, _vi in vnodes:
             if board.GetLayerName(ul) in span and math.hypot(ux - vx, uy - vy) <= vr + TOL:
                 link(u, vn, 0.0, {"kind": "via-link", "layer": board.GetLayerName(ul)})

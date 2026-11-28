@@ -139,3 +139,26 @@ def test_rung_touches_only_its_nets_and_a_widened_locked_track_does_not_raise_it
     now = _measure(out, cons)
     assert now["VB"] == base["VB"]                       # ... and its measure is the same
     assert now.get("VA", 0) <= base["VA"]                # the overlay (still narrow or not) is not counted on top of the locked track
+
+
+def test_k15_end_inside_the_other_tracks_end_copper_is_joined():
+    # a wide trunk ends 0.024 mm from a thin stub's end (KiCad joins the overlapping copper); the load behind it is reached
+    segs = [seg(0, 0, 10, 0, w=1.4), seg(10.017, 0.017, 12, 2, w=0.15)]
+    pads = [pad("S", 0, 0, "source", None), pad("A", 12, 2, amps=1.0)]
+    f = PF.solve(segs, [], pads)["flow"]
+    assert [x["mode"] for x in f] == ["tree", "tree"] and round(f[1]["amps"], 6) == 1.0
+
+
+def test_k15_end_inside_a_wide_tracks_end_but_off_its_centre_line_is_joined():
+    # the stub's end lies 0.5 mm off the trunk's end, inside its 1.4 mm copper: joined
+    segs = [seg(0, 0, 10, 0, w=1.4), seg(10.0, 0.5, 12, 3, w=0.15)]
+    pads = [pad("S", 0, 0, "source", None), pad("A", 12, 3, amps=0.5)]
+    f = PF.solve(segs, [], pads)["flow"]
+    assert f[1]["mode"] == "tree" and round(f[1]["amps"], 6) == 0.5
+
+
+def test_k15_end_outside_the_copper_stays_open():
+    segs = [seg(0, 0, 10, 0, w=0.2), seg(10.0, 0.5, 12, 3, w=0.15)]
+    pads = [pad("S", 0, 0, "source", None), pad("A", 12, 3, amps=0.5)]
+    f = PF.solve(segs, [], pads)["flow"]
+    assert f[1]["mode"] != "tree"
