@@ -872,10 +872,23 @@ def _locked_sig(M):
     return _copper_sig(M, locked_only=True)
 
 
-def _edit_violation_keys(new, net, loose=()):
+DRC_TYPE_CAP = 199      # kicad-cli lists at most this many violations of one type (KiCad drc_engine ERROR_LIMIT)
+
+
+def capped_types(*raws):
+    """Violation types listed DRC_TYPE_CAP times in any of the reports: their lists are cut off, in board walk order."""
+    return {t for d in raws for t, n in Counter(v["type"] for v in d.get("violations", [])).items() if n >= DRC_TYPE_CAP}
+
+
+def _edit_violation_keys(new, net, loose=(), capped=()):
+    """The new keys an edit answers for. A type in `capped` proves nothing about another net: when the edit removes one listed
+    entry, entry 200 of the walk moves into the list and reads as new (W16 critroute: every lay after HUB_XTAL2 was refused for
+    "via_dangling Via [HID_A]", a fan-out via 70 mm away that dangled before and after)."""
     out = {}
     for k, v in new.items():
         if k[0].startswith("U") or k[0] in loose:
+            continue
+        if k[0] in capped and not any(f"[{net}]" in d for d in k[1]):
             continue
         if k[0] == "track_not_centered_on_via" and not any(f"[{net}]" in d for d in k[1]):
             continue
@@ -950,7 +963,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         new = cand["keys"] - base["keys"]
         # a shove leaves loose ends by design (the caller re-lays); the commit gate judges the end state
         loose = ("track_dangling", "via_dangling") if op in ("shove", "unlay") else ()
-        new_nonu = _edit_violation_keys(new, net, loose)
+        new_nonu = _edit_violation_keys(new, net, loose, capped_types(base_raw, cand_raw))
         new_u = _opened_nets(cand["unc_by_net"], base["unc_by_net"])
         before_n = base["unc_by_net"].get(net, 0)
         after_n = cand["unc_by_net"].get(net, 0)
@@ -1725,6 +1738,76 @@ def _snap_ends(M, net, pathstr):
     return cands
 
 
+def _dog(a, v):
+    """Octilinear a -> v: [[a, v]] when already 45/90, else the dog-legs (diagonal first / straight first / jog in the middle). Unlike `_octi`
+    a short offset is never passed as a straight any-angle piece."""
+    dx, dy = v[0] - a[0], v[1] - a[1]
+    if abs(dx) < 1e-6 or abs(dy) < 1e-6 or abs(abs(dx) - abs(dy)) < 1e-6:
+        return [[a, v]]
+    m = min(abs(dx), abs(dy))
+    sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
+    h = (max(abs(dx), abs(dy)) - m) / 2                 # third: straight, diagonal jog in the middle, straight (both knees far from both ends)
+    z = [(a[0], a[1] + sy * h), (v[0], v[1] - sy * h)] if abs(dy) > abs(dx) else [(a[0] + sx * h, a[1]), (v[0] - sx * h, v[1])]
+    return [[a, (a[0] + sx * m, a[1] + sy * m), v], [a, (v[0] - sx * m, v[1] - sy * m), v], [a] + z + [v]]
+
+
+def _via_ends(M, net, pathstr, vd):
+    """Re-draw every run end that sits on a via centre (a via of the path, or an own-net via on the board) so that no joint lies
+    inside that via off its centre and every piece is 45/90: joints inside the via are dropped, then the run is dog-legged from
+    the last joint outside it (walking back up to 4 joints when the knee would fall inside a via). The grid path ends on a grid
+    node and `_tail_options` / `_snap_ends` move that end onto the centre, which left a 0.05-0.2 mm stub inside the via
+    (track_not_centered_on_via) or bent a long first segment off 45 degrees (W16 MCLK, HUB_XTAL2, SIM_CLK: "grid path failed exact
+    probe"). -> path string (the input when nothing changes)."""
+    try:
+        prims = G.parse_path(pathstr, M.cu)
+    except ValueError:
+        return pathstr
+    d = lambda a, b: math.hypot(a[0] - b[0], a[1] - b[1])
+    runs = []
+    for p in prims:
+        if p[0] == "seg" and runs and runs[-1][0] == "seg" and runs[-1][1] == p[1] and d(runs[-1][2][-1], p[2]) < 1e-6:
+            runs[-1][2].append(p[3])
+        else:
+            runs.append(["seg", p[1], [p[2], p[3]]] if p[0] == "seg" else p)
+    own = [(o.g[1], o.g[3]) for o in M.obs if o.kind == "via" and o.net == net]
+
+    def rad(pt, j):
+        if 0 <= j < len(runs) and runs[j][0] == "via" and d(runs[j][1], pt) < 5e-4:
+            return vd / 2
+        return next((r for c, r in own if d(c, pt) < 5e-4), None)
+
+    def fix(pts, r, far):
+        T, body = pts[-1], list(pts[:-1])
+        while body and d(body[-1], T) < r + 1e-3:
+            body.pop()
+        for _ in range(4):
+            if not body:
+                break
+            for leg in _dog(body[-1], T):
+                if all(d(q, T) >= r + 1e-3 and (far[1] is None or d(q, far[0]) >= far[1] + 1e-3 or d(q, far[0]) < 5e-4) for q in leg[1:-1]):
+                    return body + leg[1:]
+            body.pop()
+        return list(pts)
+
+    for k, run in enumerate(runs):
+        if run[0] != "seg":
+            continue
+        pts = run[2]
+        r0, r1 = rad(pts[0], k - 1), rad(pts[-1], k + 1)
+        if r1:
+            pts = fix(pts, r1, (pts[0], r0))
+        if r0:
+            pts = fix(pts[::-1], r0, (pts[-1], r1))[::-1]
+        run[2] = pts
+    out = []
+    for run in runs:
+        if run[0] == "via":
+            out.append(run)
+        else:
+            out += [("seg", run[1], run[2][q], run[2][q + 1]) for q in range(len(run[2]) - 1) if d(run[2][q], run[2][q + 1]) > 1e-6]
+    return _render_prims(out)
+
+
 def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
     """The measured reason a search stalled: region reached per layer and the foreign obstacles that bound it (most frequent first)."""
     import numpy as np
@@ -2021,6 +2104,10 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                     if cs not in seen_c:
                         seen_c.add(cs)
                         variants.append(cs)
+        for cs in [_via_ends(M, net, v, vd) for v in variants]:   # after every plain variant: unchanged where those already pass
+            if cs not in seen_c:
+                seen_c.add(cs)
+                variants.append(cs)
         for cand in variants:
             try:
                 prims = G.parse_path(cand, M.cu)
