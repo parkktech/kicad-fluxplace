@@ -555,7 +555,7 @@ def test_clean_keeps_a_category_that_would_add_a_drc_key(tmp_path, monkeypatch):
     def worse(path, **k):
         d = real(path, **k)
         calls.append(path)
-        if len(calls) > 1:                                       # every trial board reads worse than the base
+        if "clean-trial" in str(path):                           # every trial board reads worse than the base
             d = dict(d, violations=list(d["violations"]) + [{"type": "clearance", "severity": "error", "description": "new", "items": [{"description": "x", "pos": {"x": 1, "y": 1}}]}])
         return d
     monkeypatch.setattr(TF, "_drc", worse)
@@ -593,3 +593,15 @@ def test_clean_removes_a_sub_0p2_mm_dangling_stub(tmp_path):
     res = TF.clean(src, out)
     assert res["removed"].get("dangling") == 1 and res["refused"] == {}
     assert _items(out) == (1, 0, 0)
+
+
+def test_clean_trials_use_fill_free_drc_and_stop_at_the_budget(tmp_path, monkeypatch):
+    """W16 route-9 copy: T2 ran > 43 min (~100 refilled DRCs). Trials are fill-free; past T2_BUDGET_S no batch is tried."""
+    src = _t2_board(tmp_path, vias=[(10, 6)] * 2, zero=[])
+    real, seen = TF._drc, []
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: (seen.append(("clean-trial" in str(path), k.get("refill", True))), real(path, **k))[1])
+    TF.clean(src, str(tmp_path / "out.kicad_pcb"))
+    assert all(not refill for trial, refill in seen if trial)
+    monkeypatch.setattr(TF, "T2_BUDGET_S", -1.0)
+    res = TF.clean(src, str(tmp_path / "out2.kicad_pcb"), cats=("dangling",))
+    assert not res["removed"].get("dangling")

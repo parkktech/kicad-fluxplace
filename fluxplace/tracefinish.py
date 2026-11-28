@@ -347,6 +347,7 @@ def _guard_ok(d0, d1):
 
 
 DANGLING_TYPES = ("track_dangling", "via_dangling")
+T2_BUDGET_S = 900.0                             # T2 guarded clean: no new batch split after this (stage time box)
 
 
 def _dangling_by_net(d, typ):
@@ -372,8 +373,16 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
     cur = out + ".clean-cur.kicad_pcb"
     shutil.copyfile(board, cur)
     _pro_copy(board, cur)
-    d_cur = _drc(cur, kicad_cli=kicad_cli)
-    res = {"removed": {}, "refused": {}, "nets": [], "rows": [], "drc_before": len(d_cur.get("violations", []))}
+    d_full0 = _drc(cur, kicad_cli=kicad_cli)
+    import subprocess, sys
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "fill_helper.py"), cur], capture_output=True, timeout=600)
+    _pro_copy(board, cur)                       # fills saved in `cur`: the fill-free trial DRCs see zone-joined ends as joined
+    # 2026-11-27 (W16 route-9 copy: T2 ran > 43 min, ~100 guarded steps x 20 s refilled DRC): every trial only REMOVES copper, and a
+    # stale zone fill cannot add a violation where copper was removed, so the per-step guard compares fill-free DRCs (6 s); one refilled
+    # DRC at the end must not be worse than the refilled start, else the input board is kept. T2_BUDGET_S stops further splitting.
+    d_cur = _drc(cur, kicad_cli=kicad_cli, refill=False)
+    t_end = time.time() + T2_BUDGET_S
+    res = {"removed": {}, "refused": {}, "nets": [], "rows": [], "drc_before": len(d_full0.get("violations", []))}
     trial = out + ".clean-trial.kicad_pcb"
 
     def step(cat, uuids=(), count_refused=True, cascade=False):
@@ -385,7 +394,7 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
         if not n or not os.path.exists(trial):
             return False
         _pro_copy(board, trial)
-        d_new = _drc(trial, kicad_cli=kicad_cli)
+        d_new = _drc(trial, kicad_cli=kicad_cli, refill=False)
         if cascade:
             def dangling_tracks(d):
                 return {u for v in _dangling_by_net(d, "track_dangling").values() for u in v}
@@ -403,7 +412,7 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
                 n += r2[cat]
                 r["nets"] += r2["nets"]
                 r["rows"] += r2["rows"]
-                d_new = _drc(trial, kicad_cli=kicad_cli)
+                d_new = _drc(trial, kicad_cli=kicad_cli, refill=False)
         ok = _guard_ok(d_cur, d_new)
         if ok:
             res["removed"][cat] = res["removed"].get(cat, 0) + n
@@ -419,6 +428,9 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
     def _batch(by_net, depth, cascade=False):
         """the whole batch first; a refused one is split by net (halves, at most `depth` levels) so one bad net does not cost the rest."""
         if not by_net:
+            return False
+        if time.time() > t_end:
+            res["refused"]["budget"] = res["refused"].get("budget", 0) + sum(len(v) for v in by_net.values())
             return False
         if step("dangling", [u for n in sorted(by_net) for u in by_net[n]], count_refused=depth == 0 or len(by_net) == 1, cascade=cascade):
             return True
@@ -441,10 +453,16 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
                     kept = _batch(_dangling_by_net(d_cur, typ), 3, cascade=typ == "via_dangling") or kept
                 if not kept:
                     break
+        d_full = _drc(cur, kicad_cli=kicad_cli) if res["removed"] else d_full0
+        if not _guard_ok(d_full0, d_full):                  # the fill-free guard missed something: keep the input board
+            res["refused"]["final_refill"] = sum(res["removed"].values())
+            res["removed"], res["nets"], res["rows"] = {}, [], []
+            shutil.copyfile(board, cur)
+            d_full = d_full0
         shutil.copyfile(cur, out)
         _pro_copy(board, out)
-        res["drc_after"] = len(d_cur.get("violations", []))
-        res["report"] = d_cur
+        res["drc_after"] = len(d_full.get("violations", []))
+        res["report"] = d_full
     finally:
         _rm(cur)
         _rm(trial)

@@ -220,7 +220,7 @@ def test_failed_probe_records_victims_and_crosses_orders(monkeypatch, tmp_path):
             ok = (bool(esc) and "left" not in names and q != p0) or (q == v and not esc) or (bool(esc) and q in (p0, p1) and "left" not in names) or (q == v and "left" not in names)
             out[q] = {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}}
         return out
-    cons = {"pairlay": {"escape_cache_dir": str(tmp_path), "escape_watch": ["V_"]}}
+    cons = {"pairlay": {"escape_cache_dir": str(tmp_path), "escape_watch": ["V_"], "escape_cross": True}}
     res = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1, v], cons, {}, lambda net: 1.0, order=[p0, p1, v])
     rep = res["report"]
     assert "V_N/V_P" in rep["watch"] and any(c["order"] == "targets-reversed" for c in rep["cross"])
@@ -376,3 +376,17 @@ def test_pmap_falls_back_to_serial_in_a_thread_and_on_a_stuck_pool():
     assert got[0] == [(1, True), (2, True), (3, True)]                          # not the main thread: no fork
     stuck = lambda a: (time.sleep(30) if os.getpid() != pid else None, a)[1]
     assert PE.pmap(stuck, [(1,), (2,)], 2, timeout=0.5) == [1, 2]                # a stuck worker: serial answer
+
+
+def test_pmap_deadline_returns_none_for_unfinished_calls_and_never_reruns():
+    """route-10 pairs 2026-11-27: an escape probe batch ran 40+ min past the 900 s escape budget with no event."""
+    import time
+    from fluxplace import pairescape as PE
+    t = time.time()
+    got = PE.pmap(lambda s: (time.sleep(s), s)[1], [(0.01,), (5,), (5,)], 3, deadline=time.time() + 1.0)
+    assert got[0] == 0.01 and got[1] is None and got[2] is None and time.time() - t < 3
+
+
+def test_escape_cross_diagnostic_is_off_by_default():
+    from fluxplace import pairescape as PE
+    assert PE.params({})["cross"] is False and PE.params({"pairlay": {"escape_cross": True}})["cross"] is True
