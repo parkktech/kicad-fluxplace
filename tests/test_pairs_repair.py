@@ -67,6 +67,13 @@ def test_the_named_cause_is_ripped_alone_before_the_pairs_that_are_only_near(mon
     assert st["score"][0] == 3 and [x[0] for x in laid] == [B, A] and laid[0][1] == frozenset({C})
 
 
+def test_a_pair_laid_after_the_failure_is_no_cause_even_when_the_failure_names_it(monkeypatch):
+    # B failed on A (laid before it, only near); its failure text names C's fan-out copper, and C was laid after B (W16 J11)
+    run, laid, _ = setup(monkeypatch, lambda pr, on: True if pr != B or A not in on else "via C_P", near=lambda c, pr: 0.5)
+    st = run({"order": [A, B, C], "res": {A: res(A, True), B: res(B, False, blocked="via C_P"), C: res(C, True)}, "score": (2, 2, 0)})
+    assert st["score"][0] == 3 and [x[0] for x in laid] == [B, A] and laid[0][1] == frozenset({C}), laid
+
+
 def test_a_rip_that_loses_the_blocker_is_not_kept(monkeypatch):
     def verdict(pr, on):
         return {A: B not in on or "track B_P", B: A not in on or "track A_P"}.get(pr, True)

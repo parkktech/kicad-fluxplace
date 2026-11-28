@@ -1330,8 +1330,9 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
     A trial takes the failed pairs F and a set S of laid pairs off together (same or a lower tier only), lays F first and S after
     it on a state without presets and reservations (all are released at the end of a pass).  It is valid only when every ripped
     pair is complete again and at least one failed pair is laid, so a round never leaves fewer pairs than it found.
-    S is tried smallest cause first: the pairs the failures NAME, then those plus the pairs whose copper runs beside the failed
-    terminals; when no joint trial is valid, each failed pair alone with the same two sets.
+    S is tried smallest cause first (see `blockers`): pairs named by the failure and laid before the failed pair, then those plus
+    the earlier-laid pairs whose copper runs beside its terminals, then every named / nearby pair; when no joint trial is valid,
+    each failed pair alone with the same sets.
     Quality guard: a ripped pair should not end worse than its first-pass lay (more vias, or skew over its limit when it was
     within).  A valid trial without such a loss is kept at once; otherwise the next S is tried and the valid trial with the
     smallest loss is kept, each loss logged as a WARN with its delta (a complete pair beats an open one).
@@ -1354,15 +1355,20 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
             ctx["done"].add(q)
         return ctx
 
+    pos0 = {q: k for k, q in enumerate(st["order"])}         # the pass's lay order: only copper laid BEFORE a pair can have failed it
+
     def blockers(f):
-        """-> (the laid pairs the failure names, those + the ones beside the failed pair's terminals), each capped at repair_rip_max"""
+        """rip sets of one failed pair, smallest cause first, each capped at repair_rip_max:
+        (named and laid before it, named or beside its terminals and laid before it, all named or beside its terminals).
+        A name alone is no cause: the failure text also names the fan-out copper of pairs that were not laid yet (W16: the three
+        pairs PCIE_CLK walled in named USB3_M2_TX / USB2_M2, both laid after them)."""
         e = st["res"][f]["e"]
         txt = " | ".join([e.get("blocked_by", "")] + list(e.get("blockers", [])))
         cand = [g for g in st["order"] if g != f and st["res"][g]["full"] and st["res"][g]["nok"] and key[g][:2] >= key[f][:2]]
         hit = [g for g in cand if any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)]
         rest = sorted((g for g in cand if g not in hit and near(st["res"][g], f) <= P["near_mm"]), key=lambda g: near(st["res"][g], f))
-        n = max(0, P["rip_max"])
-        return hit[:n], (hit + rest)[:n]
+        n, before = max(0, P["rip_max"]), lambda g: pos0[g] < pos0[f]
+        return [g for g in hit if before(g)][:n], [g for g in hit + rest if before(g)][:n], (hit + rest)[:n]
 
     def trial(F, S, tag):
         """F then S on the state without both -> {pair: result} when valid, else None"""
@@ -1421,10 +1427,11 @@ def _repair(st, info, rules, key, P, mk_ctx, near, plan_only, log):
         nfail[0] = len(failed)
         rip = {f: blockers(f) for f in failed}
         union = lambda k: [g for g in st["order"] if any(g in v[k] for v in rip.values())]
-        gained = attempt(failed, [union(0), union(1)], rnd)
+        sets = lambda ss: [S for S in ss if S] or [[]]          # nothing to rip: the pairs again on the final state (reservations are gone)
+        gained = attempt(failed, sets([union(0), union(1), union(2)]), rnd)
         if not gained and len(failed) > 1:                     # no joint trial is valid: one failed pair at a time
             for f in failed:
-                gained = attempt([f], list(rip[f]), rnd) or gained
+                gained = attempt([f], sets(rip[f]), rnd) or gained
         changed = changed or gained
         if not gained:
             break
