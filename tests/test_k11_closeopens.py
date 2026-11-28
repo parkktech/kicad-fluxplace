@@ -132,3 +132,56 @@ def test_unseal_moves_the_sealing_via_away_then_lays(tmp_path, monkeypatch):
     (fx, fy), (tx, ty) = moved[0]
     assert (fx, fy) == (10.0, 10.5) and ty > fy                           # moved away from the end, never the HARD via
     assert open(tmp_path / "o.kicad_pcb").read() == "laid"
+
+
+def test_ai_act_gets_read_tools_and_a_whole_board_copper_file(tmp_path, monkeypatch):
+    """k11 / lead finding (fix-1 ai rung: 7 of 10 gave up on a 4 mm window without full-board geometry): the model is called with
+    read-only tools in the ai dir, where a JSON-lines dump of the whole board's copper sits."""
+    from fluxplace import decider as DC
+    b = str(tmp_path / "b.kicad_pcb")
+    open(b, "w").write("(kicad_pcb)")
+    monkeypatch.setattr(RD, "load", lambda p: {"segs": [{"net": "N", "layer": "F.Cu", "a": (1, 2), "b": (3, 4), "w": 0.15}],
+                                               "vias": [{"net": "GND", "x": 5, "y": 6, "d": 0.46, "drill": 0.2}],
+                                               "pads": [{"ref": "U1", "num": "1", "net": "N", "x": 1, "y": 2, "ex": 0.1, "ey": 0.2, "layers": {"F.Cu"}}]})
+    seen = {}
+
+    def call(text, cons, m, tools=None, cwd=None, timeout=None, **kw):
+        seen.update(tools=tools, cwd=cwd, text=text)
+        return '{"actions": [{"do": "give_up", "why": "x"}]}', ""
+    monkeypatch.setattr(DC, "call_model", call)
+    monkeypatch.setattr(DC, "_models", lambda cons: ["m"])
+    d = str(tmp_path / "ai")
+    env = DC.act({"board": b, "gap": "g"}, {}, d, "k")
+    assert env and seen["tools"] == DC.TOOLS and seen["cwd"] == d
+    files = [f for f in os.listdir(d) if f.startswith("board-")]
+    assert files and files[0] in seen["text"]
+    rows = [l for l in open(os.path.join(d, files[0])) if l.strip()]
+    assert len(rows) == 3 and '"kind":"via"' in rows[1]
+    seen.clear()
+    DC.act({"board": b, "gap": "g2"}, {"ai": {"tools": False}}, d, "k2")
+    assert seen["tools"] is None                                          # [ai] tools = false: the old text-only call
+
+
+def test_ai_window_grows_with_the_run_and_long_paths_fit():
+    rec = {"a": {"x": 0, "y": 0}, "b": {"x": 60, "y": 0}}
+    assert GP.ai_margin(rec) == 9.0 and GP.ai_margin({"a": {"x": 0, "y": 0}, "b": {"x": 3, "y": 0}}) == 2.0
+    assert GP.ai_margin({"straight_mm": 200, **rec}) == 10.0
+    path = "F.Cu: " + " ".join(f"{10 + i * 0.5:.4f},{20 + (i % 2) * 0.5:.4f}" for i in range(100))
+    assert 800 < len(path) <= GP.AI_PATH_CHARS
+    v, why = GP._ai_action({"do": "path", "net": "BT_SMA", "path": path}, ["F.Cu", "B.Cu"])
+    assert v is not None, why
+
+
+def test_rip_locked_of_a_soft_protected_net_is_kept_rf_and_gated_are_refused(tmp_path):
+    """k11: HPL_PRI_N is walled by locked HPL_OUT / SENSE_ADC_N (audio, SOFT): the AI may rip them (re-routed in the same
+    transaction, guard re-checks); an RF or gated-pair net (HARD) stays refused."""
+    import json
+    act = str(tmp_path / "a.json")
+    ids = ["0123abcd"]
+    json.dump({"actions": [{"do": "rip_locked", "net": "AUD", "ids": ids}]}, open(act, "w"))
+    b = str(tmp_path / "missing.kicad_pcb")
+    a = GP.load_ai_action(act, b, protect={"AUD", "RF1"}, soft={"AUD"})
+    assert not a["refused"] and a["actions"][0]["net"] == "AUD"
+    json.dump({"actions": [{"do": "rip_locked", "net": "RF1", "ids": ids}]}, open(act, "w"))
+    a = GP.load_ai_action(act, b, protect={"AUD", "RF1"}, soft={"AUD"})
+    assert a["refused"] and "rf or gated pair" in str(a["dropped"])

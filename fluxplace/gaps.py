@@ -1282,6 +1282,8 @@ AI_BUDGET = 4                                   # PHASE3F B5: action files appli
 AI_MAX_ACTIONS = 8                              # PHASE3F B2 / PHASE3H A5: valid actions kept per action file
 AI_ACTIONS_MAX = AI_MAX_ACTIONS
 AI_ROUTE_NETS = 6                               # PHASE3H A5: most nets in one route action
+AI_POCKET_MM = 8.0                              # k11: was 4 mm; the pocket view shows what seals an end and the way out
+AI_PATH_CHARS = 4000                            # k11: was 800; a 60-70 mm RF or audio run needs ~40 vertices
 AI_RIP_IDS = 12                                 # PHASE3H A5: most ids in one rip / rip_locked
 AI_NUDGE_MM = 1.0                               # PHASE3H A5: largest |dx| or |dy| of a nudge
 AI_PAIR_WPTS = 40                               # PHASE3H A5: most waypoints in one pair_path
@@ -1291,10 +1293,11 @@ _PACKET_ACTIONS = (
     'Envelope {"actions":[...],"why","tokens"}; each action is {"do": "<verb>", ...fields}. Apply order: nudge -> rip -> path -> pair_path -> route. '
     "Route on signal layers only. "
     "rip {net, ids} (one net per rip, <= " + str(AI_RIP_IDS) + " hex ids); "
-    "rip_locked {net, ids} (plain locked copper only, same id cap; pairs/rf refused); "
+    "rip_locked {net, ids} (locked copper of plain nets and of soft-locked low-speed pair / audio nets, same id cap; "
+    "it is re-routed in the same transaction and the guard re-checks the board; rf and gated high-speed pairs refused); "
     "nudge {ref, dx, dy, rot} (needs rot; |dx|, |dy| <= " + str(AI_NUDGE_MM) + " mm; part <= 3 pads, not fixed, not locked); "
     "route {nets, layers} (<= " + str(AI_ROUTE_NETS) + " nets); "
-    "path {net, path, lock} (AI-FINISH path syntax, <= 800 chars; hs-pair legs only as a stub join <= "
+    "path {net, path, lock} (AI-FINISH path syntax, <= " + str(AI_PATH_CHARS) + " chars; hs-pair legs only as a stub join <= "
     + str(HS_STUB_MM) + " mm; a stitching via is path \"via x,y\"); "
     "pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only; "
     'waypoints [x, y] or [x, y, "Layer"], <= ' + str(AI_PAIR_WPTS) + ": a named layer other than the current one is a via change, "
@@ -1370,8 +1373,8 @@ def _ai_action(x, copper, hs_legs=(), open_legs=(), rip_mm=0.0):
     if do == "path":                              # PHASE3F B2
         from . import hrgeom as HG
         net, path = x.get("net"), x.get("path")
-        if not (isinstance(net, str) and net and isinstance(path, str) and 0 < len(path) <= 800):
-            return None, "path: net and path (<= 800 chars) needed"
+        if not (isinstance(net, str) and net and isinstance(path, str) and 0 < len(path) <= AI_PATH_CHARS):
+            return None, f"path: net and path (<= {AI_PATH_CHARS} chars) needed"
         try:
             prims = HG.parse_path(path, copper)
         except Exception:
@@ -1434,10 +1437,31 @@ def _rip_mm(base, net, ids, cons_path=None):
         return 0.0
 
 
-def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=None):
+def ai_margin(rec):
+    """k11: the connection view's margin grows with the run (2 mm, +15 % of the straight length, at most 10 mm)."""
+    L = rec.get("straight_mm") or math.hypot(rec["a"]["x"] - rec["b"]["x"], rec["a"]["y"] - rec["b"]["y"])
+    return round(min(10.0, max(2.0, 0.15 * float(L or 0))), 2)
+
+
+def _soft_nets(base, ctx):
+    """k11: protected nets whose locked copper is SOFT (never RF, never a gated pair: lockpolicy HARD)."""
+    prot = set(ctx.get("protect") or ())
+    if not prot:
+        return set()
+    try:
+        from . import lockpolicy as LP, routediag as RD
+        B = RD.load(base)
+        names = sorted({x["net"] for x in B["segs"]} | {x["net"] for x in B["vias"]} | {x["net"] for x in B["pads"] if x.get("net")})
+        return {n for n in prot if LP.level(n, ctx.get("cons") or {}, names) == LP.SOFT}
+    except Exception:                                      # noqa: BLE001 - unknown: fail closed
+        return set()
+
+
+def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=None, soft=()):
     """{"actions", "tokens", "why", "dropped"} from an AI action file. Invalid actions are dropped with a log line and
     listed in "dropped" as {do, reason} (PHASE3H A4). Never raises. `protect` (drcguard.protected_nets: rf nets and pair
-    legs) may not be rip_locked. At most AI_MAX_ACTIONS are kept; the rest are dropped.
+    legs) may not be rip_locked, except `soft` (k11: lockpolicy SOFT, low-speed pair legs / audio; rip + re-route in one
+    transaction, the close guard re-checks). At most AI_MAX_ACTIONS are kept; the rest are dropped.
     B12/R051: "refused" is the reason the whole file is refused ("" when usable): unreadable, not an object, no actions list, or
     any dropped action (the answer is applied whole or not at all). check_ai_actions() reports it without touching a board."""
     out = {"actions": [], "tokens": 0, "why": "", "dropped": [], "refused": ""}
@@ -1468,8 +1492,8 @@ def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=N
     for x in raw:
         net = x.get("net") if isinstance(x, dict) else None
         v, why = _ai_action(x, copper, hs_legs, open_legs, rip_mm.get(net, 0.0) if isinstance(net, str) else 0.0)
-        if v is not None and v["do"] == "rip_locked" and v["net"] in protect:
-            v, why = None, "rip_locked: protected net (pair or rf)"
+        if v is not None and v["do"] == "rip_locked" and v["net"] in protect and v["net"] not in soft:
+            v, why = None, "rip_locked: protected net (rf or gated pair)"
         if v is not None and len(out["actions"]) >= AI_MAX_ACTIONS:
             v, why = None, f"over {AI_MAX_ACTIONS} actions"
         if v is None:
@@ -1702,7 +1726,7 @@ def gap_packet(base, gap, ctx, sid=None):
                 "rules": r.get("rules")}
         if r.get("closest"):                        # the window frames the islands' closest approach, not the DRC ends
             conn["closest"] = {k: r["closest"].get(k) for k in ("gap_mm", "a", "b", "a_item", "b_item")}
-        W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=2.0, raw=raw)
+        W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=ai_margin(r), raw=raw)
         pngs += got
         mid = ((r["a"]["x"] + r["b"]["x"]) / 2, (r["a"]["y"] + r["b"]["y"]) / 2)
         sites = (W.get("via_sites") or {}).get("sites") or []
@@ -1727,7 +1751,7 @@ def gap_packet(base, gap, ctx, sid=None):
             end = {"x": r["closest"][side][0], "y": r["closest"][side][1]}
         if ai_dir and sid:
             try:
-                pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(4, 4))[1]
+                pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(AI_POCKET_MM, AI_POCKET_MM))[1]
             except Exception as e:
                 print(f"ai: pocket view failed for {sid}: {e}", file=sys.stderr)
         lim = (HR.suggest(base, net, conn=i, constraints=cp, raw=raw).get("sealed_by") or {}).get("limiting_obstacles") or []
@@ -2175,7 +2199,7 @@ def _r_ai(base, out, gaps, ctx):
         if not os.path.exists(act):
             continue
         a = load_ai_action(act, base, ctx.get("protect", ()), hs_legs=ctx.get("hs_legs", ()),
-                           open_legs=ctx.get("open_legs", ()), cons_path=ctx.get("cons_path"))
+                           open_legs=ctx.get("open_legs", ()), cons_path=ctx.get("cons_path"), soft=_soft_nets(base, ctx))
         a["gap_id"] = gap["id"]
         if a.get("refused"):                                    # PHASE3H A4 / B12 R051: nothing applied, nothing charged, the reason is stated
             _feedback_note(ai_dir, sid, dropped=a["dropped"][:8], refused="action invalid: " + a["refused"])

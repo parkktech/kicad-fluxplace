@@ -184,6 +184,44 @@ def decide(q, evidence=(), cons=None, log_dir=None):
     return row
 
 
+TOOLS = "Read,Grep,Glob"                     # k11: the close `ai` rung may query the board (whole-board copper file + window PNGs)
+
+
+def _ai_tools(cons):
+    """[ai] tools (default true): the act() model gets read-only tools over the ai dir and a whole-board copper file."""
+    return bool(((cons or {}).get("ai") or {}).get("tools", True))
+
+
+def _ai_timeout(cons):
+    return float(((cons or {}).get("ai") or {}).get("timeout_s", 600))
+
+
+def board_lines(board, d):
+    """k11: the board's copper as JSON lines in `d` (board-<sha>.jsonl, written once per board content). -> path, or None."""
+    if not (isinstance(board, str) and os.path.isfile(board)):
+        return None
+    try:
+        from . import routediag as RD
+        h = hashlib.sha1(open(board, "rb").read()).hexdigest()[:12]
+        path = os.path.join(d, f"board-{h}.jsonl")
+        if os.path.exists(path):
+            return path
+        B = RD.load(board)
+        rows = [{"kind": "seg", "net": x["net"], "layer": x["layer"], "a": [round(v, 4) for v in x["a"]], "b": [round(v, 4) for v in x["b"]],
+                 "w": x["w"], "locked": x.get("locked", False), "id": x.get("id")} for x in B["segs"]]
+        rows += [{"kind": "via", "net": x["net"], "at": [round(x["x"], 4), round(x["y"], 4)], "d": x["d"], "drill": x["drill"],
+                  "locked": x.get("locked", False)} for x in B["vias"]]
+        rows += [{"kind": "pad", "ref": x.get("ref"), "num": x.get("num"), "net": x.get("net"), "at": [round(x["x"], 4), round(x["y"], 4)],
+                  "half": [x.get("ex"), x.get("ey")], "layers": sorted(x.get("layers") or ())} for x in B["pads"]]
+        os.makedirs(d, exist_ok=True)
+        with open(path + ".tmp", "w") as fh:
+            fh.write("\n".join(json.dumps(r, separators=(",", ":"), default=str) for r in rows) + "\n")
+        os.replace(path + ".tmp", path)
+        return path
+    except Exception:                                    # noqa: BLE001 - no file: the model answers from the packet alone
+        return None
+
+
 def act(packet, cons=None, log_dir=None, key=""):
     """The close `ai` rung without a person: the packet (its own `actions` text is the syntax) goes to the model, which
     answers an action envelope {"actions": [...], "why"}.  -> the envelope, or None (no model / nothing usable: the packet
@@ -195,13 +233,20 @@ def act(packet, cons=None, log_dir=None, key=""):
     if hit:
         env, model, cached = hit["envelope"], hit.get("model"), True
     else:
+        geo = board_lines(packet.get("board"), log_dir) if log_dir and _ai_tools(cons) else None
         text = ("You repair one open gap on a routed PCB so the flow needs no person. Rule to optimise: " + rule(cons) + ".\n"
                 "The packet below describes the gap, the copper near it and the allowed actions (key `actions`). Use only ids, "
-                "nets, layers and coordinates from the packet. If nothing safe exists, answer give_up with the reason.\n"
-                "Answer with ONLY the JSON action envelope.\nPacket:\n" + body[:12000])
+                "nets, layers and coordinates from the packet" + (" or the board file" if geo else "") + ". If nothing safe exists, "
+                "answer give_up with the reason.\n"
+                + (f"Tools (k11): Read/Grep/Glob work in the current directory. {os.path.basename(geo)} holds the WHOLE board's copper, "
+                   "one JSON object per line (kind seg|via|pad, net, layer(s), coordinates in mm, width, locked, id): grep it by net "
+                   "or by coordinate prefix to see beyond the packet window (long runs, what seals a pocket); the packet's png files "
+                   "are pictures of the window.\n" if geo else "")
+                + "Answer with ONLY the JSON action envelope.\nPacket:\n" + body[:12000])
         env, model, cached = None, None, False
         for m in _models(cons):
-            out, _why = call_model(text, cons, m)
+            out, _why = (call_model(text, cons, m, tools=TOOLS, cwd=log_dir, timeout=_ai_timeout(cons)) if geo
+                         else call_model(text, cons, m))
             if out is None:
                 break
             env = _first_obj(out, lambda d: isinstance(d.get("actions"), list) and d["actions"])
