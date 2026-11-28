@@ -1298,7 +1298,7 @@ AI_PAIR_WPTS = 40                               # PHASE3H A5: most waypoints in 
 FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedback.json size cap
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = (
-    'Envelope {"actions":[...],"why","tokens"}; each action is {"do": "<verb>", ...fields}. Apply order: nudge -> rip -> path -> pair_path -> route. '
+    'Envelope {"actions":[...],"why","tokens"}; each action is {"do": "<verb>", ...fields}; <= ' + str(AI_MAX_ACTIONS) + ' actions. Apply order: nudge -> rip -> path -> pair_path -> route. '
     "Route on signal layers only. "
     "rip {net, ids} (one net per rip, <= " + str(AI_RIP_IDS) + " hex ids); "
     "rip_locked {net, ids} (locked copper of plain nets and of soft-locked low-speed pair / audio nets, same id cap; "

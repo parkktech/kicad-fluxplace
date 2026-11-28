@@ -417,7 +417,7 @@ def test_packet_pictures_pocket_and_corridors(monkeypatch, tmp_path):
     assert set(p) == PKT_KEYS and p["v"] == 2 and p["board"] == str(tmp_path / "in.kicad_pcb")
     assert p["png"] == [os.path.join(ctx["ai_dir"], sid + ".conn.png"), os.path.join(ctx["ai_dir"], sid + ".pocket.png")]
     assert all(os.path.exists(x) for x in p["png"])
-    pocket = next(k for k in calls if k.get("size") == (4, 4))
+    pocket = next(k for k in calls if k.get("size") == (GP.AI_POCKET_MM, GP.AI_POCKET_MM))
     assert pocket["at"] == (20.0, 20.0)                  # end a has less free room (one layer, not two)
     assert p["corridors"] == {"direct": ["F.Cu"], "max_track_mm": {"F.Cu": 0.3}}
     assert len(json.dumps(p).encode()) <= 4096
@@ -450,7 +450,7 @@ def test_ai_action_new_kinds_validated(monkeypatch, tmp_path):
         {"do": "path", "net": "SIG2", "path": "F.Cu: 1,2 3,4", "lock": True},          # ok
         {"do": "path", "net": "SIG2", "path": "F.Cu: 1,2 3,4; via 5"},                  # bad via token
         {"do": "path", "net": "LEG", "path": "F.Cu: 1,2 3,4"},                           # hs-pair leg
-        {"do": "path", "net": "SIG2", "path": "F.Cu: " + "1,2 3,4 " * 120},            # > 800 chars
+        {"do": "path", "net": "SIG2", "path": "F.Cu: " + "1,2 3,4 " * 600},            # > AI_PATH_CHARS (4000)
         {"do": "pair_path", "pair": ["P", "N"], "layer": "F.Cu", "waypoints": [[1, 2], [3, 4]]},   # ok
         {"do": "pair_path", "pair": ["P", "N"], "layer": "F.Cu", "waypoints": [[1, 2]]},            # 1 point
         {"do": "pair_path", "pair": ["P", "N"], "layer": "In9.Cu", "waypoints": [[1, 2], [3, 4]]},  # not a signal layer
