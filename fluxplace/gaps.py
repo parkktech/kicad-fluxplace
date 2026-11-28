@@ -2547,13 +2547,13 @@ def _r_pairgroup(base, out, gaps, ctx):
 
 def _r_pairrip(base, out, gaps, ctx):
     """k15: a pair-open the pair layer cannot lay through LOCKED copper: pairrip strips both legs and the blocking nets it names
-    (locked too; never RF, another pair's leg, a zone net or a rail), lays the pair, then KRT re-lays the ripped nets."""
+    (locked too; never RF, another pair's leg or a zone net), lays the pair, then KRT re-lays the ripped nets."""
     from . import pairrip as PRP, routediag as RD, netclass as NC, pairaudit as PA
     want = {n for g in gaps if g["kind"] == "pair-open" for n in g["nets"]}
     pairs = [p for p in PA.pair_list(NC.classify(RD.load(base), ctx["cons"], None)) if set(p) & want]
     if not pairs:
         return {"status": "no pair"}
-    never = set(ctx.get("protect") or ()) | set(_zone_nets(base)) | set(_rail_widths(base, ctx["cons"], signal_layers(base), 0.0))
+    never = set(ctx.get("protect") or ()) | set(_zone_nets(base))      # a rail may go: KRT re-lays it at its [power] width
     cur, rows, tmps = base, [], []
     try:
         for i, pr in enumerate(pairs):

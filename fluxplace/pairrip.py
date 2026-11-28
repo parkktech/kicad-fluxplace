@@ -2,8 +2,10 @@
 and pairgroup only rip FREE/SOFT or unlocked copper) gets its blockers ripped: both legs and every blocking net the pair layer
 names (locked copper too) are stripped, the pair is laid, and the ripped nets are re-laid by the caller's router.
 
-Never ripped: an RF net, a leg of another pair, a net with a zone (the pour carries it) and a [power] rail. The close guard
+Never ripped: an RF net, a leg of another pair and a net with a zone (the pour carries it). A [power] rail may be ripped: KRT re-lays
+it at its [power] width and the power gate judges it. The close guard
 keeps the result only when the opens fall and no new DRC kind appears; the caller records the ripped nets."""
+import math
 import os
 import re
 
@@ -18,6 +20,33 @@ def blocker_nets(labels):
         m = re.match(r"(?:track|via) (\S+)", str(lab))
         if m and m.group(1) not in out:
             out.append(m.group(1))
+    return out
+
+
+NEAR_MM = 1.5             # copper this close to the pair layer's closest approach counts as a blocker (its labels are a top-5 list)
+_APPROACH = re.compile(r"closest approach \(([-\d.]+), ([-\d.]+)\)")
+
+
+def near_nets(B, why, r=NEAR_MM):
+    """Nets with a track or via within `r` mm of the closest approach named in `why` (routediag board), nearest first."""
+    m = _APPROACH.search(why or "")
+    if not m:
+        return []
+    x, y = float(m.group(1)), float(m.group(2))
+
+    def seg_d(s):
+        (ax, ay), (bx, by) = s["a"], s["b"]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+        return math.hypot(ax + t * dx - x, ay + t * dy - y) - s["w"] / 2
+    d = [(seg_d(s), s["net"]) for s in B["segs"]] + [(math.hypot(v["x"] - x, v["y"] - y) - v["d"] / 2, v["net"]) for v in B["vias"]]
+    out = []
+    for dist, n in sorted(d):
+        if dist > r:
+            break
+        if n and n not in out:
+            out.append(n)
     return out
 
 
@@ -72,7 +101,9 @@ def relay(board, out, pair, cons, never, lay=None, log=lambda m: None):
                 return {"status": "laid", "ripped": ripped, "rounds": rnd}
             why = e.get("why") or e.get("blocked_by") or ""
             labels = list(e.get("blockers") or []) + [b for b in (e.get("blocked_by") or "").split(" | ") if b.startswith(("track ", "via "))]
-            new = [n for n in rippable(blocker_nets(labels), pair, never) if n not in ripped][:RIP_NETS_MAX - len(ripped)]
+            from . import routediag as RD
+            cand = blocker_nets(labels) + [n for n in near_nets(RD.load(pre), why) if n not in blocker_nets(labels)]
+            new = [n for n in rippable(cand, pair, never) if n not in ripped][:RIP_NETS_MAX - len(ripped)]
             log(f"  pairrip {pair[0]}/{pair[1]} round {rnd}: {why[:120]}; rip {new}")
             if not new:
                 return {"status": "blocked", "ripped": ripped, "rounds": rnd, "why": why[:300]}

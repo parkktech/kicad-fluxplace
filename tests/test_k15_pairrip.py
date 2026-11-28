@@ -53,3 +53,11 @@ def test_rung_release_names_ripped_nets_but_never_a_hard_one(monkeypatch):
     monkeypatch.setattr(LP, "level", lambda n, c, names: LP.HARD if n == "RF1" else LP.FREE)
     assert GP._rung_release({"release": ["A", "RF1"]}, {}, "b") == {"A"}
     assert GP._rung_release({}, {}, "b") == set()
+
+
+def test_near_nets_lists_copper_round_the_closest_approach_nearest_first():
+    from fluxplace import pairrip as PRP
+    B = {"segs": [{"net": "FAR", "a": (10, 0), "b": (11, 0), "w": 0.2}, {"net": "NEAR", "a": (0, 0.5), "b": (2, 0.5), "w": 0.2}],
+         "vias": [{"net": "VIA", "x": 0.3, "y": 0.0, "d": 0.4}]}
+    assert PRP.near_nets(B, "no path; closest approach (0.0, 0.0) F.Cu, 5 mm short") == ["VIA", "NEAR"]
+    assert PRP.near_nets(B, "no path") == []
