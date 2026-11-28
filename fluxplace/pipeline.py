@@ -1723,6 +1723,17 @@ def _commit_point(name, prev, res, cons=None):
     new = res.get("board")
     if not new or not os.path.isfile(new) or not os.path.isfile(prev):
         return res
+    try:                                                                # copper on a layer the board does not have: in no fab output
+        off = BW.offstack_copper(new)
+        if off:                                                         # what the input already carried is not this stage's
+            had = off if os.path.abspath(new) == os.path.abspath(prev) else BW.offstack_copper(prev)
+            off = [x for x in off if x not in had]
+    except Exception:                                                   # noqa: BLE001 - a board pcbnew cannot read is judged by the checks below
+        off = []
+    if off:
+        what = ", ".join(sorted({f"{net or '(no net)'} on {lay}" for _k, net, lay in off})[:6])
+        return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {len(off)} copper item(s) on a layer this board does not have: {what}"[:200],
+                    next=[f"{name}: output not adopted; give the stage only layers of the board's copper stack (pipeline.route_layers)"])
     if cons is not None and os.path.abspath(new) != os.path.abspath(prev):          # B1: new copper off its net contract (RF, rails, pairs)
         try:
             ct = BW.contract_check(prev, new, cons)
@@ -2235,6 +2246,28 @@ def _retune_relaid(c, work, board, st, n, later):
     return res["board"] if res["verdict"] in ("pass", "warn") and res.get("board") else board
 
 
+def _no_new_gaps(c, n, name, board, res):
+    """gaps.no_new_kinds: a stage output with a gap row of these kinds that its input `board` did not have fails the stage (the output
+    stays the stage board, for the repair).  One measure of the output; the input is measured only when the output has such rows."""
+    from . import gaps as GP
+    kinds = GP.no_new_kinds(c.cons, name)
+    out = res.get("board")
+    if not kinds or res["verdict"] not in ("pass", "warn") or not out or os.path.abspath(out) == os.path.abspath(board):
+        return res
+    d = c.dir(n, "gate")
+    try:
+        left = GP.gate_measure(out, os.path.join(d, "no-new-out"), c.cons_path, c.cons, kinds=kinds)["left"]
+        new = GP.split_preexisting(left, GP.gate_measure(board, os.path.join(d, "no-new-in"), c.cons_path, c.cons, kinds=kinds)["left"])[0] if left else []
+    except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
+        return dict(res, verdict="fail", line=f"gate {name}: new-gap measure crashed {type(e).__name__}: {str(e)[:80]}", next=[])
+    if not new:
+        return res
+    with open(os.path.join(d, "no-new.json"), "w") as fh:
+        json.dump({"kinds": kinds, "new": new}, fh, indent=1, default=str)
+    return dict(res, verdict="fail", line=f"gate {name}: {len(new)} new {'/'.join(kinds)} gap(s) the stage input did not have: {_deferred_line(new)}"[:200],
+                next=[f"gate {name}: {g.get('evidence') or g['id']}"[:160] for g in new[:4]] + [os.path.join(d, "no-new.json")])
+
+
 def _exec_stage(c, n, name, board, later=()):
     """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
     commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
@@ -2268,7 +2301,7 @@ def _exec_stage(c, n, name, board, later=()):
         res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
         if g["verdict"] == "packets":
             res["gate_packets"] = True
-    return res
+    return _no_new_gaps(c, n, name, board, res)
 
 
 def run(a):

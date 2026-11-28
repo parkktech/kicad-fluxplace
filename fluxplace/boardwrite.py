@@ -455,6 +455,25 @@ def new_copper(prev, cand, nets):
     return res
 
 
+def offstack_copper(path):
+    """Copper on a copper layer the board does not enable: [(kind, net, layer)] for tracks, arcs, via ends and zones.  Such an item
+    is in the file but in no fab output; pcbnew's connectivity still counts it, so an open hides behind it (ledger 2026-11-27)."""
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    on = b.GetEnabledLayers()
+    name = b.GetLayerName
+    out = []
+    for t in b.GetTracks():
+        if t.Type() == pcbnew.PCB_VIA_T:
+            out += [("via", t.GetNetname(), name(l)) for l in (t.TopLayer(), t.BottomLayer()) if not on.Contains(l)]
+        elif not on.Contains(t.GetLayer()):
+            out.append(("track", t.GetNetname(), name(t.GetLayer())))
+    for z in b.Zones():
+        if not z.GetIsRuleArea():
+            out += [("zone", z.GetNetname(), name(l)) for l in z.GetLayerSet().CuStack() if not on.Contains(l)]
+    return sorted(out)
+
+
 def contract_check(prev, cand, cons, spec=None):
     """CONTRACT_CHANGED: new copper of `cand` (against `prev`) on a net with a width / layer contract (netclass.contract: RF, rails with a
     current figure, pair legs with an explicit width), protected or not, that is off its contract.

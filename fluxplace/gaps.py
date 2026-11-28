@@ -261,6 +261,17 @@ GATE_DEFER = {"pair-skew": ("tune",), "pair-unmeasured": ("tune",), "pair-stub":
               "pair-open": ("critroute", "route", "close"), "pair-asym": ("route", "close")}
 
 
+# Gap kinds a stage may not ADD: its output is refused when it carries a row of these kinds the stage input did not have (same id).
+# Rows the input already had stay with their owner stage.  The route stage lays most of the copper: a clearance error it adds is
+# its own fault (wrong rule on the wire, ledger 2026-11-27), not work for close.  cons [flow.no_new] = {stage: [kind, ...]} overrides.
+NO_NEW_DEFAULTS = {"route": ["clearance"]}
+
+
+def no_new_kinds(cons, stage):
+    over = ((cons or {}).get("flow") or {}).get("no_new") or {}
+    return list((over[stage] if stage in over else NO_NEW_DEFAULTS.get(stage)) or [])
+
+
 def deferred_left(left, later_stages):
     """The rows of `left` (gap rows) when every one is owned by a stage in `later_stages`, else None (nothing is deferred:
     shorts, powers and any kind without an owner keep the gate closed)."""
