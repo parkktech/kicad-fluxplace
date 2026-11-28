@@ -521,6 +521,21 @@ def st_route(c, n, board):
     return res
 
 
+def _clip_layers(a, board):
+    """`--layers` defaults to the 6-layer stackup (F, In2, In3, B); a board that lacks one of them (a 4-layer F/In1/In2/B) gets copper on a
+    disabled layer when the router picks it (item_on_disabled_layer, dangling vias, 1 run in 3 in test_incplace). Keep only enabled layers."""
+    try:
+        import pcbnew
+        b = pcbnew.LoadBoard(board)
+        have = [b.GetLayerName(l) for l in b.GetEnabledLayers().CuStack()]
+    except Exception:                                    # noqa: BLE001 - not a readable board: the stage reports it
+        return
+    keep = [l for l in a.layers if l in have]
+    if keep and keep != list(a.layers):
+        print(f"pipeline: route layers {sorted(set(a.layers) - set(keep))} are not on this board; routing on {keep}", flush=True)
+        a.layers = keep
+
+
 def _st_route(c, n, board):
     """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
@@ -528,6 +543,7 @@ def _st_route(c, n, board):
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     from . import routerules as RR, routepar as RP, opengate as OG
     a = c.a
+    _clip_layers(a, board)
     col = _collision_report(c, c.dir(n, "route"), board)  # fast copper-collision gate: seconds, before any router hour
     if col["fail"] and not a.force:
         return {"verdict": "blocked", "board": board,
